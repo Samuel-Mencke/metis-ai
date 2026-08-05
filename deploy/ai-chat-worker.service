@@ -1,0 +1,17 @@
+[Unit]
+Description=AI Chat durable agent worker
+After=network.target
+
+[Service]
+Type=simple
+User=f1shy312
+WorkingDirectory=/home/f1shy312/ai-chat
+EnvironmentFile=/home/f1shy312/ai-chat/.env
+ExecStart=/home/f1shy312/.nvm/versions/node/v24.19.0/bin/node /home/f1shy312/ai-chat/node_modules/tsx/dist/cli.mjs worker.ts
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

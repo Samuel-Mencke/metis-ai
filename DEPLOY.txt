@@ -1,0 +1,52 @@
+f1shy312 AI Chat — Deploy notes
+================================
+
+URL: https://ai.f1shy312.com
+
+Chat password (header x-chat-password or login form):
+  SvotlGTy1F0guhlv5nGaUJhofOigEpb
+
+Set CURSOR_API_KEY (required for chat to work)
+----------------------------------------------
+1. Create/copy a key from https://cursor.com/dashboard/api (or Integrations)
+2. Edit /home/f1shy312/ai-chat/.env and set:
+     CURSOR_API_KEY=cursor_...
+3. Restart:
+     sudo systemctl restart ai-chat.service
+
+MCP gateway
+-----------
+- Router (local only): http://127.0.0.1:8798/all
+- Universal: http://127.0.0.1:8799
+- Bearer token file: /home/f1shy312/.mcp-gateway/token
+- Config: /home/f1shy312/mcp-gateway/.env
+- Services: mcp-universal.service, mcp-router.service
+
+Agent workspace
+---------------
+- CWD: /home/f1shy312/ai-workspace
+- MCP config: /home/f1shy312/ai-workspace/.cursor/mcp.json
+- Skills: /home/f1shy312/ai-workspace/.cursor/skills/
+- Rules: AGENTS.md
+
+Chat app
+--------
+- Code: /home/f1shy312/ai-chat
+- Env: /home/f1shy312/ai-chat/.env
+- Service: ai-chat.service (port 3100)
+- Nginx: /etc/nginx/sites-available/ai.f1shy312.com
+- TLS: Let's Encrypt via certbot (ai.f1shy312.com) — issued successfully
+
+Useful commands
+---------------
+  sudo systemctl status mcp-universal mcp-router ai-chat
+  sudo systemctl restart ai-chat
+  sudo systemctl restart mcp-universal mcp-router
+  cd /home/f1shy312/ai-chat && sudo -u f1shy312 bash -lc 'export NVM_DIR=$HOME/.nvm; . $NVM_DIR/nvm.sh; pnpm build' && sudo systemctl restart ai-chat
+  sudo nginx -t && sudo systemctl reload nginx
+
+Cloudflare
+----------
+DNS already worked for certbot. If the browser shows SSL issues via the orange cloud,
+prefer Full (strict) SSL mode pointing at this origin.
+
