@@ -12,28 +12,7 @@ the repository. Use the private deployment environment to provide:
   AGENT_CWD
 
 Build and run the application with the package manager configured for the
-deployment. The native installer generates
-`deploy/metis-ai-worker.service` for the target user, paths, and environment
-file; do not copy the template unchanged.
-
-One-line installers
--------------------
-
-Interactive Linux:
-
-  bash -c "$(curl -fsSL https://metis-ai.f1shy312.com/install/linux)"
-
-Interactive macOS:
-
-  bash -c "$(curl -fsSL https://metis-ai.f1shy312.com/install/macos)"
-
-Interactive Windows PowerShell:
-
-  irm https://metis-ai.f1shy312.com/install/windows | iex
-
-For AI and CI usage, always pass `--non-interactive` (or `-NonInteractive`
-on PowerShell) and provide all required values. See README.md for the complete
-argument reference and machine-readable `--dry-run --json` mode.
+deployment.
 
 MCP gateway
 -----------
@@ -54,4 +33,3 @@ Security checklist
 - Review shell, filesystem, Docker, systemd, and remote desktop tools before
   enabling them in a public deployment.
 - Optional and remote MCP servers are disabled by default.
-
