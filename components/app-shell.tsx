@@ -16,6 +16,11 @@ import { useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowUp,
   ArrowDown,
+  Activity,
+  Cpu,
+  Gauge,
+  MemoryStick,
+  Network,
   ArrowLeft,
   Archive,
   ArchiveRestore,
@@ -28,10 +33,12 @@ import {
   FileText,
   FileCode2,
   ExternalLink,
+  Fullscreen,
   Globe2,
   Image as ImageIcon,
   LoaderCircle,
   Menu,
+  Minimize2,
   MessageSquare,
   MoreHorizontal,
   Palette,
@@ -115,6 +122,22 @@ function formatCompletedAt(value: string) {
   return Number.isNaN(date.getTime())
     ? value
     : new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "short" }).format(date);
+}
+
+function formatMetricBytes(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let amount = Math.max(0, value);
+  let unit = 0;
+  while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit += 1; }
+  return `${amount.toFixed(amount >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function MetricSparkline({ values, color }: { values: number[]; color: string }) {
+  const safe = values.length ? values : [0];
+  const max = Math.max(1, ...safe);
+  const points = safe.map((value, index) => `${(index / Math.max(1, safe.length - 1)) * 100},${36 - (Math.max(0, value) / max) * 32}`).join(" ");
+  return <svg viewBox="0 0 100 36" preserveAspectRatio="none" className="h-12 w-full overflow-visible"><polyline points={points} fill="none" stroke={color} strokeWidth="2" vectorEffect="non-scaling-stroke" strokeLinecap="round" strokeLinejoin="round" /></svg>;
 }
 
 type AgentQuestion = {
@@ -390,7 +413,7 @@ type ChatSessionState = {
   terminalSessionId?: string;
   terminalTabs?: TerminalTab[];
   activeTerminalTabId?: string;
-  workspaceTab?: "canvas" | "plan" | "terminal" | "files" | "browser";
+  workspaceTab?: "canvas" | "plan" | "terminal" | "files" | "browser" | "monitor";
   activeWorkspaceId?: string | null;
   workspaceOpen?: boolean;
   workspaceWidth?: number;
@@ -403,6 +426,11 @@ type TerminalTab = {
   sessionId?: string;
 };
 
+function normalizeWorkDirectory(value?: string): string {
+  const cwd = value?.trim();
+  return cwd && cwd !== "workspace" ? cwd : clientConfig.defaultCwd;
+}
+
 function normalizeTerminalTabs(session: ChatSessionState): TerminalTab[] {
   const tabs = (session.terminalTabs || [])
     .filter((tab) => tab && typeof tab.id === "string" && typeof tab.cwd === "string")
@@ -410,14 +438,14 @@ function normalizeTerminalTabs(session: ChatSessionState): TerminalTab[] {
     .map((tab, index) => ({
       id: tab.id.slice(0, 200),
       title: tab.title?.trim().slice(0, 80) || `Terminal ${index + 1}`,
-      cwd: tab.cwd.trim() || clientConfig.defaultCwd,
+      cwd: normalizeWorkDirectory(tab.cwd),
       ...(tab.sessionId ? { sessionId: tab.sessionId.slice(0, 200) } : {}),
     }));
   if (tabs.length) return tabs;
   return [{
     id: "terminal-1",
     title: "Terminal 1",
-    cwd: session.terminalCwd || session.remoteCwd || clientConfig.defaultCwd,
+    cwd: normalizeWorkDirectory(session.terminalCwd || session.remoteCwd),
     ...(session.terminalSessionId ? { sessionId: session.terminalSessionId } : {}),
   }];
 }
@@ -616,6 +644,7 @@ type ChatSnapshot = {
 type ChatRuntime = {
   abortController: AbortController;
   assistantMessageId: string;
+  generation: string;
 };
 
 type ActiveDiff = { name: string; path?: string; detail?: string; diff?: ToolPart["diff"] };
@@ -628,6 +657,9 @@ type BrowserContext = {
   sessionKey: string;
   updatedAt: string;
 };
+type MonitorGpu = { id: string; name: string; utilizationPercent: number | null; memoryUsedBytes: number | null; memoryTotalBytes: number | null; temperatureC: number | null };
+type MonitorMetric = { timestamp: string; cpuPercent: number; ramUsedBytes: number; ramTotalBytes: number; load: number[]; networkRxBytesPerSecond: number; networkTxBytesPerSecond: number; gpus: MonitorGpu[] };
+type MonitorPayload = { current: MonitorMetric | null; history: MonitorMetric[] };
 
 type DiffLine = {
   text: string;
@@ -1106,7 +1138,8 @@ export default function AppShell() {
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [workspaceMounted, setWorkspaceMounted] = useState(false);
-  const [workspaceTab, setWorkspaceTab] = useState<"canvas" | "plan" | "terminal" | "files" | "browser">("canvas");
+  const [workspaceTab, setWorkspaceTab] = useState<"canvas" | "plan" | "terminal" | "files" | "browser" | "monitor">("canvas");
+  const [browserFullscreen, setBrowserFullscreen] = useState(false);
   const [remoteTerminalCwd, setRemoteTerminalCwd] = useState(clientConfig.defaultCwd);
   const [remoteFileCwd, setRemoteFileCwd] = useState(clientConfig.defaultCwd);
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
@@ -1117,6 +1150,18 @@ export default function AppShell() {
     { id: "browser-1", title: "New tab", url: "" },
   ]);
   const [activeBrowserTabId, setActiveBrowserTabId] = useState("browser-1");
+  const [browserScreenshot, setBrowserScreenshot] = useState("");
+  const [browserLoading, setBrowserLoading] = useState(false);
+  const [browserError, setBrowserError] = useState("");
+  const [browserViewport, setBrowserViewport] = useState({ width: 1280, height: 800 });
+  const [browserWidthInput, setBrowserWidthInput] = useState("1280");
+  const [browserHeightInput, setBrowserHeightInput] = useState("800");
+  const [monitorData, setMonitorData] = useState<MonitorPayload>({ current: null, history: [] });
+  const browserSocketRef = useRef<WebSocket | null>(null);
+  const browserStreamObjectUrlRef = useRef<string | null>(null);
+  const browserViewportRef = useRef<HTMLDivElement | null>(null);
+  const browserInputDirtyRef = useRef(false);
+  const browserNavigationVersionRef = useRef(0);
   const [workspaceWidth, setWorkspaceWidth] = useState(() => {
     if (typeof window === "undefined") return 520;
     const saved = Number(localStorage.getItem(WORKSPACE_WIDTH_STORAGE_KEY));
@@ -1129,6 +1174,7 @@ export default function AppShell() {
   const [activeSubagent, setActiveSubagent] = useState<ActiveSubagent | null>(null);
   const [cancellingSubagent, setCancellingSubagent] = useState(false);
   const [revertTarget, setRevertTarget] = useState<Msg | null>(null);
+  const [manualCleanupTools, setManualCleanupTools] = useState<string[]>([]);
   const [reverting, setReverting] = useState(false);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -1143,6 +1189,7 @@ export default function AppShell() {
   } | null>(null);
   const [referenceResults, setReferenceResults] = useState<ReferenceItem[]>([]);
   const [referenceIndex, setReferenceIndex] = useState(0);
+  const referenceAutocompleteDismissedRef = useRef(false);
   const [referenceText, setReferenceText] = useState("");
   const [selectionAction, setSelectionAction] = useState<{ text: string; x: number; y: number } | null>(null);
   const [composerHeight, setComposerHeight] = useState(0);
@@ -1179,6 +1226,10 @@ export default function AppShell() {
     const timer = window.setTimeout(() => setWorkspaceMounted(false), 180);
     return () => window.clearTimeout(timer);
   }, [workspaceOpen]);
+
+  useEffect(() => {
+    if (workspaceTab !== "browser") setBrowserFullscreen(false);
+  }, [workspaceTab]);
 
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1218,6 +1269,9 @@ export default function AppShell() {
   const serverSnapshotVersionRef = useRef<Map<string, string>>(new Map());
   const pendingFilesRef = useRef<PendingFile[]>([]);
   const notifiedQuestionRef = useRef<string | null>(null);
+  const pendingQuestionIdRef = useRef<string | null>(null);
+  const draftInputRef = useRef("");
+  const draftInputLoadedRef = useRef(false);
   const notifiedPlanRef = useRef<string | null>(null);
   const swipeRef = useRef<{ x: number; y: number; ignored: boolean } | null>(null);
   const chatLoadRequestRef = useRef(0);
@@ -1707,35 +1761,76 @@ export default function AppShell() {
     return () => window.removeEventListener("ai-chat:open-subagent", openSubagent);
   }, [subagentOutputs]);
 
-  function navigateBrowser(url: string) {
-    const nextUrl = url.trim();
-    let title = "New tab";
+  function sendBrowserStreamAction(action: string, extra: Record<string, unknown> = {}) {
+    const socket = browserSocketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    socket.send(JSON.stringify({ type: "action", action, tabId: activeBrowserTabId, ...extra }));
+    return true;
+  }
+
+  async function performBrowserAction(action: string, extra: Record<string, unknown> = {}) {
+    if (!activeChatId) return null;
+    const navigationVersion = browserNavigationVersionRef.current;
+    setBrowserLoading(true);
+    setBrowserError("");
     try {
-      if (nextUrl) title = new URL(nextUrl).hostname;
-    } catch {
-      title = nextUrl.slice(0, 24);
+      const response = await fetch("/api/browser", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chatId: activeChatId, action, tabId: activeBrowserTabId, ...extra }),
+      });
+      const data = await response.json() as { error?: string; screenshot?: string; url?: string; tabId?: string; tabs?: BrowserTab[]; viewport?: { width: number; height: number } };
+      if (!response.ok) throw new Error(data.error || "Browser action failed");
+      if (data.screenshot) setBrowserScreenshot(`data:image/png;base64,${data.screenshot}`);
+      if (data.tabs) setBrowserTabs(data.tabs);
+      if (data.tabId) setActiveBrowserTabId(data.tabId);
+      if (data.viewport) {
+        setBrowserViewport(data.viewport);
+        setBrowserWidthInput(String(data.viewport.width));
+        setBrowserHeightInput(String(data.viewport.height));
+      }
+      if (typeof data.url === "string") {
+        const syncedUrl = data.url === "about:blank" ? "" : data.url;
+        setBrowserUrl(syncedUrl);
+        if (action === "navigate") {
+          browserInputDirtyRef.current = false;
+          setBrowserInput(syncedUrl);
+        } else if (!browserInputDirtyRef.current && navigationVersion === browserNavigationVersionRef.current) {
+          setBrowserInput(syncedUrl);
+        }
+      }
+      return data;
+    } catch (error) {
+      setBrowserError(error instanceof Error ? error.message : "Browser action failed");
+      return null;
+    } finally {
+      setBrowserLoading(false);
     }
-    setBrowserUrl(nextUrl);
-    setBrowserInput(nextUrl);
-    setBrowserTabs((current) => current.map((tab) =>
-      tab.id === activeBrowserTabId
-        ? { ...tab, url: nextUrl, title }
-        : tab,
-    ));
+  }
+
+  function navigateBrowser(url: string) {
+    const rawUrl = url.trim();
+    if (!rawUrl) return;
+    const nextUrl = /^[a-z][a-z\d+.-]*:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+    browserNavigationVersionRef.current += 1;
+    void performBrowserAction("navigate", { url: nextUrl });
+  }
+
+  function resizeBrowser() {
+    const width = Math.max(320, Math.min(2560, Number(browserWidthInput) || 1280));
+    const height = Math.max(240, Math.min(1600, Number(browserHeightInput) || 800));
+    setBrowserWidthInput(String(width));
+    setBrowserHeightInput(String(height));
+    if (!sendBrowserStreamAction("resize", { width, height })) void performBrowserAction("resize", { width, height });
   }
 
   function openBrowserTab(url = "") {
-    const id = `browser-${Date.now()}`;
-    let title = "New tab";
-    try {
-      if (url) title = new URL(url).hostname;
-    } catch {
-      title = url.slice(0, 24);
-    }
-    setBrowserTabs((current) => [...current, { id, title, url }]);
-    setActiveBrowserTabId(id);
-    setBrowserUrl(url);
-    setBrowserInput(url);
+    browserInputDirtyRef.current = false;
+    void performBrowserAction("new_tab").then((result) => {
+      if (!result?.tabId) return;
+      if (url) void performBrowserAction("navigate", { url, tabId: result.tabId });
+      else void performBrowserAction("screenshot", { tabId: result.tabId });
+    });
   }
 
   function openBrowserUrlInNewTab() {
@@ -1743,6 +1838,107 @@ export default function AppShell() {
     if (!url) return;
     window.open(url, "_blank", "noopener,noreferrer");
   }
+
+  function clickBrowserScreenshot(event: ReactPointerEvent<HTMLImageElement>) {
+    if (!browserScreenshot) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * browserViewport.width;
+    const y = ((event.clientY - rect.top) / rect.height) * browserViewport.height;
+    browserViewportRef.current?.focus();
+    if (!sendBrowserStreamAction("click", { x, y })) void performBrowserAction("click", { x, y });
+  }
+
+  function pressBrowserKey(event: KeyboardEvent<HTMLDivElement>) {
+    const modifiers = [
+      event.ctrlKey ? "Control" : "",
+      event.altKey ? "Alt" : "",
+      event.shiftKey ? "Shift" : "",
+      event.metaKey ? "Meta" : "",
+    ].filter(Boolean);
+    const aliases: Record<string, string> = {
+      " ": "Space",
+      Esc: "Escape",
+      Del: "Delete",
+      Left: "ArrowLeft",
+      Right: "ArrowRight",
+      Up: "ArrowUp",
+      Down: "ArrowDown",
+    };
+    const key = aliases[event.key] || event.key;
+    if (!key || key === "Unidentified") return;
+    const press = [...modifiers, key].join("+");
+    event.preventDefault();
+    event.stopPropagation();
+    if (!sendBrowserStreamAction("press", { key: press })) void performBrowserAction("press", { key: press });
+  }
+
+  useEffect(() => {
+    if (workspaceTab !== "browser" || !activeChatId) return;
+    let reconnectTimer: number | null = null;
+    let disposed = false;
+    const connect = () => {
+      if (disposed) return;
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const query = new URLSearchParams({ chatId: activeChatId, tabId: activeBrowserTabId, fps: "10", quality: "70" });
+      const socket = new WebSocket(`${protocol}//${window.location.host}/api/browser/stream?${query}`);
+      browserSocketRef.current = socket;
+      socket.binaryType = "blob";
+      socket.onmessage = (event) => {
+        if (typeof event.data === "string") {
+          try {
+            const message = JSON.parse(event.data) as { type?: string; url?: string; tabId?: string; title?: string; viewport?: { width: number; height: number }; tabs?: BrowserTab[]; message?: string };
+            if (message.type === "meta") {
+              const url = message.url || "";
+              setBrowserUrl(url);
+              if (!browserInputDirtyRef.current) setBrowserInput(url);
+              if (message.tabId) setActiveBrowserTabId(message.tabId);
+              if (message.title && message.tabId) setBrowserTabs((current) => current.map((tab) => tab.id === message.tabId ? { ...tab, title: message.title!, url } : tab));
+              if (message.tabs) setBrowserTabs(message.tabs);
+              if (message.viewport) {
+                setBrowserViewport(message.viewport);
+                setBrowserWidthInput(String(message.viewport.width));
+                setBrowserHeightInput(String(message.viewport.height));
+              }
+            } else if (message.type === "error") setBrowserError(message.message || "Browser stream failed");
+          } catch { /* Ignore malformed stream metadata. */ }
+          return;
+        }
+        const blob = event.data instanceof Blob ? event.data : new Blob([event.data], { type: "image/jpeg" });
+        const nextUrl = URL.createObjectURL(blob);
+        if (browserStreamObjectUrlRef.current) URL.revokeObjectURL(browserStreamObjectUrlRef.current);
+        browserStreamObjectUrlRef.current = nextUrl;
+        setBrowserScreenshot(nextUrl);
+      };
+      socket.onclose = () => {
+        if (browserSocketRef.current === socket) browserSocketRef.current = null;
+        if (!disposed) reconnectTimer = window.setTimeout(connect, 1000);
+      };
+    };
+    connect();
+    return () => {
+      disposed = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (browserSocketRef.current) browserSocketRef.current.close();
+      browserSocketRef.current = null;
+      if (browserStreamObjectUrlRef.current) URL.revokeObjectURL(browserStreamObjectUrlRef.current);
+      browserStreamObjectUrlRef.current = null;
+    };
+  // The stream intentionally follows the active browser tab.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceTab, activeChatId, activeBrowserTabId]);
+
+  useEffect(() => {
+    if (workspaceTab !== "monitor") return;
+    let disposed = false;
+    const load = async () => {
+      const response = await fetch("/api/monitor", { cache: "no-store" });
+      if (!response.ok || disposed) return;
+      setMonitorData(await response.json() as MonitorPayload);
+    };
+    void load();
+    const timer = window.setInterval(() => void load(), 5000);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [workspaceTab]);
 
   function selectTerminalTab(tab: TerminalTab) {
     setActiveTerminalTabId(tab.id);
@@ -1882,6 +2078,7 @@ export default function AppShell() {
           chatListInitializedRef.current &&
           previousUpdatedAt &&
           chat.updatedAt > previousUpdatedAt &&
+          chat.badge === "blue" &&
           activeChatIdRef.current !== chat.id
         ) {
           markUnread(chat.id);
@@ -1968,6 +2165,7 @@ export default function AppShell() {
           modelParams?: ModelParamSelection[];
           subagentModelEnabled?: boolean;
           subagentModelId?: string;
+          draftInput?: string;
         };
       } | null) => {
         if (cancelled || !data?.settings) return;
@@ -1981,12 +2179,28 @@ export default function AppShell() {
         if (settings.subagentModelId && models.some((model) => model.id === settings.subagentModelId)) {
           setSubagentModelId(settings.subagentModelId);
         }
+        draftInputRef.current = settings.draftInput || "";
+        draftInputLoadedRef.current = true;
+        if (!activeChatIdRef.current) setInput(draftInputRef.current);
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
   }, [authed, models]);
+
+  useEffect(() => {
+    if (!authed || activeChatId || !draftInputLoadedRef.current) return;
+    draftInputRef.current = input;
+    const timer = window.setTimeout(() => {
+      void fetch("/api/preferences", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ draftInput: input }),
+      });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [activeChatId, authed, input]);
 
   function applyModelParams(next: ModelParamSelection[]) {
     setModelParams(next);
@@ -2065,7 +2279,7 @@ export default function AppShell() {
     setTerminalTabs(loadedTerminalTabs);
     setActiveTerminalTabId(loadedActiveTerminalTabId);
     setRemoteTerminalCwd(loadedTerminalTabs.find((tab) => tab.id === loadedActiveTerminalTabId)?.cwd || clientConfig.defaultCwd);
-    setRemoteFileCwd(session.fileCwd || session.remoteCwd || clientConfig.defaultCwd);
+    setRemoteFileCwd(normalizeWorkDirectory(session.fileCwd || session.remoteCwd));
     setInput(session.input || "");
     setReferenceMenu(null);
     setReferences([]);
@@ -2092,6 +2306,7 @@ export default function AppShell() {
           snap.pendingQuestion,
       ),
     );
+    pendingQuestionIdRef.current = snap.pendingQuestion?.questionId ?? null;
     setPendingQuestion(snap.pendingQuestion ?? null);
     setQuestionAnswers(snap.pendingQuestion?.questions.map(() => "") ?? []);
     setQuestionCustom(snap.pendingQuestion?.questions.map(() => "") ?? []);
@@ -2142,7 +2357,7 @@ export default function AppShell() {
       setBrowserUrl(activeTab?.url || "");
       setBrowserInput(activeTab?.url || "");
       setMessages([]);
-      setInput("");
+      setInput(draftInputRef.current);
       setReferenceMenu(null);
       setReferences([]);
       setMessageOffset(0);
@@ -2172,10 +2387,6 @@ export default function AppShell() {
         return true;
       }
 
-      const previousId = activeChatIdRef.current;
-      if (previousId && previousId !== id) {
-        runtimeRef.current.get(previousId)?.abortController.abort();
-      }
       persistActiveSnapshot();
       setLoadingChatId(id);
       setActiveChatId(id);
@@ -2277,7 +2488,7 @@ export default function AppShell() {
             setTerminalTabs(loadedTerminalTabs);
             setActiveTerminalTabId(loadedActiveTerminalTabId);
             setRemoteTerminalCwd(loadedTerminalTabs.find((tab) => tab.id === loadedActiveTerminalTabId)?.cwd || clientConfig.defaultCwd);
-            setRemoteFileCwd(session.fileCwd || session.remoteCwd || clientConfig.defaultCwd);
+            setRemoteFileCwd(normalizeWorkDirectory(session.fileCwd || session.remoteCwd));
             setPendingQuestion(next.pendingQuestion ?? null);
             setBusy(
               next.runStatus === "running" ||
@@ -2529,7 +2740,11 @@ export default function AppShell() {
             data.chat.pendingQuestion.questions.map(() => false),
           );
         }
-        setBusy(data.chat.runStatus === "running" || waitingForInput);
+        setBusy(
+          runtimeRef.current.has(activeChatId) ||
+            data.chat.runStatus === "running" ||
+            waitingForInput,
+        );
         if (data.chat.pendingQuestion?.questionId &&
             notifiedQuestionRef.current !== data.chat.pendingQuestion.questionId) {
           notifiedQuestionRef.current = data.chat.pendingQuestion.questionId;
@@ -2674,6 +2889,7 @@ export default function AppShell() {
       const modifier = event.ctrlKey || event.metaKey;
       const key = event.key.toLowerCase();
       const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-browser-viewport]")) return;
       const isEditable =
         target?.isContentEditable ||
         target?.tagName === "INPUT" ||
@@ -2699,8 +2915,7 @@ export default function AppShell() {
         setCommandPaletteOpen(true);
         return;
       }
-      if (modifier && !event.shiftKey && (key === "arrowup" || key === "arrowdown")) {
-        if (isEditable) return;
+      if (modifier && event.shiftKey && (key === "arrowup" || key === "arrowdown")) {
         event.preventDefault();
         const currentIndex = activeChatIdRef.current
           ? chats.findIndex((chat) => chat.id === activeChatIdRef.current)
@@ -2713,14 +2928,9 @@ export default function AppShell() {
         if (nextChat) void loadChat(nextChat.id);
         return;
       }
-      if (modifier && !event.shiftKey && /^[1-9]$/.test(key)) {
-        event.preventDefault();
-        const nextChat = chats[Number(key) - 1];
-        if (nextChat) void loadChat(nextChat.id);
-      }
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [authed, chats, loadChat, openDraft]);
 
   useEffect(() => {
@@ -3140,6 +3350,7 @@ export default function AppShell() {
       await loadChats();
       const conflicts = data.conflicts ?? [];
       const nonReversibleCount = data.nonReversible?.count ?? 0;
+      const nonReversibleNames = data.nonReversible?.names ?? [];
       const warningCount = data.warnings?.length ?? 0;
       if (conflicts.length || nonReversibleCount || warningCount) {
         const names = conflicts
@@ -3155,6 +3366,14 @@ export default function AppShell() {
           ]
             .filter(Boolean)
             .join(" · "),
+          nonReversibleNames.length
+            ? {
+                action: {
+                  label: "Details",
+                  onClick: () => setManualCleanupTools(nonReversibleNames),
+                },
+              }
+            : undefined,
         );
         if (options.successMessage) toast.success(options.successMessage);
       } else if (options.successMessage !== null) {
@@ -3358,9 +3577,6 @@ export default function AppShell() {
           current.filter((id) => id !== activeChatIdRef.current),
         );
       }
-      setQuestionAnswers([]);
-      setQuestionCustom([]);
-      setQuestionCustomActive([]);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Answer failed");
     } finally {
@@ -3526,6 +3742,7 @@ export default function AppShell() {
     const storedAttachmentsToSend = storedAttachmentsOverride ?? restoredAttachments;
     const isOverride = textOverride !== undefined;
     if (
+      (pendingQuestionIdRef.current && !isOverride) ||
       (!text && !filesToSend.length && !storedAttachmentsToSend.length) ||
       (busy && force === false && !isOverride)
     ) {
@@ -3543,6 +3760,12 @@ export default function AppShell() {
 
     if (!isOverride) {
       setInput("");
+      draftInputRef.current = "";
+      void fetch("/api/preferences", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ draftInput: "" }),
+      });
       setReferenceText("");
       setReferences([]);
       setPendingFiles([]);
@@ -3600,7 +3823,12 @@ export default function AppShell() {
     }
 
     const ac = new AbortController();
-    markChatRunning(chatId, { abortController: ac, assistantMessageId: asstId });
+    const generation = crypto.randomUUID();
+    markChatRunning(chatId, {
+      abortController: ac,
+      assistantMessageId: asstId,
+      generation,
+    });
 
     try {
       let attachmentsPayload:
@@ -3692,6 +3920,7 @@ export default function AppShell() {
           } catch {
             continue;
           }
+          if (runtimeRef.current.get(chatId)?.generation !== generation) continue;
 
           if (
             chatId !== activeChatIdRef.current ||
@@ -3956,6 +4185,10 @@ export default function AppShell() {
               })
               .filter((question): question is AgentQuestion => Boolean(question));
             if (questions.length > 0) {
+              const isSameQuestion = pendingQuestionIdRef.current === payload.questionId;
+              if (activeChatIdRef.current === chatId) {
+                pendingQuestionIdRef.current = payload.questionId;
+              }
               setAttentionChatIds((current) => current.includes(chatId) ? current : [...current, chatId]);
               notifiedQuestionRef.current = payload.questionId;
               if (activeChatIdRef.current === chatId) {
@@ -3963,9 +4196,11 @@ export default function AppShell() {
                   questionId: payload.questionId,
                   questions,
                 });
-                setQuestionAnswers(questions.map(() => ""));
-                setQuestionCustom(questions.map(() => ""));
-                setQuestionCustomActive(questions.map(() => false));
+                if (!isSameQuestion) {
+                  setQuestionAnswers(questions.map(() => ""));
+                  setQuestionCustom(questions.map(() => ""));
+                  setQuestionCustomActive(questions.map(() => false));
+                }
                 setBusy(true);
               }
               notifyAttention(
@@ -4071,6 +4306,7 @@ export default function AppShell() {
             }
             notifyUser("Agent finished", "Your response is ready.");
             if (activeChatIdRef.current === chatId) {
+              pendingQuestionIdRef.current = null;
               setPendingQuestion(null);
               setAttentionChatIds((current) => current.filter((id) => id !== chatId));
               setQuestionAnswers([]);
@@ -4134,8 +4370,10 @@ export default function AppShell() {
           };
         }),
       );
-      clearChatRunning(chatId);
-      if (activeChatIdRef.current === chatId) {
+      if (runtimeRef.current.get(chatId)?.generation === generation) {
+        clearChatRunning(chatId);
+      }
+      if (activeChatIdRef.current === chatId && !pendingQuestionIdRef.current) {
         setBusy(false);
         setLiveStatus("");
       }
@@ -4182,6 +4420,11 @@ export default function AppShell() {
 
   function handleComposerInputChange(value: string, cursorPosition: number) {
     setInput(value);
+    if (referenceAutocompleteDismissedRef.current) {
+      referenceAutocompleteDismissedRef.current = false;
+      setReferenceMenu(null);
+      return;
+    }
     const beforeCursor = value.slice(0, cursorPosition);
     const match = beforeCursor.match(/(?:^|\s)@([^\n]*)$/);
     if (!match) {
@@ -4227,11 +4470,43 @@ export default function AppShell() {
         ? current
         : [...current, resolvedReference]
     ));
-    setInput((current) =>
-      `${current.slice(0, referenceMenu.start)}@${resolvedReference.label}${current.slice(referenceMenu.end)}`,
-    );
+    const start = referenceMenu.start;
+    const end = referenceMenu.end;
+    const completedTag = `@${resolvedReference.label}`;
+    let caretPosition = start + completedTag.length;
+    setInput((current) => {
+      const next = `${current.slice(0, start)}${completedTag}${current.slice(end)}`;
+      caretPosition = start + completedTag.length;
+      return next;
+    });
+    referenceAutocompleteDismissedRef.current = false;
     setReferenceMenu(null);
-    window.setTimeout(() => textareaRef.current?.focus(), 0);
+    window.requestAnimationFrame(() => {
+      const element = textareaRef.current;
+      if (!element) return;
+      element.focus();
+      const selection = window.getSelection();
+      if (!selection) return;
+      const range = document.createRange();
+      let remaining = caretPosition;
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      let node: Node | null;
+      while ((node = walker.nextNode())) {
+        const length = node.textContent?.length || 0;
+        if (remaining <= length) {
+          range.setStart(node, remaining);
+          range.collapse(true);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          return;
+        }
+        remaining -= length;
+      }
+      range.selectNodeContents(element);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
   }
 
   function removeReference(reference: ReferenceItem) {
@@ -4597,6 +4872,7 @@ export default function AppShell() {
               if (referenceMenu && e.key === "Escape") {
                 e.preventDefault();
                 setReferenceMenu(null);
+                referenceAutocompleteDismissedRef.current = true;
                 return;
               }
               if (e.key === "Enter" && !e.shiftKey) {
@@ -4799,7 +5075,7 @@ export default function AppShell() {
                       aria-label="Needs your attention"
                       title="Needs your attention"
                     />
-                  ) : activeChatId !== c.id && (c.badge === "blue" || unreadChatIds.includes(c.id)) ? (
+                  ) : activeChatId !== c.id && unreadChatIds.includes(c.id) ? (
                     <span
                       className="size-2 shrink-0 rounded-full bg-blue-500"
                       aria-label="Unread response"
@@ -5608,28 +5884,34 @@ export default function AppShell() {
         </div>
       </div>
 
+      {workspaceMounted && browserFullscreen && workspaceTab === "browser" ? (
+        <div className="fixed inset-0 z-40 bg-background/55 backdrop-blur-[2px]" aria-hidden="true" />
+      ) : null}
       {workspaceMounted ? (
         <aside
           className={cn(
             "relative flex min-h-0 w-full shrink-0 flex-col overflow-hidden border-l border-border/40 bg-background max-md:absolute max-md:inset-0 max-md:z-30 max-md:!w-full",
+            browserFullscreen && workspaceTab === "browser" && "fixed inset-[1%] z-50 !w-auto rounded-2xl border border-border shadow-2xl ring-1 ring-foreground/10",
             workspaceOpen ? "workspace-panel-enter" : "workspace-panel-exit",
           )}
-          style={{ width: `min(100%, ${workspaceWidth}px)` }}
+          style={browserFullscreen && workspaceTab === "browser" ? undefined : { width: `min(100%, ${workspaceWidth}px)` }}
         >
-          <WorkspaceResizeHandle width={workspaceWidth} onWidthChange={setWorkspaceWidth} />
+          {browserFullscreen && workspaceTab === "browser" ? null : (
+            <WorkspaceResizeHandle width={workspaceWidth} onWidthChange={setWorkspaceWidth} />
+          )}
           <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/40 px-4 py-2.5">
             <div className="min-w-0">
               <h1 className="flex items-center gap-2 text-sm font-medium">
-                {workspaceTab === "browser" ? <Globe2 className="size-4 shrink-0 text-cyan-400" /> : workspaceTab === "terminal" ? <Terminal className="size-4 shrink-0 text-orange-400" /> : workspaceTab === "files" ? <FileCode2 className="size-4 shrink-0 text-emerald-400" /> : activeWorkspace ? <WorkspaceIcon type={activeWorkspace.type} className="size-4 shrink-0" /> : null}
-                <span className="truncate">{workspaceTab === "browser" ? "Browser" : workspaceTab === "terminal" ? "Terminal" : workspaceTab === "files" ? "Files" : activeWorkspace?.name || "Workspace"}</span>
+                {workspaceTab === "browser" ? <Globe2 className="size-4 shrink-0 text-cyan-400" /> : workspaceTab === "monitor" ? <Activity className="size-4 shrink-0 text-violet-400" /> : workspaceTab === "terminal" ? <Terminal className="size-4 shrink-0 text-orange-400" /> : workspaceTab === "files" ? <FileCode2 className="size-4 shrink-0 text-emerald-400" /> : activeWorkspace ? <WorkspaceIcon type={activeWorkspace.type} className="size-4 shrink-0" /> : null}
+                <span className="truncate">{workspaceTab === "browser" ? "Browser" : workspaceTab === "monitor" ? "Monitor" : workspaceTab === "terminal" ? "Terminal" : workspaceTab === "files" ? "Files" : activeWorkspace?.name || "Workspace"}</span>
               </h1>
             </div>
-            <Button type="button" variant="ghost" size="icon-sm" aria-label="Close side panel" onClick={() => setWorkspaceOpen(false)}>
+            <Button type="button" variant="ghost" size="icon-sm" aria-label="Close side panel" onClick={() => { setBrowserFullscreen(false); setWorkspaceOpen(false); }}>
               <X className="size-4" />
             </Button>
           </div>
           <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-border/30 px-2 py-1.5">
-            {(["canvas", "plan", "files", "terminal", "browser"] as const).map((tab) => (
+            {(["canvas", "plan", "files", "terminal", "browser", "monitor"] as const).map((tab) => (
               <Button
                 key={tab}
                 type="button"
@@ -5644,7 +5926,7 @@ export default function AppShell() {
                 }}
                 className="h-7 shrink-0 capitalize"
               >
-                {tab === "plan" ? "Plans" : tab === "files" ? "Files" : tab === "terminal" ? "Terminal" : tab}
+                {tab === "plan" ? "Plans" : tab === "files" ? "Files" : tab === "terminal" ? "Terminal" : tab === "monitor" ? "Monitor" : tab}
               </Button>
             ))}
           </div>
@@ -5660,9 +5942,11 @@ export default function AppShell() {
                       variant={tab.id === activeBrowserTabId ? "secondary" : "ghost"}
                       className="h-7 max-w-36 shrink-0 truncate text-xs"
                       onClick={() => {
+                        browserInputDirtyRef.current = false;
                         setActiveBrowserTabId(tab.id);
                         setBrowserUrl(tab.url);
                         setBrowserInput(tab.url);
+                        void performBrowserAction("select_tab", { tabId: tab.id });
                       }}
                     >
                       {tab.title}
@@ -5676,14 +5960,83 @@ export default function AppShell() {
                   event.preventDefault();
                   navigateBrowser(browserInput);
                 }}>
-                  <Input value={browserInput} onChange={(event) => setBrowserInput(event.target.value)} placeholder="https://example.com or local URL" className="h-8 text-xs" />
+                  <Input value={browserInput} onChange={(event) => { browserInputDirtyRef.current = true; setBrowserInput(event.target.value); }} placeholder="https://example.com or local URL" className="h-8 text-xs" />
                   <Button type="submit" size="icon-sm" variant="secondary" aria-label="Open URL" title="Open in embedded browser"><Globe2 className="size-3.5" /></Button>
                   <Button type="button" size="icon-sm" variant="ghost" disabled={!browserUrl.trim() && !browserInput.trim()} aria-label="Open in new browser tab" title="Open in new browser tab" onClick={openBrowserUrlInNewTab}>
                     <ExternalLink className="size-3.5" />
                   </Button>
                 </form>
-                {browserUrl ? <iframe src={browserUrl} title="Embedded browser" className="min-h-0 flex-1 rounded-md border border-border/40 bg-white" /> : <div className="flex flex-1 items-center justify-center text-center text-xs text-muted-foreground">Enter a public or local URL to open it here.</div>}
+                <form className="flex shrink-0 items-center gap-1" onSubmit={(event) => { event.preventDefault(); resizeBrowser(); }}>
+                  <span className="text-[10px] text-muted-foreground">Viewport</span>
+                  <Input value={browserWidthInput} onChange={(event) => setBrowserWidthInput(event.target.value)} aria-label="Browser width" className="h-7 w-16 px-2 text-[11px]" inputMode="numeric" />
+                  <span className="text-[10px] text-muted-foreground">×</span>
+                  <Input value={browserHeightInput} onChange={(event) => setBrowserHeightInput(event.target.value)} aria-label="Browser height" className="h-7 w-16 px-2 text-[11px]" inputMode="numeric" />
+                  <Button type="submit" size="xs" variant="secondary" className="h-7">Set</Button>
+                </form>
+                <div className="flex shrink-0 items-center gap-1">
+                  <Button type="button" size="icon-xs" variant="ghost" aria-label="Back" title="Back" onClick={() => void performBrowserAction("back")}><ArrowLeft className="size-3.5" /></Button>
+                  <Button type="button" size="icon-xs" variant="ghost" aria-label="Reload" title="Reload" onClick={() => void performBrowserAction("reload")}><RotateCcw className="size-3.5" /></Button>
+                  <Button type="button" size="icon-xs" variant="ghost" aria-label={browserFullscreen ? "Exit browser fullscreen" : "Open browser fullscreen"} title={browserFullscreen ? "Exit browser fullscreen" : "Open browser fullscreen"} onClick={() => setBrowserFullscreen((current) => !current)}>
+                    {browserFullscreen ? <Minimize2 className="size-3.5" /> : <Fullscreen className="size-3.5" />}
+                  </Button>
+                  {browserLoading ? <LoaderCircle className="ml-1 size-3.5 animate-spin text-muted-foreground" /> : null}
+                  <span className="flex shrink-0 items-center gap-1 text-[10px] text-emerald-400"><span className="size-1.5 rounded-full bg-emerald-400" />Live</span>
+                  <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">{browserUrl || "Server browser ready"}</span>
+                </div>
+                <div
+                  ref={browserViewportRef}
+                  tabIndex={0}
+                  role="application"
+                  aria-label="Embedded browser viewport. Click the page, then type or use keyboard shortcuts."
+                  data-browser-viewport
+                  className="min-h-0 flex-1 overflow-auto rounded-md border border-border/40 bg-zinc-950 outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                  onKeyDown={pressBrowserKey}
+                  onWheel={(event) => {
+                    event.preventDefault();
+                    if (!sendBrowserStreamAction("scroll", { deltaY: event.deltaY })) void performBrowserAction("scroll", { deltaY: event.deltaY });
+                  }}
+                >
+                  {browserScreenshot ? (
+                    <img src={browserScreenshot} alt="Server browser page" className="block w-full cursor-crosshair" onClick={clickBrowserScreenshot} />
+                  ) : (
+                    <div className="flex h-full min-h-48 items-center justify-center px-6 text-center text-xs text-muted-foreground">Enter a URL to open it in the server browser. The page is rendered on the server, so localhost links refer to the server.</div>
+                  )}
+                </div>
+                {browserError ? <div className="shrink-0 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1.5 text-xs text-destructive">{browserError}</div> : null}
               </>
+            ) : workspaceTab === "monitor" ? (
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+                {monitorData.current ? (
+                  <>
+                    <div className="grid grid-cols-2 gap-2">
+                      {[
+                        { label: "CPU", value: `${monitorData.current.cpuPercent.toFixed(1)}%`, icon: Cpu, color: "text-cyan-400", values: monitorData.history.map((item) => item.cpuPercent) },
+                        { label: "RAM", value: `${formatMetricBytes(monitorData.current.ramUsedBytes)} / ${formatMetricBytes(monitorData.current.ramTotalBytes)}`, icon: MemoryStick, color: "text-violet-400", values: monitorData.history.map((item) => item.ramTotalBytes ? (item.ramUsedBytes / item.ramTotalBytes) * 100 : 0) },
+                        { label: "Load", value: monitorData.current.load.map((item) => item.toFixed(2)).join(" / "), icon: Gauge, color: "text-amber-400", values: monitorData.history.map((item) => item.load[0] || 0) },
+                        { label: "Network", value: `↓ ${formatMetricBytes(monitorData.current.networkRxBytesPerSecond)}/s · ↑ ${formatMetricBytes(monitorData.current.networkTxBytesPerSecond)}/s`, icon: Network, color: "text-emerald-400", values: monitorData.history.map((item) => item.networkRxBytesPerSecond + item.networkTxBytesPerSecond) },
+                      ].map((card) => (
+                        <div key={card.label} className="overflow-hidden rounded-lg border border-border/40 bg-card/60 p-3">
+                          <div className="flex items-center justify-between gap-2"><span className="flex items-center gap-1.5 text-[11px] text-muted-foreground"><card.icon className={`size-3.5 ${card.color}`} />{card.label}</span><span className="text-xs font-medium">{card.value}</span></div>
+                          <div className="mt-2 opacity-80"><MetricSparkline values={card.values} color="currentColor" /></div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="rounded-lg border border-border/40 bg-card/40 p-3">
+                      <div className="mb-2 flex items-center justify-between"><span className="flex items-center gap-2 text-xs font-medium"><Activity className="size-3.5 text-violet-400" />Last 5 minutes</span><span className="text-[10px] text-muted-foreground">{monitorData.history.length} samples · 5 s</span></div>
+                      <div className="grid grid-cols-2 gap-2 text-[10px] text-muted-foreground"><span>CPU history</span><span>RAM usage history</span><MetricSparkline values={monitorData.history.map((item) => item.cpuPercent)} color="#22d3ee" /><MetricSparkline values={monitorData.history.map((item) => item.ramTotalBytes ? (item.ramUsedBytes / item.ramTotalBytes) * 100 : 0)} color="#a78bfa" /></div>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between"><span className="text-xs font-medium">GPUs</span><span className="text-[10px] text-muted-foreground">{monitorData.current.gpus.length ? `${monitorData.current.gpus.length} detected` : "No GPU telemetry detected"}</span></div>
+                      {monitorData.current.gpus.length ? monitorData.current.gpus.map((gpu) => (
+                        <div key={gpu.id} className="rounded-lg border border-border/40 bg-card/40 p-3">
+                          <div className="flex items-center justify-between gap-2"><span className="truncate text-xs font-medium">{gpu.name}</span><span className="text-xs text-muted-foreground">{gpu.utilizationPercent === null ? "—" : `${gpu.utilizationPercent.toFixed(0)}%`}</span></div>
+                          <div className="mt-1 flex justify-between text-[10px] text-muted-foreground"><span>Memory {formatMetricBytes(gpu.memoryUsedBytes)} / {formatMetricBytes(gpu.memoryTotalBytes)}</span><span>{gpu.temperatureC === null ? "—" : `${gpu.temperatureC.toFixed(0)}°C`}</span></div>
+                        </div>
+                      )) : <div className="rounded-lg border border-dashed border-border/50 p-3 text-xs text-muted-foreground">GPU data is unavailable on this server.</div>}
+                    </div>
+                  </>
+                ) : <div className="flex min-h-48 items-center justify-center text-xs text-muted-foreground"><LoaderCircle className="mr-2 size-4 animate-spin" />Collecting server metrics…</div>}
+              </div>
             ) : workspaceTab === "terminal" ? (
               <>
                 <div className="flex shrink-0 items-center gap-1 overflow-x-auto">
@@ -6038,6 +6391,32 @@ export default function AppShell() {
       </Dialog>
 
       <Dialog
+        open={manualCleanupTools.length > 0}
+        onOpenChange={(open) => !open && setManualCleanupTools([])}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Tool calls needing manual cleanup</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            These external actions could not be reverted automatically:
+          </p>
+          <ul className="flex max-h-64 flex-col gap-2 overflow-y-auto rounded-lg border border-border/60 bg-muted/20 p-3 text-sm">
+            {manualCleanupTools.map((toolName, index) => (
+              <li key={`${toolName}-${index}`} className="break-words font-mono text-xs">
+                {toolName}
+              </li>
+            ))}
+          </ul>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setManualCleanupTools([])}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
         open={Boolean(revertTarget)}
         onOpenChange={(open) => !open && !reverting && setRevertTarget(null)}
       >
@@ -6046,10 +6425,11 @@ export default function AppShell() {
             <DialogTitle>Revert this message and open it for editing?</DialogTitle>
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
-            File edits with a known diff are reverted. Shell commands and other
-            external actions cannot always be undone and may require manual
-            cleanup. Everything after the selected user message will be removed
-            from this chat, then the message will open for editing. You can edit
+            File changes with captured snapshots are reverted, including writes and
+            deletions. Shell commands and other external actions cannot always be
+            undone and may require manual cleanup. Everything after the selected user
+            message will be removed from this chat, then the message will open for
+            editing. You can edit
             it and resend it as a new request.
           </p>
           <DialogFooter>

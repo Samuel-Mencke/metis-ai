@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { Agent } from "@cursor/sdk";
 import {
   appendMessage,
@@ -11,10 +12,15 @@ import {
   type WorkspaceItem,
 } from "@/lib/db-store";
 import { getAgentCwd, getMcpServers } from "@/lib/mcp";
+import { resolveAgentPath } from "@/lib/revert";
 import { appendRunEvent, enqueueJob, getJob, touchJob, updateJob } from "@/lib/db-jobs";
 import { isModelAllowed } from "@/lib/model-access";
 import { buildAttachmentPrompt } from "@/lib/uploads";
 import type { AgentJob } from "@/lib/jobs";
+
+const AGENT_INIT_TIMEOUT_MS = 90_000;
+const AGENT_INACTIVITY_TIMEOUT_MS = 5 * 60_000;
+const AGENT_WAIT_TIMEOUT_MS = 90_000;
 
 function classifyTool(name: string): ToolPart["kind"] {
   const value = name.toLowerCase();
@@ -53,6 +59,70 @@ function asText(value: unknown): string {
     return asText(object.text ?? object.content ?? object.message);
   }
   return value == null ? "" : String(value);
+}
+
+function readFileSnapshot(rawPath: string, agentCwd: string): string | undefined {
+  const filePath = resolveAgentPath(rawPath, agentCwd);
+  if (!filePath) return undefined;
+  try {
+    return readFileSync(filePath, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+function isDeleteTool(name: string) {
+  return /(^|[._:/-])(delete|remove|unlink)([._:/-]|$)/i.test(name);
+}
+
+function extractEditMetadata(
+  name: string,
+  args: unknown,
+  agentCwd: string,
+  previousDiff?: ToolPart["diff"],
+  captureAfter = true,
+): Pick<ToolPart, "path" | "diff"> {
+  if (classifyTool(name) !== "edit") return {};
+  const input = asRecord(args);
+  const rawPath = [input.path, input.filePath, input.filename]
+    .find((value): value is string => typeof value === "string" && value.trim().length > 0);
+  if (!rawPath) return {};
+
+  const metadata: Pick<ToolPart, "path" | "diff"> = { path: rawPath };
+  const filePath = resolveAgentPath(rawPath, agentCwd);
+  if (!filePath) return metadata;
+  const before = previousDiff?.before ?? readFileSnapshot(rawPath, agentCwd);
+  if (!captureAfter) return { path: rawPath, diff: { before } };
+  if (isDeleteTool(name)) {
+    return { path: rawPath, diff: { before, after: undefined } };
+  }
+
+  const edits = Array.isArray(input.edits)
+    ? input.edits
+        .map(asRecord)
+        .filter((edit) => typeof edit.oldText === "string" && typeof edit.newText === "string")
+    : [];
+  let after: string | undefined;
+  try {
+    after = readFileSync(filePath, "utf8");
+  } catch {
+    after = typeof input.content === "string" ? input.content : undefined;
+  }
+  if (typeof input.content === "string") after = input.content;
+
+  if (edits.length && typeof after === "string") {
+    let reconstructedBefore = after;
+    for (let index = edits.length - 1; index >= 0; index -= 1) {
+      const edit = edits[index];
+      const newText = edit.newText as string;
+      const oldText = edit.oldText as string;
+      const position = reconstructedBefore.indexOf(newText);
+      if (position < 0) break;
+      reconstructedBefore = `${reconstructedBefore.slice(0, position)}${oldText}${reconstructedBefore.slice(position + newText.length)}`;
+    }
+    return { path: rawPath, diff: { before: previousDiff?.before ?? reconstructedBefore, after } };
+  }
+  return { path: rawPath, diff: { before, after } };
 }
 
 function extractSubagent(
@@ -237,6 +307,18 @@ function extractSuggestions(value: string) {
   };
 }
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 export async function runQueuedJob(job: AgentJob) {
   const chat = getChat(job.chatId, job.userId);
   if (!chat) {
@@ -259,12 +341,17 @@ export async function runQueuedJob(job: AgentJob) {
     const result = appendRunEvent(job.id, job.chatId, job.userId, event, data);
     const current = getChat(job.chatId, job.userId);
     const needsAttention = event === "question" || event === "workspace" || event === "canvas";
+    const hasAssistantResponse = Boolean(
+      current?.messages.some(
+        (message) => message.role === "assistant" && message.content.trim(),
+      ),
+    );
     updateChat(
       job.chatId,
       {
         badge: needsAttention || current?.badge === "red"
           ? "red"
-          : event === "done"
+          : event === "done" && hasAssistantResponse
             ? "blue"
             : null,
       },
@@ -363,20 +450,20 @@ export async function runQueuedJob(job: AgentJob) {
       ...(modelParams?.length ? { params: modelParams } : {}),
     };
     agent = job.agentId || chat.agentId
-      ? await Agent.resume(job.agentId || chat.agentId!, {
+      ? await withTimeout(Agent.resume(job.agentId || chat.agentId!, {
           apiKey,
           model,
           local: { cwd: getAgentCwd(), settingSources: ["project"] },
           mcpServers: getMcpServers(mcpContext),
           ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
-        })
-      : await Agent.create({
+        }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be resumed within 90 seconds.")
+      : await withTimeout(Agent.create({
           apiKey,
           model,
           local: { cwd: getAgentCwd(), settingSources: ["project"] },
           mcpServers: getMcpServers(mcpContext),
           ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
-        });
+        }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be created within 90 seconds.");
     const prompt = [
       `Memories:\n${listMemories(job.userId).map((memory) => `- ${memory.content}`).join("\n") || "(none yet)"}`,
       `Existing workspaces:\n${chat.workspaces?.map((item) => `[${item.type}] ${item.name} (link: workspace://${item.type}/${item.id})\n${item.content}`).join("\n\n") || "(none)"}`,
@@ -398,27 +485,53 @@ export async function runQueuedJob(job: AgentJob) {
       job.referenceText ? `Referenced plan:\n${job.referenceText}` : "",
     ].filter(Boolean).join("\n\n");
     let receivedTextDelta = false;
-    const run = await agent.send(prompt, {
-      mcpServers: getMcpServers(mcpContext),
-      onDelta: ({ update }) => {
-        if (update.type !== "text-delta") return;
-        const delta = String((update as { text?: string }).text || "");
-        if (!delta) return;
-        receivedTextDelta = true;
-        text += delta;
-        checkpoint();
-        emit("text", { text: delta });
-      },
-    });
     let cancellationRequested = false;
+    let activeRun: { cancel: () => Promise<unknown> } | null = null;
+    let run: Awaited<ReturnType<typeof agent.send>>;
+    let sendTimeout: ReturnType<typeof setTimeout> | undefined;
+    let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+    let inactivityTimedOut = false;
+    const resetInactivityTimer = () => {
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(() => {
+        inactivityTimedOut = true;
+        void activeRun?.cancel().catch(() => undefined);
+      }, AGENT_INACTIVITY_TIMEOUT_MS);
+    };
     const cancellationWatcher = setInterval(() => {
       if (getJob(job.id)?.status === "cancelled") {
         cancellationRequested = true;
-        void run.cancel().catch(() => undefined);
+        void activeRun?.cancel().catch(() => undefined);
       }
     }, 250);
     try {
+      run = await Promise.race([
+        agent.send(prompt, {
+          mcpServers: getMcpServers(mcpContext),
+          onDelta: ({ update }) => {
+            if (cancellationRequested || update.type !== "text-delta") return;
+            resetInactivityTimer();
+            const delta = String((update as { text?: string }).text || "");
+            if (!delta) return;
+            receivedTextDelta = true;
+            text += delta;
+            checkpoint();
+            emit("text", { text: delta });
+          },
+        }),
+        new Promise<never>((_, reject) => {
+          sendTimeout = setTimeout(
+            () => reject(new Error("The agent did not start responding within 90 seconds.")),
+            90_000,
+          );
+        }),
+      ]).finally(() => {
+        if (sendTimeout) clearTimeout(sendTimeout);
+      });
+      activeRun = run;
+      resetInactivityTimer();
       for await (const event of run.stream()) {
+        resetInactivityTimer();
         if (getJob(job.id)?.status === "cancelled") {
           cancellationRequested = true;
           await run.cancel().catch(() => undefined);
@@ -436,12 +549,32 @@ export async function runQueuedJob(job: AgentJob) {
         const toolStatus = toolEvent.status || "running";
         const subagent = extractSubagent(toolName, toolEvent.args, toolEvent.result);
         const existingTool = tools.find((tool) => tool.id === toolId);
+        let editArgs = toolEvent.args;
+        if (editArgs === undefined && existingTool?.input) {
+          try {
+            editArgs = JSON.parse(existingTool.input);
+          } catch {
+            editArgs = undefined;
+          }
+        }
+        const editMetadata =
+          toolStatus === "running" || isFinishedToolStatus(toolStatus)
+            ? extractEditMetadata(
+                toolName,
+                editArgs,
+                getAgentCwd(),
+                existingTool?.diff,
+                isFinishedToolStatus(toolStatus),
+              )
+            : {};
         const nextTool: ToolPart = {
           id: toolId,
           name: toolName,
           status: toolStatus,
           kind: classifyTool(toolName),
-          ...(toolEvent.args !== undefined ? { input: JSON.stringify(toolEvent.args) } : {}),
+          ...(editMetadata.path ? { path: editMetadata.path } : {}),
+          ...(editMetadata.diff ? { diff: editMetadata.diff } : {}),
+          ...(editArgs !== undefined ? { input: JSON.stringify(editArgs) } : {}),
           ...(toolEvent.result !== undefined ? { result: JSON.stringify(toolEvent.result) } : {}),
           ...(subagent ? { subagent } : {}),
         };
@@ -488,6 +621,8 @@ export async function runQueuedJob(job: AgentJob) {
           name: toolName,
           status: toolStatus,
           kind: nextTool.kind,
+          ...(nextTool.path ? { path: nextTool.path } : {}),
+          ...(nextTool.diff ? { diff: nextTool.diff } : {}),
           ...(nextTool.input ? { input: nextTool.input } : {}),
           ...(nextTool.result ? { result: nextTool.result } : {}),
           ...(nextTool.subagent ? { subagent: nextTool.subagent } : {}),
@@ -507,8 +642,16 @@ export async function runQueuedJob(job: AgentJob) {
       }
     } finally {
       clearInterval(cancellationWatcher);
+      if (inactivityTimer) clearTimeout(inactivityTimer);
     }
-    const result = await run.wait();
+    if (inactivityTimedOut) {
+      throw new Error("The agent stopped producing progress for 5 minutes.");
+    }
+    const result = await withTimeout(
+      run.wait(),
+      AGENT_WAIT_TIMEOUT_MS,
+      "The agent did not finish within 90 seconds after its stream ended.",
+    );
     const wasCancelled =
       cancellationRequested ||
       getJob(job.id)?.status === "cancelled" ||
@@ -553,6 +696,11 @@ export async function runQueuedJob(job: AgentJob) {
     }
     checkpoint();
     if (!text && result.result) text = String(result.result);
+    if (!text) {
+      text =
+        result.error?.message ||
+        "The agent completed without returning a textual response.";
+    }
     if (text) {
       const chatBlocks = [...text.matchAll(/```chat(?:\s+title=(?:"([^"]+)"|'([^']+)'|([^\s]+)))?\s*\n([\s\S]*?)```/gi)];
       for (const block of chatBlocks) {

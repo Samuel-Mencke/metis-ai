@@ -1,5 +1,5 @@
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
-import { enqueueJob } from "@/lib/db-jobs";
+import { enqueueJob, getActiveJob } from "@/lib/db-jobs";
 import { appendMessage, getChat, titleFromMessage, updateChat } from "@/lib/db-store";
 import { isModelAllowed } from "@/lib/model-access";
 import {
@@ -72,6 +72,18 @@ export async function POST(req: Request) {
   }
   const chat = getChat(chatId, ownerId);
   if (!chat) return Response.json({ error: "Chat not found" }, { status: 404 });
+  if (getActiveJob(chatId, ownerId)) {
+    return Response.json(
+      { error: "This chat already has an active run. Wait for it to finish or cancel it first." },
+      { status: 409 },
+    );
+  }
+  if (chat.pendingQuestion || chat.runStatus === "waiting_input") {
+    return Response.json(
+      { error: "Please answer the agent's question before starting another run." },
+      { status: 409 },
+    );
+  }
 
   const storedAttachments = Array.isArray(body.storedAttachments)
     ? body.storedAttachments
@@ -107,20 +119,31 @@ export async function POST(req: Request) {
   if (chat.title === "New chat" || !chat.title.trim()) {
     updateChat(chatId, { title: titleFromMessage(message || `Attached ${stored.length} files`) }, ownerId);
   }
-  const job = enqueueJob({
-    chatId,
-    userId: ownerId,
-    message,
-    messageId,
-    ...(body.referenceText ? { referenceText: body.referenceText.slice(0, 100_000) } : {}),
-    ...(references.length ? { references } : {}),
-    ...(body.agentId ? { agentId: body.agentId } : {}),
-    ...(requestedModelId ? { modelId: requestedModelId } : {}),
-    ...(body.modelParams ? { modelParams: body.modelParams } : {}),
-    ...((stored.length ? stored : storedAttachments).length
-      ? { attachments: stored.length ? stored : storedAttachments }
-      : {}),
-  });
+  let job;
+  try {
+    job = enqueueJob({
+      chatId,
+      userId: ownerId,
+      message,
+      messageId,
+      ...(body.referenceText ? { referenceText: body.referenceText.slice(0, 100_000) } : {}),
+      ...(references.length ? { references } : {}),
+      ...(body.agentId ? { agentId: body.agentId } : {}),
+      ...(requestedModelId ? { modelId: requestedModelId } : {}),
+      ...(body.modelParams ? { modelParams: body.modelParams } : {}),
+      ...((stored.length ? stored : storedAttachments).length
+        ? { attachments: stored.length ? stored : storedAttachments }
+        : {}),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "ActiveChatRun") {
+      return Response.json(
+        { error: "This chat already has an active run. Wait for it to finish or cancel it first." },
+        { status: 409 },
+      );
+    }
+    throw error;
+  }
   updateChat(
     chatId,
     { runStatus: "running", runUpdatedAt: new Date().toISOString(), badge: null },

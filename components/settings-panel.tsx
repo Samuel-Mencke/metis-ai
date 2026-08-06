@@ -1,7 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useState, type ChangeEvent } from "react";
-import { Archive, ArchiveRestore, Lock, Plus, Trash2 } from "lucide-react";
+import {
+  Archive,
+  ArchiveRestore,
+  Bell,
+  Brain,
+  Lock,
+  PlugZap,
+  Plus,
+  Server,
+  Settings2,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -394,30 +405,51 @@ export function SettingsPanel({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex min-h-[32rem] min-w-[min(36rem,calc(100vw-2rem))] max-h-[min(90dvh,48rem)] w-[calc(100%-2rem)] max-w-2xl flex-col gap-0 overflow-hidden p-0">
-        <DialogHeader className="shrink-0 space-y-1 border-b border-border px-6 py-5 pr-12">
-          <DialogTitle>Settings</DialogTitle>
-          <DialogDescription>Memories and session.</DialogDescription>
+      <DialogContent className="flex h-[min(48rem,calc(100dvh-1.5rem))] min-w-[min(36rem,calc(100vw-1.5rem))] w-[calc(100%-1.5rem)] max-w-4xl flex-col gap-0 overflow-hidden rounded-2xl p-0">
+        <DialogHeader className="shrink-0 border-b border-border px-6 py-5 pr-14 sm:px-8">
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <Settings2 className="size-4 text-primary" />
+            Settings
+          </DialogTitle>
+          <DialogDescription className="text-xs sm:text-sm">
+            Manage your workspace in one place.
+          </DialogDescription>
         </DialogHeader>
 
-        <Tabs defaultValue="general" className="min-h-0 flex-1 gap-0">
-          <TabsList className="h-auto w-full shrink-0 justify-start overflow-x-auto rounded-none border-b border-border bg-transparent px-6 pt-2">
-            <TabsTrigger value="general">General</TabsTrigger>
-            <TabsTrigger value="archived">Archived chats</TabsTrigger>
-            <TabsTrigger value="connection">Connection</TabsTrigger>
-            <TabsTrigger value="mcp">MCP Servers</TabsTrigger>
-            <TabsTrigger value="memories">
+        <Tabs defaultValue="general" className="min-h-0 flex-1 gap-0 md:grid md:grid-cols-[13rem_minmax(0,1fr)]">
+          <TabsList className="h-auto w-full shrink-0 flex-wrap justify-start gap-1.5 rounded-none border-b border-border bg-muted/20 px-4 py-3 md:flex-nowrap md:flex-col md:items-stretch md:justify-start md:border-b-0 md:border-r md:px-3 md:py-5">
+            <TabsTrigger value="general" className="min-h-10 justify-start px-3.5 py-2.5 md:w-full md:flex-none">
+              <Settings2 data-icon="inline-start" />
+              General
+            </TabsTrigger>
+            <TabsTrigger value="archived" className="min-h-10 justify-start px-3.5 py-2.5 md:w-full md:flex-none">
+              <Archive data-icon="inline-start" />
+              Archived chats
+            </TabsTrigger>
+            <TabsTrigger value="connection" className="min-h-10 justify-start px-3.5 py-2.5 md:w-full md:flex-none">
+              <PlugZap data-icon="inline-start" />
+              Connection
+            </TabsTrigger>
+            <TabsTrigger value="mcp" className="min-h-10 justify-start px-3.5 py-2.5 md:w-full md:flex-none">
+              <Server data-icon="inline-start" />
+              MCP Servers
+            </TabsTrigger>
+            <TabsTrigger value="memories" className="min-h-10 justify-start px-3.5 py-2.5 md:w-full md:flex-none">
+              <Brain data-icon="inline-start" />
               Memories
               <span className="ml-1 text-xs text-muted-foreground">
                 {memories.length}
               </span>
             </TabsTrigger>
-            <TabsTrigger value="session">Session</TabsTrigger>
+            <TabsTrigger value="session" className="min-h-10 justify-start px-3.5 py-2.5 md:w-full md:flex-none">
+              <Lock data-icon="inline-start" />
+              Session
+            </TabsTrigger>
           </TabsList>
 
-          <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
-            <TabsContent value="general" className="mt-0 px-6 py-6">
-              <section className="flex flex-col gap-3">
+          <div className="min-h-0 min-w-0 overflow-x-hidden overflow-y-auto">
+            <TabsContent value="general" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+              <section className="flex flex-col gap-4">
                 <div>
                   <h3 className="text-sm font-medium">Notifications</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
@@ -535,7 +567,7 @@ export function SettingsPanel({
               </section>
             </TabsContent>
 
-            <TabsContent value="archived" className="mt-0 px-6 py-6">
+            <TabsContent value="archived" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-4">
                 <div>
                   <h3 className="flex items-center gap-2 text-sm font-medium">
@@ -592,7 +624,7 @@ export function SettingsPanel({
               </section>
             </TabsContent>
 
-            <TabsContent value="connection" className="mt-0 px-6 py-6">
+            <TabsContent value="connection" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-3">
                 <div>
                   <h3 className="text-sm font-medium">Connection status</h3>
@@ -634,7 +666,7 @@ export function SettingsPanel({
               </section>
             </TabsContent>
 
-            <TabsContent value="mcp" className="mt-0 px-6 py-6">
+            <TabsContent value="mcp" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-4">
                 <div>
                   <h3 className="text-sm font-medium">Custom MCP servers</h3>
@@ -756,7 +788,7 @@ export function SettingsPanel({
               </section>
             </TabsContent>
 
-            <TabsContent value="memories" className="mt-0 px-6 py-6">
+            <TabsContent value="memories" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-3">
                 <div>
                   <h3 className="text-sm font-medium">Memories</h3>
@@ -823,7 +855,7 @@ export function SettingsPanel({
               </section>
             </TabsContent>
 
-            <TabsContent value="session" className="mt-0 px-6 py-6">
+            <TabsContent value="session" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-3">
                 <div>
                   <h3 className="text-sm font-medium">Session</h3>

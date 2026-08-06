@@ -23,6 +23,7 @@ export async function PATCH(req: Request) {
     modelParams?: unknown;
     subagentModelEnabled?: unknown;
     subagentModelId?: unknown;
+    draftInput?: unknown;
   };
   const userId = (await getAuthenticatedUserId(req)) ?? undefined;
   const current = getGlobalModelSettings(userId);
@@ -40,6 +41,8 @@ export async function PATCH(req: Request) {
     typeof body.subagentModelId === "string" ? body.subagentModelId.trim() : undefined;
   const subagentModelEnabled =
     typeof body.subagentModelEnabled === "boolean" ? body.subagentModelEnabled : undefined;
+  const draftInput =
+    typeof body.draftInput === "string" ? body.draftInput.slice(0, 100_000) : undefined;
   return Response.json({
     settings: saveGlobalModelSettings(
       {
@@ -48,6 +51,7 @@ export async function PATCH(req: Request) {
         ...(modelParams !== undefined ? { modelParams } : {}),
         ...(subagentModelId !== undefined ? { subagentModelId } : {}),
         ...(subagentModelEnabled !== undefined ? { subagentModelEnabled } : {}),
+        ...(draftInput !== undefined ? { draftInput } : {}),
       },
       userId,
     ),

@@ -13,7 +13,6 @@ import path from "node:path";
 import type { ChatMessage, ToolPart } from "@/lib/store";
 
 const MAX_ROLLBACK_BYTES = 10 * 1024 * 1024;
-const MAX_CAPTURE_CHARS = 6000;
 
 export type RevertFileResult =
   | { status: "reverted"; path: string; action: "write" | "delete" }
@@ -44,14 +43,14 @@ export function resolveAgentPath(rawPath: string, agentCwd: string): string | nu
   return candidate;
 }
 
-function readCurrent(filePath: string): string | null {
-  if (!existsSync(filePath)) return null;
+function readCurrent(filePath: string): string | undefined {
+  if (!existsSync(filePath)) return undefined;
   try {
     const stat = statSync(filePath);
-    if (!stat.isFile() || stat.size > MAX_ROLLBACK_BYTES) return null;
+    if (!stat.isFile() || stat.size > MAX_ROLLBACK_BYTES) return undefined;
     return readFileSync(filePath, "utf8");
   } catch {
-    return null;
+    return undefined;
   }
 }
 
@@ -66,10 +65,6 @@ function writeRollback(filePath: string, content: string, mode?: number) {
   renameSync(temp, filePath);
 }
 
-function isCompleteSnapshot(value: string | undefined) {
-  return typeof value === "string" && value.length < MAX_CAPTURE_CHARS;
-}
-
 export function revertEditTool(tool: ToolPart, agentCwd: string): RevertFileResult {
   const filePath = tool.path ? resolveAgentPath(tool.path, agentCwd) : null;
   const displayPath = tool.path || tool.name;
@@ -82,22 +77,13 @@ export function revertEditTool(tool: ToolPart, agentCwd: string): RevertFileResu
   if (typeof before !== "string" && typeof after !== "string") {
     return { status: "conflict", path: displayPath, reason: "no complete before/after snapshot" };
   }
-  if (
-    (typeof before === "string" && !isCompleteSnapshot(before)) ||
-    (typeof after === "string" && !isCompleteSnapshot(after))
-  ) {
-    return { status: "conflict", path: displayPath, reason: "diff appears truncated or partial" };
-  }
-
   const current = readCurrent(filePath);
-  if (typeof after === "string") {
-    if (current !== after) {
-      return { status: "conflict", path: displayPath, reason: "current file differs from recorded result" };
-    }
+  if (current !== after) {
+    return { status: "conflict", path: displayPath, reason: "current file differs from recorded result" };
   }
 
   try {
-    if (typeof before === "string" && before.length > 0) {
+    if (typeof before === "string") {
       const mode = existsSync(filePath) ? statSync(filePath).mode & 0o777 : undefined;
       writeRollback(filePath, before, mode);
       return { status: "reverted", path: displayPath, action: "write" };

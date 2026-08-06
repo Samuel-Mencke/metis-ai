@@ -33,3 +33,13 @@ Security checklist
 - Review shell, filesystem, Docker, systemd, and remote desktop tools before
   enabling them in a public deployment.
 - Optional and remote MCP servers are disabled by default.
+
+WebSocket browser server
+------------------------
+
+The production start command is now `pnpm start`, which runs `tsx server.mjs`
+so the browser preview can use the authenticated WebSocket endpoint at
+`/api/browser/stream`. If systemd starts Next directly, update its `ExecStart`
+to the package start command (or `tsx /home/f1shy312/ai-chat/server.mjs`) before
+reloading the service. Do not expose the WebSocket endpoint without the same
+authenticated reverse-proxy boundary as the application.

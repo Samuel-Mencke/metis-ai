@@ -1,5 +1,5 @@
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
-import { enqueueJob, listJobs, listRunEvents } from "@/lib/db-jobs";
+import { enqueueJob, getActiveJob, listJobs, listRunEvents } from "@/lib/db-jobs";
 import { appendMessage, getChat } from "@/lib/db-store";
 import { SSE_HEADERS } from "@/lib/sse";
 import { saveAttachments, type IncomingAttachment } from "@/lib/uploads";
@@ -45,7 +45,10 @@ export async function GET(req: Request) {
             }
             await new Promise((resolve) => setTimeout(resolve, 500));
           }
-          if (!stopped) controller.close();
+          if (!stopped) {
+            send("error", { message: "The event stream timed out. The server will continue the run." });
+            controller.close();
+          }
         },
         cancel() {
           stopped = true;
@@ -74,6 +77,18 @@ export async function POST(req: Request) {
   if (!chat || (!message && !body.attachments?.length)) {
     return Response.json({ error: "chatId and message or attachments are required" }, { status: 400 });
   }
+  if (getActiveJob(chat.id, userId)) {
+    return Response.json(
+      { error: "This chat already has an active run. Wait for it to finish or cancel it first." },
+      { status: 409 },
+    );
+  }
+  if (chat.pendingQuestion || chat.runStatus === "waiting_input") {
+    return Response.json(
+      { error: "Please answer the agent's question before starting another run." },
+      { status: 409 },
+    );
+  }
   let stored = [];
   try {
     stored = body.attachments?.length ? saveAttachments(chat.id, body.attachments).stored : [];
@@ -87,16 +102,27 @@ export async function POST(req: Request) {
     content: message || "Attached files",
     ...(stored.length ? { attachments: stored } : {}),
   });
-  const job = enqueueJob({
-    chatId: chat.id,
-    userId,
-    message,
-    ...(messageId ? { messageId } : {}),
-    ...(body.referenceText ? { referenceText: body.referenceText.slice(0, 100_000) } : {}),
-    ...(body.agentId ? { agentId: body.agentId } : {}),
-    ...(body.modelId ? { modelId: body.modelId } : {}),
-    ...(body.modelParams ? { modelParams: body.modelParams } : {}),
-    ...(stored.length ? { attachments: stored } : {}),
-  });
+  let job;
+  try {
+    job = enqueueJob({
+      chatId: chat.id,
+      userId,
+      message,
+      ...(messageId ? { messageId } : {}),
+      ...(body.referenceText ? { referenceText: body.referenceText.slice(0, 100_000) } : {}),
+      ...(body.agentId ? { agentId: body.agentId } : {}),
+      ...(body.modelId ? { modelId: body.modelId } : {}),
+      ...(body.modelParams ? { modelParams: body.modelParams } : {}),
+      ...(stored.length ? { attachments: stored } : {}),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "ActiveChatRun") {
+      return Response.json(
+        { error: "This chat already has an active run. Wait for it to finish or cancel it first." },
+        { status: 409 },
+      );
+    }
+    throw error;
+  }
   return Response.json({ job }, { status: 202 });
 }

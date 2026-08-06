@@ -5,19 +5,47 @@ import type { AgentJob, JobStatus } from "@/lib/jobs";
 const iso = () => new Date().toISOString();
 
 export function enqueueJob(input: Omit<AgentJob, "id" | "status" | "attempts" | "createdAt" | "updatedAt">) {
-  if (input.messageId) {
-    const existingRow = getDatabase().prepare(
-      "SELECT data FROM jobs WHERE chat_id = ? AND json_extract(data, '$.messageId') = ? ORDER BY updated_at DESC LIMIT 1",
-    ).get(input.chatId, input.messageId);
-    const existing = parseData<AgentJob>(existingRow);
-    if (existing) return existing;
-  }
-  const now = iso();
-  const job: AgentJob = { ...input, id: randomUUID(), status: "queued", attempts: 0, createdAt: now, updatedAt: now };
-  getDatabase().prepare(
-    "INSERT INTO jobs (id, chat_id, user_id, data, status, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-  ).run(job.id, job.chatId, job.userId ?? null, JSON.stringify(job), job.status, now);
-  return job;
+  return transaction(() => {
+    if (input.messageId) {
+      const existingRow = getDatabase().prepare(
+        "SELECT data FROM jobs WHERE chat_id = ? AND json_extract(data, '$.messageId') = ? ORDER BY updated_at DESC LIMIT 1",
+      ).get(input.chatId, input.messageId);
+      const existing = parseData<AgentJob>(existingRow);
+      if (existing) return existing;
+    }
+    const active = getDatabase()
+      .prepare(
+        `SELECT data FROM jobs
+         WHERE chat_id = ? AND status IN ('queued', 'running', 'waiting_input')
+         ORDER BY updated_at DESC LIMIT 1`,
+      )
+      .get(input.chatId);
+    const activeJob = parseData<AgentJob>(active);
+    if (activeJob) {
+      const error = new Error("This chat already has an active run.");
+      error.name = "ActiveChatRun";
+      throw error;
+    }
+    const now = iso();
+    const job: AgentJob = { ...input, id: randomUUID(), status: "queued", attempts: 0, createdAt: now, updatedAt: now };
+    getDatabase().prepare(
+      "INSERT INTO jobs (id, chat_id, user_id, data, status, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(job.id, job.chatId, job.userId ?? null, JSON.stringify(job), job.status, now);
+    return job;
+  });
+}
+
+export function getActiveJob(chatId: string, userId?: string) {
+  const row = getDatabase()
+    .prepare(
+      `SELECT data FROM jobs
+       WHERE chat_id = ?
+         AND status IN ('queued', 'running', 'waiting_input')
+         AND (? IS NULL OR user_id = ? OR user_id IS NULL)
+       ORDER BY updated_at DESC LIMIT 1`,
+    )
+    .get(chatId, userId ?? null, userId ?? null);
+  return parseData<AgentJob>(row);
 }
 
 export function getJob(id: string) {
@@ -107,7 +135,7 @@ export function listRunEvents(
 }
 
 export function requestJobCancel(chatId: string, userId?: string) {
-  const job = listJobs(chatId, userId).find((item) => item.status === "running" || item.status === "queued");
+  const job = getActiveJob(chatId, userId);
   if (!job) return null;
   return updateJob(job.id, { status: "cancelled", error: "Cancellation requested by user." });
 }

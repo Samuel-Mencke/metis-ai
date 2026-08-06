@@ -79,8 +79,13 @@ export async function getAuthenticatedUser(req?: Request): Promise<User | null> 
   if (legacyPassword && passwordMatches(legacyPassword)) {
     return migrated.find((user) => user.username === (legacyUser || user.username)) ?? migrated[0] ?? null;
   }
-  const jar = await cookies();
-  const token = jar.get(CHAT_COOKIE)?.value;
+  const requestCookie = req?.headers.get("cookie")
+    ?.split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${CHAT_COOKIE}=`))
+    ?.slice(CHAT_COOKIE.length + 1);
+  const jar = requestCookie ? null : await cookies();
+  const token = requestCookie || jar?.get(CHAT_COOKIE)?.value;
   if (!token) return null;
   const session = getDatabase().prepare(
     `SELECT s.user_id as userId, s.expires_at as expiresAt,

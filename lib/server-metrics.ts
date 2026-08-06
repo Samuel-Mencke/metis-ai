@@ -1,0 +1,154 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { readFile } from "node:fs/promises";
+import os from "node:os";
+
+const execFileAsync = promisify(execFile);
+const SAMPLE_INTERVAL_MS = 5_000;
+const HISTORY_LENGTH = 60;
+
+type GpuMetric = {
+  id: string;
+  name: string;
+  utilizationPercent: number | null;
+  memoryUsedBytes: number | null;
+  memoryTotalBytes: number | null;
+  temperatureC: number | null;
+};
+
+export type ServerMetric = {
+  timestamp: string;
+  cpuPercent: number;
+  ramUsedBytes: number;
+  ramTotalBytes: number;
+  load: number[];
+  networkRxBytesPerSecond: number;
+  networkTxBytesPerSecond: number;
+  gpus: GpuMetric[];
+};
+
+let previousCpu: { total: number; idle: number } | null = null;
+let previousNetwork: { rx: number; tx: number; timestamp: number } | null = null;
+let latest: ServerMetric | null = null;
+const history: ServerMetric[] = [];
+let samplerPromise: Promise<ServerMetric> | null = null;
+
+function numberOrNull(value: string | undefined) {
+  if (!value || !Number.isFinite(Number(value))) return null;
+  return Number(value);
+}
+
+async function readCpuPercent() {
+  const content = await readFile("/proc/stat", "utf8");
+  const line = content.split("\n").find((item) => item.startsWith("cpu ")) || "";
+  const values = line.trim().split(/\s+/).slice(1).map(Number);
+  const idle = (values[3] || 0) + (values[4] || 0);
+  const total = values.reduce((sum, value) => sum + value, 0);
+  const result = previousCpu && total > previousCpu.total
+    ? Math.max(0, Math.min(100, ((total - previousCpu.total - (idle - previousCpu.idle)) / (total - previousCpu.total)) * 100))
+    : 0;
+  previousCpu = { total, idle };
+  return result;
+}
+
+async function readMemory() {
+  const content = await readFile("/proc/meminfo", "utf8");
+  const values = new Map<string, number>();
+  for (const line of content.split("\n")) {
+    const match = line.match(/^(\w+):\s+(\d+)/);
+    if (match) values.set(match[1], Number(match[2]) * 1024);
+  }
+  const total = values.get("MemTotal") || 0;
+  const available = values.get("MemAvailable") || values.get("MemFree") || 0;
+  return { total, used: Math.max(0, total - available) };
+}
+
+async function readNetwork() {
+  const content = await readFile("/proc/net/dev", "utf8");
+  let rx = 0;
+  let tx = 0;
+  for (const line of content.split("\n").slice(2)) {
+    const [name, rest] = line.trim().split(":");
+    if (!name || !rest || name === "lo") continue;
+    const values = rest.trim().split(/\s+/).map(Number);
+    rx += values[0] || 0;
+    tx += values[8] || 0;
+  }
+  const now = Date.now();
+  const elapsed = previousNetwork ? Math.max(0.1, (now - previousNetwork.timestamp) / 1000) : 1;
+  const result = {
+    rx: previousNetwork ? Math.max(0, (rx - previousNetwork.rx) / elapsed) : 0,
+    tx: previousNetwork ? Math.max(0, (tx - previousNetwork.tx) / elapsed) : 0,
+  };
+  previousNetwork = { rx, tx, timestamp: now };
+  return result;
+}
+
+async function readNvidia() {
+  try {
+    const { stdout } = await execFileAsync("nvidia-smi", ["--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu", "--format=csv,noheader,nounits"], { timeout: 2500 });
+    return stdout.trim().split("\n").filter(Boolean).map((line) => {
+      const [id, name, utilization, memoryUsed, memoryTotal, temperature] = line.split(",").map((value) => value.trim());
+      return {
+        id: `nvidia-${id}`,
+        name: name || `NVIDIA GPU ${id}`,
+        utilizationPercent: numberOrNull(utilization),
+        memoryUsedBytes: numberOrNull(memoryUsed) === null ? null : Number(memoryUsed) * 1024 * 1024,
+        memoryTotalBytes: numberOrNull(memoryTotal) === null ? null : Number(memoryTotal) * 1024 * 1024,
+        temperatureC: numberOrNull(temperature),
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function readAmd() {
+  try {
+    const { stdout } = await execFileAsync("rocm-smi", ["--showuse", "--showmemuse", "--showtemp", "--csv"], { timeout: 2500 });
+    const rows = stdout.split("\n").filter((line) => /GPU\d+/i.test(line));
+    return rows.map((line, index) => ({
+      id: `amd-${index}`,
+      name: `AMD GPU ${line.match(/GPU\d+/i)?.[0] || index}`,
+      utilizationPercent: numberOrNull(line.match(/(\d+(?:\.\d+)?)\s*%/)?.[1]),
+      memoryUsedBytes: null,
+      memoryTotalBytes: null,
+      temperatureC: numberOrNull(line.match(/(\d+(?:\.\d+)?)\s*C/)?.[1]),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+async function sample(): Promise<ServerMetric> {
+  const [cpuPercent, memory, network, gpus] = await Promise.all([
+    readCpuPercent(),
+    readMemory(),
+    readNetwork(),
+    readNvidia().then(async (nvidia) => nvidia.length ? nvidia : readAmd()),
+  ]);
+  const metric: ServerMetric = {
+    timestamp: new Date().toISOString(),
+    cpuPercent,
+    ramUsedBytes: memory.used,
+    ramTotalBytes: memory.total,
+    load: os.loadavg().map((value) => Number(value.toFixed(2))),
+    networkRxBytesPerSecond: network.rx,
+    networkTxBytesPerSecond: network.tx,
+    gpus,
+  };
+  latest = metric;
+  history.push(metric);
+  while (history.length > HISTORY_LENGTH) history.shift();
+  return metric;
+}
+
+export async function getServerMetrics() {
+  if (!samplerPromise) {
+    samplerPromise = sample().finally(() => { samplerPromise = null; });
+    const timer = setInterval(() => { void sample(); }, SAMPLE_INTERVAL_MS);
+    timer.unref();
+  }
+  if (!latest) await samplerPromise;
+  return { current: latest, history: [...history] };
+}

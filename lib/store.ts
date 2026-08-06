@@ -192,6 +192,7 @@ export type GlobalModelSettings = {
   modelParams?: Array<{ id: string; value: string }>;
   subagentModelEnabled?: boolean;
   subagentModelId?: string;
+  draftInput?: string;
 };
 
 function ensureDirs() {
