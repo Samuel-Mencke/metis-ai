@@ -42,7 +42,7 @@ export async function POST(req: Request) {
   // the answer independently and continue the agent run.
   updateChat(
     resolved.chatId,
-    { runStatus: "running", pendingQuestion: null, badge: "blue" },
+    { runStatus: "running", pendingQuestion: null, badge: null },
     userId,
   );
   return Response.json({ ok: true });

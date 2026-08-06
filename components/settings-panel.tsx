@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ChangeEvent } from "react";
 import { Archive, ArchiveRestore, Lock, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -96,6 +96,11 @@ export type ModelInfo = {
   defaultParams?: ModelParamSelection[];
 };
 
+export type FinishSound = {
+  name: string;
+  dataUrl: string;
+};
+
 type Props = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -103,6 +108,11 @@ type Props = {
   status: StatusPayload | null;
   notificationsEnabled: boolean;
   onNotificationsEnabledChange: (enabled: boolean) => void;
+  soundCuesEnabled: boolean;
+  onSoundCuesEnabledChange: (enabled: boolean) => void;
+  finishSound: FinishSound | null;
+  onFinishSoundChange: (sound: FinishSound | null) => void;
+  onTestFinishSound: () => void;
   onMemoriesChanged: () => void;
   onChatsChanged: () => void;
   onLogout: () => void;
@@ -115,6 +125,11 @@ export function SettingsPanel({
   status,
   notificationsEnabled,
   onNotificationsEnabledChange,
+  soundCuesEnabled,
+  onSoundCuesEnabledChange,
+  finishSound,
+  onFinishSoundChange,
+  onTestFinishSound,
   onMemoriesChanged,
   onChatsChanged,
   onLogout,
@@ -345,6 +360,28 @@ export function SettingsPanel({
     onNotificationsEnabledChange(true);
   }
 
+  function handleFinishSoundUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("audio/")) {
+      toast.error("Please choose an audio file.");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error("Custom sounds must be 5 MB or smaller.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== "string") return;
+      onFinishSoundChange({ name: file.name, dataUrl: reader.result });
+      toast.success("Custom finish sound saved");
+    };
+    reader.onerror = () => toast.error("Could not read the audio file.");
+    reader.readAsDataURL(file);
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex min-h-[32rem] min-w-[min(36rem,calc(100vw-2rem))] max-h-[min(90dvh,48rem)] w-[calc(100%-2rem)] max-w-2xl flex-col gap-0 overflow-hidden p-0">
@@ -405,6 +442,54 @@ export function SettingsPanel({
                     Browser notifications are unavailable.
                   </p>
                 )}
+                <div className="flex items-center justify-between gap-4 border-t border-border/60 pt-3">
+                  <div>
+                    <p className="text-xs text-muted-foreground">Sound cues</p>
+                    <p className="mt-1 text-xs text-muted-foreground/70">
+                      Play a sound when an agent finishes.
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant={soundCuesEnabled ? "default" : "outline"}
+                    aria-pressed={soundCuesEnabled}
+                    onClick={() => onSoundCuesEnabledChange(!soundCuesEnabled)}
+                    className="shrink-0"
+                  >
+                    {soundCuesEnabled ? "On" : "Off"}
+                  </Button>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input
+                    type="file"
+                    accept="audio/*"
+                    onChange={handleFinishSoundUpload}
+                    aria-label="Upload custom finish sound"
+                    className="min-w-0 flex-1"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={onTestFinishSound}
+                    disabled={!soundCuesEnabled}
+                  >
+                    Test sound
+                  </Button>
+                  {finishSound ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={() => onFinishSoundChange(null)}
+                    >
+                      Remove custom sound
+                    </Button>
+                  ) : null}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {finishSound
+                    ? `Custom sound: ${finishSound.name}`
+                    : "No custom sound uploaded. The default chime will be used."}
+                </p>
               </section>
             </TabsContent>
 

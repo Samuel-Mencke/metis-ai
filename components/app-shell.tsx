@@ -66,6 +66,7 @@ import type { MemoryItem } from "@/components/memories-panel";
 import { ModelOptionsMenu } from "@/components/model-options-menu";
 import {
   SettingsPanel,
+  type FinishSound,
   type ModelInfo,
   type ModelParamSelection,
 } from "@/components/settings-panel";
@@ -462,6 +463,8 @@ const WORKSPACE_WIDTH_STORAGE_KEY = `${clientConfig.storagePrefix}_workspace_wid
 const WORKSPACE_MIN_WIDTH = 320;
 const WORKSPACE_MAX_WIDTH = 840;
 const NOTIFICATIONS_STORAGE_KEY = `${clientConfig.storagePrefix}_notifications_enabled`;
+const SOUND_CUES_STORAGE_KEY = `${clientConfig.storagePrefix}_sound_cues_enabled`;
+const FINISH_SOUND_STORAGE_KEY = `${clientConfig.storagePrefix}_finish_sound`;
 const UNREAD_CHATS_STORAGE_KEY = `${clientConfig.storagePrefix}_unread_chats`;
 
 function loadUnreadChatIds(): string[] {
@@ -484,6 +487,33 @@ function saveUnreadChatIds(ids: string[]) {
     localStorage.setItem(UNREAD_CHATS_STORAGE_KEY, JSON.stringify(ids));
   } catch {
     // localStorage may be unavailable in private browsing contexts.
+  }
+}
+
+function loadFinishSound(): FinishSound | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const parsed: unknown = JSON.parse(
+      localStorage.getItem(FINISH_SOUND_STORAGE_KEY) || "null",
+    );
+    return parsed &&
+      typeof parsed === "object" &&
+      typeof (parsed as { name?: unknown }).name === "string" &&
+      typeof (parsed as { dataUrl?: unknown }).dataUrl === "string"
+      ? parsed as FinishSound
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveFinishSound(sound: FinishSound | null) {
+  if (typeof window === "undefined") return;
+  try {
+    if (sound) localStorage.setItem(FINISH_SOUND_STORAGE_KEY, JSON.stringify(sound));
+    else localStorage.removeItem(FINISH_SOUND_STORAGE_KEY);
+  } catch {
+    // localStorage may be unavailable or full.
   }
 }
 
@@ -1155,6 +1185,8 @@ export default function AppShell() {
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [notificationsReady, setNotificationsReady] = useState(false);
+  const [soundCuesEnabled, setSoundCuesEnabled] = useState(false);
+  const [finishSound, setFinishSound] = useState<FinishSound | null>(null);
   const [unreadChatIds, setUnreadChatIds] = useState<string[]>([]);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     if (typeof window === "undefined") return 240;
@@ -1276,13 +1308,18 @@ export default function AppShell() {
   useEffect(() => {
     try {
       const saved = localStorage.getItem(NOTIFICATIONS_STORAGE_KEY) === "true";
+      const soundSaved = localStorage.getItem(SOUND_CUES_STORAGE_KEY) === "true";
       const permissionGranted =
         typeof window !== "undefined" &&
         "Notification" in window &&
         Notification.permission === "granted";
       setNotificationsEnabled(saved || permissionGranted);
+      setSoundCuesEnabled(soundSaved);
+      setFinishSound(loadFinishSound());
     } catch {
       setNotificationsEnabled(false);
+      setSoundCuesEnabled(false);
+      setFinishSound(null);
     } finally {
       setNotificationsReady(true);
     }
@@ -1342,6 +1379,15 @@ export default function AppShell() {
       // localStorage may be unavailable in private browsing contexts.
     }
   }, [notificationsEnabled, notificationsReady]);
+
+  useEffect(() => {
+    if (!notificationsReady) return;
+    try {
+      localStorage.setItem(SOUND_CUES_STORAGE_KEY, String(soundCuesEnabled));
+    } catch {
+      // localStorage may be unavailable in private browsing contexts.
+    }
+  }, [soundCuesEnabled, notificationsReady]);
 
   useEffect(() => {
     return () => {
@@ -1747,6 +1793,37 @@ export default function AppShell() {
       };
     } catch {
       // Browser notification construction can fail in restricted contexts.
+    }
+  }
+
+  function playFinishSound() {
+    if (!soundCuesEnabled || typeof window === "undefined") return;
+    try {
+      if (finishSound) {
+        const audio = new Audio(finishSound.dataUrl);
+        audio.volume = 0.8;
+        void audio.play();
+        return;
+      }
+      const AudioContextClass = window.AudioContext ||
+        (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const context = new AudioContextClass();
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(740, context.currentTime);
+      oscillator.frequency.exponentialRampToValueAtTime(988, context.currentTime + 0.12);
+      gain.gain.setValueAtTime(0.0001, context.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.16, context.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.32);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + 0.34);
+      oscillator.addEventListener("ended", () => void context.close());
+    } catch {
+      // Audio playback can be blocked by browser autoplay policies.
     }
   }
 
@@ -3911,6 +3988,7 @@ export default function AppShell() {
               }),
             );
           } else if (event === "done") {
+            playFinishSound();
             if (typeof document !== "undefined" && document.hidden) {
               markUnread(chatId);
             } else if (activeChatIdRef.current === chatId) {
@@ -5759,6 +5837,14 @@ export default function AppShell() {
         status={status}
         notificationsEnabled={notificationsEnabled}
         onNotificationsEnabledChange={setNotificationsEnabled}
+        soundCuesEnabled={soundCuesEnabled}
+        onSoundCuesEnabledChange={setSoundCuesEnabled}
+        finishSound={finishSound}
+        onFinishSoundChange={(sound) => {
+          setFinishSound(sound);
+          saveFinishSound(sound);
+        }}
+        onTestFinishSound={playFinishSound}
         onMemoriesChanged={() => void loadMemories()}
         onChatsChanged={() => void loadChats()}
         onLogout={() => void logout()}

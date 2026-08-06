@@ -253,7 +253,13 @@ export async function runQueuedJob(job: AgentJob) {
     const needsAttention = event === "question" || event === "workspace" || event === "canvas";
     updateChat(
       job.chatId,
-      { badge: needsAttention || current?.badge === "red" ? "red" : "blue" },
+      {
+        badge: needsAttention || current?.badge === "red"
+          ? "red"
+          : event === "done"
+            ? "blue"
+            : null,
+      },
       job.userId,
     );
     return result;
