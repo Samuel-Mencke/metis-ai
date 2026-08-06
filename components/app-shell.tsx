@@ -1100,6 +1100,8 @@ export default function AppShell() {
   const [modelSearch, setModelSearch] = useState("");
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [modelParams, setModelParams] = useState<ModelParamSelection[]>([]);
+  const [subagentModelEnabled, setSubagentModelEnabled] = useState(false);
+  const [subagentModelId, setSubagentModelId] = useState("");
   const [workspaces, setWorkspaces] = useState<WorkspaceItem[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
@@ -1162,6 +1164,7 @@ export default function AppShell() {
   const [answeringQuestion, setAnsweringQuestion] = useState(false);
   const [paneKey, setPaneKey] = useState(0);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
+  const [restoredAttachments, setRestoredAttachments] = useState<MsgAttachment[]>([]);
   const [activeAttachment, setActiveAttachment] = useState<{
     attachment: MsgAttachment;
     chatId?: string;
@@ -1959,7 +1962,14 @@ export default function AppShell() {
     let cancelled = false;
     void fetch("/api/preferences", { cache: "no-store" })
       .then((res) => (res.ok ? res.json() : null))
-      .then((data: { settings?: { modelId?: string; modelParams?: ModelParamSelection[] } } | null) => {
+      .then((data: {
+        settings?: {
+          modelId?: string;
+          modelParams?: ModelParamSelection[];
+          subagentModelEnabled?: boolean;
+          subagentModelId?: string;
+        };
+      } | null) => {
         if (cancelled || !data?.settings) return;
         const settings = data.settings;
         const nextId = settings.modelId && models.some((model) => model.id === settings.modelId)
@@ -1967,6 +1977,10 @@ export default function AppShell() {
           : null;
         if (nextId) setModelId(nextId);
         if (settings.modelParams) setModelParams(settings.modelParams);
+        setSubagentModelEnabled(Boolean(settings.subagentModelEnabled));
+        if (settings.subagentModelId && models.some((model) => model.id === settings.subagentModelId)) {
+          setSubagentModelId(settings.subagentModelId);
+        }
       })
       .catch(() => undefined);
     return () => {
@@ -1990,6 +2004,29 @@ export default function AppShell() {
         body: JSON.stringify({ modelParams: next }),
       });
     }
+  }
+
+  function updateSubagentModelEnabled(enabled: boolean) {
+    const nextId = subagentModelId || models[0]?.id || "";
+    setSubagentModelEnabled(enabled);
+    if (enabled && nextId) setSubagentModelId(nextId);
+    void fetch("/api/preferences", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subagentModelEnabled: enabled,
+        ...(enabled && nextId ? { subagentModelId: nextId } : {}),
+      }),
+    });
+  }
+
+  function updateSubagentModelId(nextId: string) {
+    setSubagentModelId(nextId);
+    void fetch("/api/preferences", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subagentModelId: nextId }),
+    });
   }
 
   const applySnapshot = useCallback((id: string, snap: ChatSnapshot) => {
@@ -3145,8 +3182,9 @@ export default function AppShell() {
     });
     if (reverted) {
       setInput(target.content);
-      setReferences([]);
-      setReferenceText("");
+      setReferences(target.references ?? []);
+      setReferenceText(target.referenceText ?? "");
+      setRestoredAttachments(target.attachments ?? []);
       setRevertTarget(null);
     }
   }
@@ -3159,10 +3197,6 @@ export default function AppShell() {
       message.id.startsWith("u-") ||
       message.id.startsWith("a-")
     ) {
-      return;
-    }
-    if (message.attachments?.length) {
-      toast.info("Messages with attachments cannot currently be edited");
       return;
     }
     setEditingMessageId(message.id);
@@ -3186,15 +3220,21 @@ export default function AppShell() {
     if (!reverted) return;
     setEditingMessageId(null);
     setEditValue("");
-    await send(undefined, text, []);
+    await send(
+      undefined,
+      text,
+      [],
+      false,
+      message.referenceText,
+      message.references,
+      undefined,
+      undefined,
+      message.attachments,
+    );
   }
 
   async function retryMessage(message: Msg) {
     if (reverting || !activeChatId || !message.content.trim()) return;
-    if (message.attachments?.length) {
-      toast.info("Messages with attachments cannot currently be retried");
-      return;
-    }
     if (busy) await stopAgent({ forRevert: true });
     const text = message.content.trim();
     const reverted = await revertMessage(message, {
@@ -3203,7 +3243,17 @@ export default function AppShell() {
     });
     if (!reverted) return;
     queueDrainBlockedRef.current = false;
-    await send(undefined, text, []);
+    await send(
+      undefined,
+      text,
+      [],
+      true,
+      message.referenceText,
+      message.references,
+      undefined,
+      undefined,
+      message.attachments,
+    );
   }
 
   function addPendingFiles(files: FileList | File[]) {
@@ -3435,7 +3485,20 @@ export default function AppShell() {
       });
       const data = (await response.json().catch(() => ({}))) as { error?: string };
       if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      runtimeRef.current.get(chatId)?.abortController.abort();
+      clearChatRunning(chatId);
+      setBusy(false);
       setActiveSubagent((current) => current ? { ...current, status: "cancelled" } : current);
+      setMessages((messages) =>
+        messages.map((message) => ({
+          ...message,
+          parts: (message.parts ?? partsFromFlat(message)).map((part) =>
+            part.type === "tool" && part.status === "running"
+              ? { ...part, status: "cancelled" }
+              : part,
+          ),
+        })).map((message) => ({ ...message, ...withSyncedFlat(message.parts ?? []) })),
+      );
       setLiveStatus("Agent cancelled");
       toast.info("Agent cancelled");
     } catch (error) {
@@ -3454,13 +3517,18 @@ export default function AppShell() {
     referencesOverride?: ReferenceItem[],
     messageIdOverride?: string,
     onAccepted?: () => void,
+    storedAttachmentsOverride?: MsgAttachment[],
   ) {
     e?.preventDefault();
     const text = (textOverride ?? input).trim();
     const filesToSend = attachmentsOverride ?? pendingFiles;
     const referencesToSend = referencesOverride ?? references;
+    const storedAttachmentsToSend = storedAttachmentsOverride ?? restoredAttachments;
     const isOverride = textOverride !== undefined;
-    if ((!text && !filesToSend.length) || (busy && force === false && !isOverride)) {
+    if (
+      (!text && !filesToSend.length && !storedAttachmentsToSend.length) ||
+      (busy && force === false && !isOverride)
+    ) {
       if (busy && !isOverride && (text || filesToSend.length)) {
         queueCurrentMessage(text, filesToSend);
       }
@@ -3478,20 +3546,24 @@ export default function AppShell() {
       setReferenceText("");
       setReferences([]);
       setPendingFiles([]);
+      setRestoredAttachments([]);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
     if (!force) queueDrainBlockedRef.current = false;
     setBusy(true);
     setLiveStatus("");
 
-    const localAttachments: MsgAttachment[] = filesToSend.map((p) => ({
+    const localAttachments: MsgAttachment[] = [
+      ...storedAttachmentsToSend,
+      ...filesToSend.map((p) => ({
       id: p.id,
       name: p.file.name,
       mimeType: p.file.type || "application/octet-stream",
-      kind: p.file.type.startsWith("image/") ? "image" : "file",
+        kind: (p.file.type.startsWith("image/") ? "image" : "file") as "image" | "file",
       size: p.file.size,
       previewUrl: p.previewUrl,
-    }));
+      })),
+    ];
 
     const localCreatedAt = new Date().toISOString();
     const userMsg: Msg = {
@@ -3558,6 +3630,9 @@ export default function AppShell() {
           modelParams,
           ...(attachmentsPayload?.length
             ? { attachments: attachmentsPayload }
+            : {}),
+          ...(storedAttachmentsToSend.length
+            ? { storedAttachments: storedAttachmentsToSend }
             : {}),
         }),
         signal: ac.signal,
@@ -4292,6 +4367,26 @@ export default function AppShell() {
           <Button type="button" size="icon-xs" variant="ghost" className="size-5 shrink-0" aria-label="Remove reference" onClick={() => setReferenceText("")}>
             <X className="size-3" />
           </Button>
+        </div>
+      ) : null}
+      {restoredAttachments.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-1.5 px-1" aria-label="Restored attachments">
+          {restoredAttachments.map((attachment) => (
+            <span
+              key={attachment.id}
+              className="inline-flex max-w-full items-center gap-1 rounded-md border border-border/60 bg-secondary/60 px-2 py-1 text-xs text-muted-foreground"
+            >
+              <span className="max-w-48 truncate">{attachment.name}</span>
+              <button
+                type="button"
+                className="rounded-sm p-0.5 hover:bg-muted hover:text-foreground"
+                onClick={() => setRestoredAttachments((current) => current.filter((item) => item.id !== attachment.id))}
+                aria-label={`Remove ${attachment.name}`}
+              >
+                <X className="size-3" />
+              </button>
+            </span>
+          ))}
         </div>
       ) : null}
       {references.length > 0 ? (
@@ -5295,8 +5390,7 @@ export default function AppShell() {
                         disabled={
                           reverting ||
                           Boolean(editingMessageId) ||
-                          busy ||
-                          Boolean(m.attachments?.length)
+                          busy
                         }
                         onClick={() => void retryMessage(m)}
                         title="Revert and resend this message"
@@ -5838,6 +5932,11 @@ export default function AppShell() {
         onNotificationsEnabledChange={setNotificationsEnabled}
         soundCuesEnabled={soundCuesEnabled}
         onSoundCuesEnabledChange={setSoundCuesEnabled}
+        models={models}
+        subagentModelEnabled={subagentModelEnabled}
+        onSubagentModelEnabledChange={updateSubagentModelEnabled}
+        subagentModelId={subagentModelId}
+        onSubagentModelIdChange={updateSubagentModelId}
         finishSound={finishSound}
         onFinishSoundChange={(sound) => {
           setFinishSound(sound);

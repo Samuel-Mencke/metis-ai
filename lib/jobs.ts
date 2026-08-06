@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { config } from "@/lib/config";
+import type { StoredAttachment } from "@/lib/uploads";
 
 export type JobStatus =
   | "queued"
@@ -29,7 +30,7 @@ export type AgentJob = {
   agentId?: string;
   modelId?: string;
   modelParams?: Array<{ id: string; value: string }>;
-  attachments?: unknown[];
+  attachments?: StoredAttachment[];
   status: JobStatus;
   attempts: number;
   createdAt: string;

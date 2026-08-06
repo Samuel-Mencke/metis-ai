@@ -190,6 +190,8 @@ const SETTINGS_PATH = path.join(DATA_DIR, "settings.json");
 export type GlobalModelSettings = {
   modelId?: string;
   modelParams?: Array<{ id: string; value: string }>;
+  subagentModelEnabled?: boolean;
+  subagentModelId?: string;
 };
 
 function ensureDirs() {

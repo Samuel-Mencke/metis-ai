@@ -110,6 +110,11 @@ type Props = {
   onNotificationsEnabledChange: (enabled: boolean) => void;
   soundCuesEnabled: boolean;
   onSoundCuesEnabledChange: (enabled: boolean) => void;
+  models: ModelInfo[];
+  subagentModelEnabled: boolean;
+  onSubagentModelEnabledChange: (enabled: boolean) => void;
+  subagentModelId: string;
+  onSubagentModelIdChange: (modelId: string) => void;
   finishSound: FinishSound | null;
   onFinishSoundChange: (sound: FinishSound | null) => void;
   onTestFinishSound: () => void;
@@ -127,6 +132,11 @@ export function SettingsPanel({
   onNotificationsEnabledChange,
   soundCuesEnabled,
   onSoundCuesEnabledChange,
+  models,
+  subagentModelEnabled,
+  onSubagentModelEnabledChange,
+  subagentModelId,
+  onSubagentModelIdChange,
   finishSound,
   onFinishSoundChange,
   onTestFinishSound,
@@ -490,6 +500,38 @@ export function SettingsPanel({
                     ? `Custom sound: ${finishSound.name}`
                     : "No custom sound uploaded. The default chime will be used."}
                 </p>
+                <div className="border-t border-border/60 pt-4">
+                  <h3 className="text-sm font-medium">Subagent model</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Optionally use one model for delegated subagents. When disabled, the agent chooses the model.
+                  </p>
+                  <div className="mt-3 flex items-center justify-between gap-4">
+                    <p className="text-xs text-muted-foreground">Use a standard model</p>
+                    <Button
+                      type="button"
+                      variant={subagentModelEnabled ? "default" : "outline"}
+                      aria-pressed={subagentModelEnabled}
+                      onClick={() => onSubagentModelEnabledChange(!subagentModelEnabled)}
+                      className="shrink-0"
+                    >
+                      {subagentModelEnabled ? "On" : "Off"}
+                    </Button>
+                  </div>
+                  <select
+                    value={subagentModelId}
+                    onChange={(event) => onSubagentModelIdChange(event.target.value)}
+                    disabled={!subagentModelEnabled || models.length === 0}
+                    aria-label="Standard subagent model"
+                    className="mt-3 h-9 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <option value="" disabled>Select a model</option>
+                    {models.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.displayName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </section>
             </TabsContent>
 

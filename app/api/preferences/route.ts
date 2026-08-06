@@ -21,7 +21,11 @@ export async function PATCH(req: Request) {
   const body = (await req.json().catch(() => ({}))) as {
     modelId?: unknown;
     modelParams?: unknown;
+    subagentModelEnabled?: unknown;
+    subagentModelId?: unknown;
   };
+  const userId = (await getAuthenticatedUserId(req)) ?? undefined;
+  const current = getGlobalModelSettings(userId);
   const modelId = typeof body.modelId === "string" ? body.modelId.trim() : undefined;
   const modelParams = Array.isArray(body.modelParams)
     ? body.modelParams.filter(
@@ -32,7 +36,20 @@ export async function PATCH(req: Request) {
           typeof (item as { value?: unknown }).value === "string",
       )
     : undefined;
+  const subagentModelId =
+    typeof body.subagentModelId === "string" ? body.subagentModelId.trim() : undefined;
+  const subagentModelEnabled =
+    typeof body.subagentModelEnabled === "boolean" ? body.subagentModelEnabled : undefined;
   return Response.json({
-    settings: saveGlobalModelSettings({ modelId, modelParams }, (await getAuthenticatedUserId(req)) ?? undefined),
+    settings: saveGlobalModelSettings(
+      {
+        ...current,
+        ...(modelId !== undefined ? { modelId } : {}),
+        ...(modelParams !== undefined ? { modelParams } : {}),
+        ...(subagentModelId !== undefined ? { subagentModelId } : {}),
+        ...(subagentModelEnabled !== undefined ? { subagentModelEnabled } : {}),
+      },
+      userId,
+    ),
   });
 }

@@ -2,7 +2,12 @@ import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { enqueueJob } from "@/lib/db-jobs";
 import { appendMessage, getChat, titleFromMessage, updateChat } from "@/lib/db-store";
 import { isModelAllowed } from "@/lib/model-access";
-import { saveAttachments, type IncomingAttachment } from "@/lib/uploads";
+import {
+  resolveUploadPath,
+  saveAttachments,
+  type IncomingAttachment,
+  type StoredAttachment,
+} from "@/lib/uploads";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,6 +30,7 @@ type ChatBody = {
   modelId?: string;
   modelParams?: Array<{ id: string; value: string }>;
   attachments?: IncomingAttachment[];
+  storedAttachments?: StoredAttachment[];
 };
 
 export async function POST(req: Request) {
@@ -67,6 +73,20 @@ export async function POST(req: Request) {
   const chat = getChat(chatId, ownerId);
   if (!chat) return Response.json({ error: "Chat not found" }, { status: 404 });
 
+  const storedAttachments = Array.isArray(body.storedAttachments)
+    ? body.storedAttachments
+        .filter((attachment): attachment is StoredAttachment =>
+          Boolean(attachment) &&
+          typeof attachment.id === "string" &&
+          typeof attachment.name === "string" &&
+          typeof attachment.mimeType === "string" &&
+          (attachment.kind === "image" || attachment.kind === "file") &&
+          typeof attachment.storedName === "string" &&
+          typeof attachment.size === "number" &&
+          Boolean(resolveUploadPath(chatId, attachment.storedName)),
+        )
+        .slice(0, 8)
+    : [];
   let stored = [];
   try {
     stored = attachments.length ? saveAttachments(chatId, attachments).stored : [];
@@ -80,7 +100,9 @@ export async function POST(req: Request) {
     content: message || `Attached ${stored.length} file${stored.length === 1 ? "" : "s"}`,
     ...(referenceText ? { referenceText } : {}),
     ...(references.length ? { references } : {}),
-    ...(stored.length ? { attachments: stored } : {}),
+    ...((stored.length ? stored : storedAttachments).length
+      ? { attachments: stored.length ? stored : storedAttachments }
+      : {}),
   });
   if (chat.title === "New chat" || !chat.title.trim()) {
     updateChat(chatId, { title: titleFromMessage(message || `Attached ${stored.length} files`) }, ownerId);
@@ -95,7 +117,9 @@ export async function POST(req: Request) {
     ...(body.agentId ? { agentId: body.agentId } : {}),
     ...(requestedModelId ? { modelId: requestedModelId } : {}),
     ...(body.modelParams ? { modelParams: body.modelParams } : {}),
-    ...(stored.length ? { attachments: stored } : {}),
+    ...((stored.length ? stored : storedAttachments).length
+      ? { attachments: stored.length ? stored : storedAttachments }
+      : {}),
   });
   updateChat(
     chatId,

@@ -2,6 +2,7 @@ import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { enqueueJob, listJobs, listRunEvents } from "@/lib/db-jobs";
 import { appendMessage, getChat } from "@/lib/db-store";
 import { SSE_HEADERS } from "@/lib/sse";
+import { saveAttachments, type IncomingAttachment } from "@/lib/uploads";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -65,7 +66,7 @@ export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as {
     chatId?: string; message?: string; messageId?: string; referenceText?: string;
     agentId?: string; modelId?: string; modelParams?: Array<{ id: string; value: string }>;
-    attachments?: unknown[];
+    attachments?: IncomingAttachment[];
   };
   const chatId = body.chatId?.trim();
   const message = body.message?.trim() || "";
@@ -73,8 +74,19 @@ export async function POST(req: Request) {
   if (!chat || (!message && !body.attachments?.length)) {
     return Response.json({ error: "chatId and message or attachments are required" }, { status: 400 });
   }
+  let stored = [];
+  try {
+    stored = body.attachments?.length ? saveAttachments(chat.id, body.attachments).stored : [];
+  } catch (error) {
+    return Response.json({ error: String(error) }, { status: 400 });
+  }
   const messageId = body.messageId?.trim();
-  appendMessage(chat.id, { id: messageId, role: "user", content: message || "Attached files" });
+  appendMessage(chat.id, {
+    id: messageId,
+    role: "user",
+    content: message || "Attached files",
+    ...(stored.length ? { attachments: stored } : {}),
+  });
   const job = enqueueJob({
     chatId: chat.id,
     userId,
@@ -84,7 +96,7 @@ export async function POST(req: Request) {
     ...(body.agentId ? { agentId: body.agentId } : {}),
     ...(body.modelId ? { modelId: body.modelId } : {}),
     ...(body.modelParams ? { modelParams: body.modelParams } : {}),
-    ...(body.attachments ? { attachments: body.attachments } : {}),
+    ...(stored.length ? { attachments: stored } : {}),
   });
   return Response.json({ job }, { status: 202 });
 }

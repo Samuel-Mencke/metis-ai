@@ -3,6 +3,7 @@ import {
   appendMessage,
   createChat,
   getChat,
+  getGlobalModelSettings,
   listMemories,
   updateChat,
   upsertMessage,
@@ -12,6 +13,7 @@ import {
 import { getAgentCwd, getMcpServers } from "@/lib/mcp";
 import { appendRunEvent, enqueueJob, getJob, touchJob, updateJob } from "@/lib/db-jobs";
 import { isModelAllowed } from "@/lib/model-access";
+import { buildAttachmentPrompt } from "@/lib/uploads";
 import type { AgentJob } from "@/lib/jobs";
 
 function classifyTool(name: string): ToolPart["kind"] {
@@ -150,6 +152,12 @@ function closeAskUserTools(tools: ToolPart[], status: string) {
   }
 }
 
+function closeRunningTools(tools: ToolPart[], status: string) {
+  for (const tool of tools) {
+    if (tool.status === "running") tool.status = status;
+  }
+}
+
 function extractWorkspace(value: string) {
   const visit = (candidate: unknown, depth = 0): {
     type?: "plan" | "canvas";
@@ -273,6 +281,27 @@ export async function runQueuedJob(job: AgentJob) {
   const createdWorkspaces: WorkspaceItem[] = [];
   const createdChats: Array<{ id: string; title: string }> = [];
   const mcpContext = { chatId: job.chatId, userId: job.userId, jobId: job.id };
+  const globalModelSettings = getGlobalModelSettings(job.userId);
+  const configuredSubagentModel = globalModelSettings.subagentModelEnabled
+    ? globalModelSettings.subagentModelId
+    : undefined;
+  const customSubagentDefinitions = configuredSubagentModel
+    ? Object.fromEntries(
+        ["generalPurpose", "explore", "shell", "browser-use", "bugbot", "security-review", "best-of-n-runner"]
+          .map((name) => [
+            name,
+            {
+              description: `Delegate work to a ${name} subagent using the configured standard model.`,
+              prompt: `Use the configured standard subagent model (${configuredSubagentModel}) for this task.`,
+              model: { id: configuredSubagentModel },
+            },
+          ]),
+      )
+    : undefined;
+  const subagentModelInstruction =
+    configuredSubagentModel
+      ? `Subagent model policy: whenever you delegate work to a subagent, use model "${configuredSubagentModel}". Do not override this configured model with another model.`
+      : "Subagent model policy: no standard subagent model is configured. Choose the subagent model yourself.";
   const heartbeat = setInterval(() => {
     touchJob(job.id);
   }, 30_000);
@@ -339,12 +368,14 @@ export async function runQueuedJob(job: AgentJob) {
           model,
           local: { cwd: getAgentCwd(), settingSources: ["project"] },
           mcpServers: getMcpServers(mcpContext),
+          ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
         })
       : await Agent.create({
           apiKey,
           model,
           local: { cwd: getAgentCwd(), settingSources: ["project"] },
           mcpServers: getMcpServers(mcpContext),
+          ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
         });
     const prompt = [
       `Memories:\n${listMemories(job.userId).map((memory) => `- ${memory.content}`).join("\n") || "(none yet)"}`,
@@ -353,7 +384,9 @@ export async function runQueuedJob(job: AgentJob) {
       "To create a plan or canvas, call the MCP tools create_plan or create_canvas with title and content. Use an empty content string for a blank workspace, and do not claim creation without a completed tool call.",
       "You can create a follow-up chat by outputting exactly one or more fenced blocks in this format:\n```chat title=\"Short title\"\nMessage to send in the new chat\n```\nThe block creates a new chat for the current user, sends the message there, and starts an agent run. Do not claim a chat was created without outputting this block.",
       "When useful, offer up to five concise follow-up questions at the end using exactly this UI-only format. Use `display text => prompt to insert` when the visible label should differ from the inserted prompt:\n```suggestions\nExplain this in more detail => Explain the database synchronization in more detail, with a concrete example.\nShow me an example\n```\nDo not mention or explain this format outside the block.",
+      subagentModelInstruction,
       `User message:\n${job.message || "(see attachments)"}`,
+      buildAttachmentPrompt(job.chatId, job.attachments),
       job.references?.length
         ? `Selected references:\n${job.references.map((reference) => [
             `- [${reference.kind}] ${reference.label}`,
@@ -481,7 +514,19 @@ export async function runQueuedJob(job: AgentJob) {
       getJob(job.id)?.status === "cancelled" ||
       result.status === "cancelled";
     if (wasCancelled) {
-      closeAskUserTools(tools, "cancelled");
+      closeRunningTools(tools, "cancelled");
+      checkpoint();
+      for (const tool of tools) {
+        emit("tool", {
+          callId: tool.id,
+          name: tool.name,
+          status: tool.status,
+          kind: tool.kind,
+          ...(tool.input ? { input: tool.input } : {}),
+          ...(tool.result ? { result: tool.result } : {}),
+          ...(tool.subagent ? { subagent: tool.subagent } : {}),
+        });
+      }
       updateChat(job.chatId, {
         runStatus: "cancelled",
         runUpdatedAt: new Date().toISOString(),
