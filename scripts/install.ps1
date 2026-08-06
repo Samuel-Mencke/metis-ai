@@ -248,13 +248,7 @@ function Install-Dependencies {
   Push-Location $InstallDir
   try {
     if ((Test-Path "pnpm-lock.yaml") -and (Get-Command corepack -ErrorAction SilentlyContinue)) {
-      try {
-        Invoke-Step "corepack" @("pnpm", "install", "--frozen-lockfile")
-      } catch {
-        if (-not $Json) { Write-Host "pnpm blocked dependency build scripts; approving required native builds automatically." }
-        Invoke-Step "corepack" @("pnpm", "approve-builds", "esbuild", "node-pty", "sharp", "fsevents")
-        Invoke-Step "corepack" @("pnpm", "install", "--frozen-lockfile")
-      }
+      Invoke-Step "corepack" @("pnpm", "install", "--frozen-lockfile")
       if (-not $SkipBuild) { Invoke-Step "corepack" @("pnpm", "run", "build") }
     } else {
       Invoke-Step "npm" @("install")

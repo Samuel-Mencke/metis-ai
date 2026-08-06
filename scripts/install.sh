@@ -323,11 +323,7 @@ EOF
 install_dependencies() {
   cd "$INSTALL_DIR"
   if [[ -f pnpm-lock.yaml ]] && command -v corepack >/dev/null 2>&1; then
-    if ! run_step corepack pnpm install --frozen-lockfile; then
-      [[ "$JSON_OUTPUT" == true ]] || info "pnpm blocked dependency build scripts; approving required native builds automatically."
-      run_step corepack pnpm approve-builds esbuild node-pty sharp fsevents
-      run_step corepack pnpm install --frozen-lockfile
-    fi
+    run_step corepack pnpm install --frozen-lockfile
     $SKIP_BUILD || run_step corepack pnpm run build
   else
     run_step npm install
