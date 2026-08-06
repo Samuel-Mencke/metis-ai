@@ -193,14 +193,18 @@ interactive_setup() {
   local service_choice
   INSTALL_DIR="$(read_tty "Install directory" "$INSTALL_DIR")"
   DATA_DIR="$(read_tty "Data directory" "${DATA_DIR:-$INSTALL_DIR/data}")"
-  AGENT_CWD="$(read_tty "Agent workspace" "${AGENT_CWD:-$INSTALL_DIR}")"
+  AGENT_CWD="$(read_tty "Agent workspace" "${AGENT_CWD:-$INSTALL_DIR/workspace}")"
   PORT="$(read_tty "Web port" "$PORT")"
   MCP_PORT="$(read_tty "MCP port" "$MCP_PORT")"
   APP_NAME="$(read_tty "Application name" "$APP_NAME")"
   CHAT_USERNAME="$(read_tty "Chat username" "$CHAT_USERNAME")"
   if [[ -z "$CHAT_PASSWORD" ]]; then CHAT_PASSWORD="$(read_secret_tty "Chat password (empty generates one)")"; fi
-  service_choice="$(choose "Worker service setup" "No service" "Install systemd service")"
-  [[ "$service_choice" == "Install systemd service" ]] && ENABLE_SERVICE=true
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    service_choice="$(choose "Worker service setup" "No service" "Install systemd service")"
+    [[ "$service_choice" == "Install systemd service" ]] && ENABLE_SERVICE=true
+  else
+    info "macOS detected: systemd service setup is not available; continuing without a worker service."
+  fi
   if [[ -z "$SOURCE" || "$SOURCE" == "github" ]]; then
     SOURCE="$(read_tty "Source (github, archive URL, or local directory)" "${SOURCE:-github}")"
   fi
@@ -319,7 +323,11 @@ EOF
 install_dependencies() {
   cd "$INSTALL_DIR"
   if [[ -f pnpm-lock.yaml ]] && command -v corepack >/dev/null 2>&1; then
-    run_step corepack pnpm install --frozen-lockfile
+    if ! run_step corepack pnpm install --frozen-lockfile; then
+      [[ "$JSON_OUTPUT" == true ]] || info "pnpm blocked dependency build scripts; approving required native builds automatically."
+      run_step corepack pnpm approve-builds esbuild node-pty sharp fsevents
+      run_step corepack pnpm install --frozen-lockfile
+    fi
     $SKIP_BUILD || run_step corepack pnpm run build
   else
     run_step npm install

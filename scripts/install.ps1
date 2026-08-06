@@ -30,7 +30,7 @@ if (-not $InstallDir) {
   $InstallDir = if ($env:METIS_AI_INSTALL_DIR) { $env:METIS_AI_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "MetisAI" }
 }
 if (-not $DataDir) { $DataDir = Join-Path $InstallDir "data" }
-if (-not $AgentCwd) { $AgentCwd = $InstallDir }
+if (-not $AgentCwd) { $AgentCwd = Join-Path $InstallDir "workspace" }
 if (-not $Source) { $Source = if ($env:METIS_AI_SOURCE) { $env:METIS_AI_SOURCE } else { "github" } }
 
 function Fail([string]$Message) {
@@ -248,7 +248,13 @@ function Install-Dependencies {
   Push-Location $InstallDir
   try {
     if ((Test-Path "pnpm-lock.yaml") -and (Get-Command corepack -ErrorAction SilentlyContinue)) {
-      Invoke-Step "corepack" @("pnpm", "install", "--frozen-lockfile")
+      try {
+        Invoke-Step "corepack" @("pnpm", "install", "--frozen-lockfile")
+      } catch {
+        if (-not $Json) { Write-Host "pnpm blocked dependency build scripts; approving required native builds automatically." }
+        Invoke-Step "corepack" @("pnpm", "approve-builds", "esbuild", "node-pty", "sharp", "fsevents")
+        Invoke-Step "corepack" @("pnpm", "install", "--frozen-lockfile")
+      }
       if (-not $SkipBuild) { Invoke-Step "corepack" @("pnpm", "run", "build") }
     } else {
       Invoke-Step "npm" @("install")
