@@ -40,6 +40,10 @@ export type SseEvent =
   | { event: "status"; data: { status: string; message?: string } }
   | { event: "agentId"; data: { agentId: string } }
   | { event: "assistantId"; data: { messageId: string } }
+  | {
+      event: "suggestions";
+      data: { suggestions: Array<string | { label: string; prompt: string }> };
+    }
   | { event: "canvas"; data: { canvas: string } }
   | { event: "workspace"; data: { workspace: import("@/lib/store").WorkspaceItem } }
   | {

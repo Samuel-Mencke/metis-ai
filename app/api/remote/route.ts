@@ -3,11 +3,12 @@ import { randomUUID } from "node:crypto";
 import * as pty from "node-pty";
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { callRemoteGatewayTool } from "@/lib/remote-gateway";
+import { config } from "@/lib/config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const DEFAULT_CWD = process.env.AGENT_CWD?.trim() || "/home/f1shy312";
+const DEFAULT_CWD = config.agentCwd;
 const terminalSessions = new Map<string, {
   ownerId?: string;
   cwd: string;

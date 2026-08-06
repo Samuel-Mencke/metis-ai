@@ -158,8 +158,8 @@ export function JailbreakPromptPicker({ modelDisplayName, onPick, className }: P
         type="button"
         variant="ghost"
         size="icon-sm"
-        aria-label="Jailbreak-Prompt auswählen"
-        title="Jailbreak-Prompt auswählen"
+        aria-label="Select jailbreak prompt"
+        title="Select jailbreak prompt"
         className={cn("size-7 rounded-full text-muted-foreground", className)}
         onClick={() => setOpen(true)}
       >
@@ -172,9 +172,9 @@ export function JailbreakPromptPicker({ modelDisplayName, onPick, className }: P
           className="gap-0 overflow-hidden p-0 max-sm:top-[2dvh] max-sm:max-h-[46dvh] max-sm:translate-y-0 sm:max-w-lg"
         >
           <DialogHeader className="sr-only">
-            <DialogTitle>Jailbreak-Prompt auswählen</DialogTitle>
+            <DialogTitle>Select jailbreak prompt</DialogTitle>
             <DialogDescription>
-              Durchsuche die Red-Teaming-Prompt-Sammlung und füge einen Prompt in den Chat ein.
+              Browse the red-teaming prompt collection and insert a prompt into the chat.
             </DialogDescription>
           </DialogHeader>
 
@@ -244,10 +244,10 @@ export function JailbreakPromptPicker({ modelDisplayName, onPick, className }: P
           {/* Results */}
           <div className="max-h-[min(40vh,360px)] overflow-y-auto p-1">
             {!data ? (
-              <p className="px-2 py-4 text-center text-xs text-muted-foreground">Lade Prompts…</p>
+              <p className="px-2 py-4 text-center text-xs text-muted-foreground">Loading prompts…</p>
             ) : filtered.length === 0 ? (
               <p className="px-2 py-4 text-center text-xs text-muted-foreground">
-                Keine Treffer.
+                No matches.
               </p>
             ) : (
               <>

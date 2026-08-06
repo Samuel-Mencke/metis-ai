@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { config } from "@/lib/config";
 
 export type JobStatus =
   | "queued"
@@ -37,7 +38,7 @@ export type AgentJob = {
   error?: string;
 };
 
-const dataDir = process.env.CHAT_DATA_DIR?.trim() || path.join(process.cwd(), "data");
+const dataDir = config.dataDir;
 const jobsPath = path.join(dataDir, "jobs.json");
 
 function readJobs() {

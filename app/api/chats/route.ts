@@ -8,7 +8,13 @@ export async function GET(req: Request) {
   if (!(await isAuthenticated(req))) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
-  return Response.json({ chats: listChatsForUser(await getAuthenticatedUserId(req) ?? undefined) });
+  const includeArchived = new URL(req.url).searchParams.get("includeArchived") === "true";
+  return Response.json({
+    chats: listChatsForUser(
+      await getAuthenticatedUserId(req) ?? undefined,
+      { includeArchived },
+    ),
+  });
 }
 
 export async function POST(req: Request) {

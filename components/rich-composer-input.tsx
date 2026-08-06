@@ -16,7 +16,6 @@ type RichComposerInputProps = {
   onChange: (value: string, cursorPosition: number) => void;
   onKeyDown?: (event: KeyboardEvent<HTMLDivElement>) => void;
   onPaste?: (event: ClipboardEvent<HTMLDivElement>) => void;
-  onLinkClick?: () => void;
   placeholder?: string;
   className?: string;
   disabled?: boolean;
@@ -105,7 +104,6 @@ export const RichComposerInput = forwardRef<HTMLDivElement, RichComposerInputPro
       onChange,
       onKeyDown,
       onPaste,
-      onLinkClick,
       placeholder,
       className,
       disabled,
@@ -154,7 +152,7 @@ export const RichComposerInput = forwardRef<HTMLDivElement, RichComposerInputPro
         onPaste={onPaste}
         onClick={(event) => {
           const target = event.target as HTMLElement;
-          if (target.closest("[data-composer-link]")) onLinkClick?.();
+          if (target.closest("[data-composer-link]")) event.preventDefault();
         }}
       />
     );

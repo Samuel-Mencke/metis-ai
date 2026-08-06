@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { authenticateUser, CHAT_COOKIE } from "@/lib/auth";
+import { config } from "@/lib/config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,7 +13,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const username = body.username?.trim() || process.env.CHAT_USERNAME?.trim() || "f1shy312";
+  const username = body.username?.trim() || config.chatUsername;
   const result = authenticateUser(username, body.password ?? "");
   if (!result) {
     return NextResponse.json({ error: "Invalid username or password" }, { status: 401 });

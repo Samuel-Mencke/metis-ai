@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 export type PlanWorkspaceCardProps = {
   title: string;
   content: string;
+  workspaceLink?: string;
   onOpen?: () => void;
   onBuild?: () => void;
   buildDisabled?: boolean;
@@ -15,6 +16,7 @@ export type PlanWorkspaceCardProps = {
 export function PlanWorkspaceCard({
   title,
   content,
+  workspaceLink,
   onOpen,
   onBuild,
   buildDisabled = false,
@@ -35,6 +37,7 @@ export function PlanWorkspaceCard({
           <div className="mt-1 max-h-24 overflow-hidden text-xs text-muted-foreground">
             {content ? <Markdown content={content} /> : <p>No plan details available yet.</p>}
           </div>
+          {workspaceLink ? <p className="mt-1 truncate text-[10px] text-blue-300/70">{workspaceLink}</p> : null}
         </div>
         {onOpen ? (
           <button

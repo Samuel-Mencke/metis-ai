@@ -1,4 +1,4 @@
-import { isAuthenticated } from "@/lib/auth";
+import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import {
   getGlobalModelSettings,
   saveGlobalModelSettings,
@@ -11,7 +11,7 @@ export async function GET(req: Request) {
   if (!(await isAuthenticated(req))) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
-  return Response.json({ settings: getGlobalModelSettings() });
+  return Response.json({ settings: getGlobalModelSettings((await getAuthenticatedUserId(req)) ?? undefined) });
 }
 
 export async function PATCH(req: Request) {
@@ -33,6 +33,6 @@ export async function PATCH(req: Request) {
       )
     : undefined;
   return Response.json({
-    settings: saveGlobalModelSettings({ modelId, modelParams }),
+    settings: saveGlobalModelSettings({ modelId, modelParams }, (await getAuthenticatedUserId(req)) ?? undefined),
   });
 }

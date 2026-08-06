@@ -11,6 +11,7 @@ import {
 } from "@/lib/db-store";
 import { getAgentCwd, getMcpServers } from "@/lib/mcp";
 import { appendRunEvent, enqueueJob, getJob, touchJob, updateJob } from "@/lib/db-jobs";
+import { isModelAllowed } from "@/lib/model-access";
 import type { AgentJob } from "@/lib/jobs";
 
 function classifyTool(name: string): ToolPart["kind"] {
@@ -102,16 +103,39 @@ function normalizeToolId(value: string) {
   return value.trim().replace(/\s+/g, "");
 }
 
+function isFinishedToolStatus(value: string) {
+  return ["completed", "success", "succeeded", "done"].includes(value.trim().toLowerCase());
+}
+
 function isAskUserTool(tool: ToolPart) {
-  if (tool.name.trim().toLowerCase() === "ask_user") return true;
+  const normalizedName = tool.name.trim().toLowerCase().replaceAll("-", "_");
+  if (
+    normalizedName === "ask_user" ||
+    normalizedName.endsWith(".ask_user") ||
+    normalizedName.endsWith("/ask_user") ||
+    normalizedName.endsWith(":ask_user")
+  ) {
+    return true;
+  }
   if (!tool.input) return false;
   try {
     const input = JSON.parse(tool.input) as {
       toolName?: unknown;
       name?: unknown;
+      tool?: unknown;
+      arguments?: { toolName?: unknown; name?: unknown; tool?: unknown };
     };
-    return [input.toolName, input.name].some(
-      (name) => typeof name === "string" && name.trim().toLowerCase() === "ask_user",
+    return [
+      input.toolName,
+      input.name,
+      input.tool,
+      input.arguments?.toolName,
+      input.arguments?.name,
+      input.arguments?.tool,
+    ].some(
+      (name) =>
+        typeof name === "string" &&
+        name.trim().toLowerCase().replaceAll("-", "_") === "ask_user",
     );
   } catch {
     return false;
@@ -126,29 +150,94 @@ function closeAskUserTools(tools: ToolPart[], status: string) {
   }
 }
 
-function extractPlan(value: string) {
-  const plain = value.trim();
-  if (!plain) return null;
-  try {
-    const parsed = JSON.parse(plain) as Record<string, unknown>;
+function extractWorkspace(value: string) {
+  const visit = (candidate: unknown, depth = 0): {
+    type?: "plan" | "canvas";
+    id?: string;
+    workspaceLink?: string;
+    title: string;
+    content: string;
+  } | null => {
+    if (depth > 8 || candidate == null) return null;
+    if (typeof candidate === "string") {
+      const plain = candidate.trim();
+      if (!plain) return null;
+      try {
+        return visit(JSON.parse(plain), depth + 1);
+      } catch {
+        return plain.startsWith("{") ? null : { title: "Plan", content: plain };
+      }
+    }
+    if (Array.isArray(candidate)) {
+      for (const item of candidate) {
+        const result = visit(item, depth + 1);
+        if (result) return result;
+      }
+      return null;
+    }
+    if (typeof candidate !== "object") return null;
+    const parsed = candidate as Record<string, unknown>;
     const nested = parsed.value && typeof parsed.value === "object"
       ? parsed.value as Record<string, unknown>
       : {};
-    const content = [parsed.plan, parsed.content, nested.plan, nested.content]
-      .find((candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0);
-    if (!content) return null;
-    const title = [parsed.title, parsed.name, nested.title, nested.name]
-      .find((candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0);
-    return { title: title?.trim() || "Plan", content: content.trim() };
-  } catch {
-    return plain.startsWith("{") ? null : { title: "Plan", content: plain };
-  }
+    const contentCandidate = [parsed.content, parsed.plan, nested.content, nested.plan]
+      .find((item): item is string => typeof item === "string");
+    if (contentCandidate !== undefined) {
+      const type = [parsed.type, nested.type]
+        .find((item): item is "plan" | "canvas" => item === "plan" || item === "canvas");
+      const title = [parsed.title, parsed.name, nested.title, nested.name]
+        .find((item): item is string => typeof item === "string" && item.trim().length > 0);
+      const id = [parsed.id, nested.id]
+        .find((item): item is string => typeof item === "string" && item.trim().length > 0);
+      const workspaceLink = [parsed.workspaceLink, nested.workspaceLink]
+        .find((item): item is string => typeof item === "string" && item.trim().length > 0);
+      return {
+        type,
+        id,
+        workspaceLink,
+        title: title?.trim() || (type === "canvas" ? "Canvas" : "Plan"),
+        content: contentCandidate,
+      };
+    }
+    for (const key of ["value", "content", "text", "result"]) {
+      const result = visit(parsed[key], depth + 1);
+      if (result) return result;
+    }
+    return null;
+  };
+  return visit(value);
+}
+
+function extractSuggestions(value: string) {
+  const match = value.match(/```suggestions\s*\n([\s\S]*?)```/i);
+  if (!match) return { text: value, suggestions: [] as string[] };
+  const suggestions = match[1]
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim())
+    .filter(Boolean)
+    .map((line) => {
+      const separator = line.indexOf("=>");
+      if (separator <= 0) return line;
+      const label = line.slice(0, separator).trim();
+      const prompt = line.slice(separator + 2).trim();
+      return label && prompt ? { label, prompt } : line;
+    })
+    .slice(0, 5);
+  return {
+    text: value.replace(match[0], "").replace(/\n{3,}/g, "\n\n").trim(),
+    suggestions,
+  };
 }
 
 export async function runQueuedJob(job: AgentJob) {
   const chat = getChat(job.chatId, job.userId);
   if (!chat) {
     updateJob(job.id, { status: "error", error: "Chat not found or access denied." });
+    return;
+  }
+  const requestedModelId = job.modelId || chat.modelId || "composer-2.5";
+  if (!isModelAllowed(job.userId, requestedModelId)) {
+    updateJob(job.id, { status: "error", error: "This model is not available for your account." });
     return;
   }
   const apiKey = process.env.CURSOR_API_KEY?.trim();
@@ -191,7 +280,7 @@ export async function runQueuedJob(job: AgentJob) {
   };
   const persistWorkspace = (type: WorkspaceItem["type"], content: string, name = type === "plan" ? "Plan" : "Canvas") => {
     const current = getChat(job.chatId, job.userId);
-    if (!current || !content.trim()) return;
+    if (!current) return;
     const timestamp = new Date().toISOString();
     const heading = content.match(/^\s{0,3}#\s+(.+?)\s*$/m)?.[1]?.trim();
     const requestedName = name.trim();
@@ -230,14 +319,12 @@ export async function runQueuedJob(job: AgentJob) {
     }
     return workspace;
   };
-  const persistPlan = (content: string, name = "Plan") =>
-    persistWorkspace("plan", content, name);
   try {
     const modelParams = job.modelParams?.length
       ? job.modelParams
       : chat.modelParams;
     const model = {
-      id: job.modelId || chat.modelId || "composer-2.5",
+      id: requestedModelId,
       ...(modelParams?.length ? { params: modelParams } : {}),
     };
     agent = job.agentId || chat.agentId
@@ -254,10 +341,12 @@ export async function runQueuedJob(job: AgentJob) {
           mcpServers: getMcpServers(mcpContext),
         });
     const prompt = [
-      `Memories:\n${listMemories().map((memory) => `- ${memory.content}`).join("\n") || "(none yet)"}`,
+      `Memories:\n${listMemories(job.userId).map((memory) => `- ${memory.content}`).join("\n") || "(none yet)"}`,
       `Existing workspaces:\n${chat.workspaces?.map((item) => `[${item.type}] ${item.name} (link: workspace://${item.type}/${item.id})\n${item.content}`).join("\n\n") || "(none)"}`,
       "When referring to an existing or newly created plan/canvas, include its exact Markdown link using workspace://plan/<id> or workspace://canvas/<id>.",
+      "To create a plan or canvas, call the MCP tools create_plan or create_canvas with title and content. Use an empty content string for a blank workspace, and do not claim creation without a completed tool call.",
       "You can create a follow-up chat by outputting exactly one or more fenced blocks in this format:\n```chat title=\"Short title\"\nMessage to send in the new chat\n```\nThe block creates a new chat for the current user, sends the message there, and starts an agent run. Do not claim a chat was created without outputting this block.",
+      "When useful, offer up to five concise follow-up questions at the end using exactly this UI-only format. Use `display text => prompt to insert` when the visible label should differ from the inserted prompt:\n```suggestions\nExplain this in more detail => Explain the database synchronization in more detail, with a concrete example.\nShow me an example\n```\nDo not mention or explain this format outside the block.",
       `User message:\n${job.message || "(see attachments)"}`,
       job.references?.length
         ? `Selected references:\n${job.references.map((reference) => [
@@ -327,12 +416,33 @@ export async function runQueuedJob(job: AgentJob) {
         const toolResult = typeof toolEvent.result === "string"
           ? toolEvent.result
           : toolEvent.result ? JSON.stringify(toolEvent.result) : "";
-        const parsedPlan =
-          extractPlan(toolResult) ||
-          (toolEvent.args !== undefined ? extractPlan(JSON.stringify(toolEvent.args)) : null) ||
-          (existingTool?.input ? extractPlan(existingTool.input) : null);
-        if (toolStatus === "completed" && nextTool.kind === "plan" && parsedPlan) {
-          persistPlan(parsedPlan.content, parsedPlan.title);
+        const parsedWorkspace =
+          extractWorkspace(toolResult) ||
+          (toolEvent.args !== undefined ? extractWorkspace(JSON.stringify(toolEvent.args)) : null) ||
+          (existingTool?.input ? extractWorkspace(existingTool.input) : null);
+        if (isFinishedToolStatus(toolStatus) && (nextTool.kind === "plan" || nextTool.kind === "canvas") && parsedWorkspace) {
+          const workspaceType: WorkspaceItem["type"] = nextTool.kind === "canvas" ? "canvas" : "plan";
+          const workspace: WorkspaceItem | undefined = parsedWorkspace.id
+            ? {
+                id: parsedWorkspace.id,
+                type: workspaceType,
+                name: parsedWorkspace.title,
+                content: parsedWorkspace.content,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+              }
+            : persistWorkspace(workspaceType, parsedWorkspace.content, parsedWorkspace.title);
+          if (workspace) {
+            if (parsedWorkspace.id && !createdWorkspaces.some((item) => item.id === workspace.id)) {
+              createdWorkspaces.push(workspace);
+            }
+            emit("workspace", { workspace });
+            nextTool.result = JSON.stringify({
+              ...parsedWorkspace,
+              id: workspace.id,
+              workspaceLink: `workspace://${workspace.type}/${workspace.id}`,
+            });
+          }
         }
         emit("tool", {
           callId: toolId,
@@ -379,6 +489,18 @@ export async function runQueuedJob(job: AgentJob) {
     // before persisting the assistant message so the UI reflects the actual
     // completed run.
     closeAskUserTools(tools, result.status === "error" ? "error" : "completed");
+    for (const tool of tools) {
+      if (!isAskUserTool(tool)) continue;
+      emit("tool", {
+        callId: tool.id,
+        name: tool.name,
+        status: tool.status,
+        kind: tool.kind,
+        ...(tool.input ? { input: tool.input } : {}),
+        ...(tool.result ? { result: tool.result } : {}),
+      });
+    }
+    checkpoint();
     if (!text && result.result) text = String(result.result);
     if (text) {
       const chatBlocks = [...text.matchAll(/```chat(?:\s+title=(?:"([^"]+)"|'([^']+)'|([^\s]+)))?\s*\n([\s\S]*?)```/gi)];
@@ -413,7 +535,9 @@ export async function runQueuedJob(job: AgentJob) {
         text = text.replace(/```chat(?:\s+title=(?:"([^"]+)"|'([^']+)'|([^\s]+)))?\s*\n([\s\S]*?)```/gi, "").trim();
       }
       const fenced = text.match(/```plan(?:\s+name=(?:"([^"]+)"|'([^']+)'|(\S+)))?\s*\n([\s\S]*?)```/i);
-      const plan = fenced ? persistPlan(fenced[4], fenced[1] || fenced[2] || fenced[3] || "Plan") : null;
+      const plan = fenced
+        ? persistWorkspace("plan", fenced[4], fenced[1] || fenced[2] || fenced[3] || "Plan")
+        : null;
       const canvasFence = text.match(/```canvas(?:\s+name=(?:"([^"]+)"|'([^']+)'|(\S+)))?\s*\n([\s\S]*?)```/i);
       const canvas = canvasFence
         ? persistWorkspace("canvas", canvasFence[4], canvasFence[1] || canvasFence[2] || canvasFence[3] || "Canvas")
@@ -439,12 +563,20 @@ export async function runQueuedJob(job: AgentJob) {
         .join("\n");
       text = [workspaceLinks, chatLinks].filter(Boolean).join("\n");
     }
+    const extractedSuggestions = extractSuggestions(text);
+    text = extractedSuggestions.text;
+    if (extractedSuggestions.suggestions.length) {
+      emit("suggestions", { suggestions: extractedSuggestions.suggestions });
+    }
     const completedAt = new Date().toISOString();
     const usage = result.usage;
     upsertMessage(job.chatId, {
       id: assistantMessageId,
       role: "assistant",
       content: text,
+      ...(extractedSuggestions.suggestions.length
+        ? { suggestions: extractedSuggestions.suggestions }
+        : {}),
       ...(tools.length ? { tools } : {}),
       ...(result.status === "finished"
         ? {

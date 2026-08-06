@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { config } from "@/lib/config";
 
 export type ToolPart = {
   id: string;
@@ -39,9 +40,10 @@ export type ChatMessage = {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
+  referenceText?: string;
   thinking?: string;
   tools?: ToolPart[];
-  suggestions?: string[];
+  suggestions?: Array<string | { label: string; prompt: string }>;
   references?: Array<{
     kind: string;
     id: string;
@@ -110,14 +112,24 @@ export type ChatRunStatus =
 export type ChatBadge = "blue" | "red";
 
 export type ChatSessionState = {
+  input?: string;
   remoteCwd?: string;
   terminalCwd?: string;
   fileCwd?: string;
   terminalSessionId?: string;
+  terminalTabs?: TerminalTab[];
+  activeTerminalTabId?: string;
   workspaceTab?: "canvas" | "plan" | "terminal" | "files" | "browser";
   activeWorkspaceId?: string | null;
   workspaceOpen?: boolean;
   workspaceWidth?: number;
+};
+
+export type TerminalTab = {
+  id: string;
+  title: string;
+  cwd: string;
+  sessionId?: string;
 };
 
 export type Chat = {
@@ -139,6 +151,8 @@ export type Chat = {
   runUpdatedAt?: string;
   pendingQuestion?: PendingChatQuestion;
   badge?: ChatBadge;
+  pinned?: boolean;
+  archived?: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -155,6 +169,8 @@ export type ChatIndexEntry = {
   runUpdatedAt?: string;
   pendingQuestion?: PendingChatQuestion;
   badge?: ChatBadge;
+  pinned?: boolean;
+  archived?: boolean;
 };
 
 export type Memory = {
@@ -165,9 +181,7 @@ export type Memory = {
   updatedAt: string;
 };
 
-const DATA_DIR =
-  process.env.CHAT_DATA_DIR?.trim() ||
-  path.join(process.cwd(), "data");
+const DATA_DIR = config.dataDir;
 const CHATS_DIR = path.join(DATA_DIR, "chats");
 const INDEX_PATH = path.join(CHATS_DIR, "index.json");
 const MEMORIES_PATH = path.join(DATA_DIR, "memories.json");
@@ -634,10 +648,10 @@ Memories:
 ${lines.join("\n")}
 
 You MAY and SHOULD autonomously:
-- Append/update memories by editing ai-chat/data/memories.json (cwd is /home/f1shy312; full path /home/f1shy312/ai-chat/data/memories.json). Keep valid JSON array of { id, content, tags?, createdAt, updatedAt }. Use new UUIDs for new entries; set createdAt/updatedAt to ISO timestamps.
-- Write Cursor rules to /home/f1shy312/.cursor/rules/*.mdc
-- Write skills to /home/f1shy312/.cursor/skills/<name>/SKILL.md
-- Update /home/f1shy312/AGENTS.md when lasting preferences appear
+- Append/update memories by editing ${path.join(DATA_DIR, "memories.json")}. Keep valid JSON array of { id, content, tags?, createdAt, updatedAt }. Use new UUIDs for new entries; set createdAt/updatedAt to ISO timestamps.
+- Write Cursor rules to ${path.join(config.agentCwd, ".cursor", "rules")}/*.mdc
+- Write skills to ${path.join(config.agentCwd, ".cursor", "skills")}/<name>/SKILL.md
+- Update ${path.join(config.agentCwd, "AGENTS.md")} when lasting preferences appear
 When you learn a durable user preference or fact, save a memory immediately without asking.
 [/SYSTEM CONTEXT]`;
 }

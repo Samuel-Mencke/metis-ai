@@ -1,4 +1,4 @@
-import { isAuthenticated } from "@/lib/auth";
+import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { deleteMemory, updateMemory } from "@/lib/db-store";
 
 export const runtime = "nodejs";
@@ -18,7 +18,7 @@ export async function PATCH(req: Request, { params }: Params) {
     return Response.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const memory = updateMemory(id, body);
+  const memory = updateMemory(id, body, (await getAuthenticatedUserId(req)) ?? undefined);
   if (!memory) {
     return Response.json({ error: "Not found" }, { status: 404 });
   }
@@ -30,7 +30,7 @@ export async function DELETE(req: Request, { params }: Params) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
   const { id } = await params;
-  if (!deleteMemory(id)) {
+  if (!deleteMemory(id, (await getAuthenticatedUserId(req)) ?? undefined)) {
     return Response.json({ error: "Not found" }, { status: 404 });
   }
   return Response.json({ ok: true });

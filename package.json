@@ -1,11 +1,11 @@
 {
-  "name": "ai-chat",
+  "name": "metis-ai",
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3100",
-    "build": "/home/f1shy312/.nvm/versions/node/v24.19.0/bin/node /home/f1shy312/ai-chat/node_modules/next/dist/bin/next build",
-    "start": "next start -p 3100",
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
     "lint": "next lint"
   },
   "dependencies": {

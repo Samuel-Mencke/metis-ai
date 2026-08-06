@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Lock, Plus, Trash2 } from "lucide-react";
+import { Archive, ArchiveRestore, Lock, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -40,6 +40,14 @@ type McpServer = {
   enabled?: boolean;
   configured_env_keys?: string[];
   configured_header_keys?: string[];
+};
+
+type ArchivedChat = {
+  id: string;
+  title: string;
+  updatedAt: string;
+  pinned?: boolean;
+  archived?: boolean;
 };
 
 type McpDraft = {
@@ -96,6 +104,7 @@ type Props = {
   notificationsEnabled: boolean;
   onNotificationsEnabledChange: (enabled: boolean) => void;
   onMemoriesChanged: () => void;
+  onChatsChanged: () => void;
   onLogout: () => void;
 };
 
@@ -107,6 +116,7 @@ export function SettingsPanel({
   notificationsEnabled,
   onNotificationsEnabledChange,
   onMemoriesChanged,
+  onChatsChanged,
   onLogout,
 }: Props) {
   const [draft, setDraft] = useState("");
@@ -115,6 +125,8 @@ export function SettingsPanel({
   const [mcpLoaded, setMcpLoaded] = useState(false);
   const [mcpDraft, setMcpDraft] = useState<McpDraft>(emptyMcpDraft);
   const [mcpBusy, setMcpBusy] = useState(false);
+  const [archivedChats, setArchivedChats] = useState<ArchivedChat[]>([]);
+  const [archivedChatsLoaded, setArchivedChatsLoaded] = useState(false);
   const [browserNotificationsAvailable, setBrowserNotificationsAvailable] =
     useState(false);
   useEffect(() => {
@@ -136,9 +148,52 @@ export function SettingsPanel({
     }
   }, []);
 
+  const loadArchivedChats = useCallback(async () => {
+    setArchivedChatsLoaded(false);
+    try {
+      const res = await fetch("/api/chats?includeArchived=true", { cache: "no-store" });
+      if (!res.ok) throw new Error("Failed to load archived chats");
+      const data = (await res.json()) as { chats?: ArchivedChat[] };
+      setArchivedChats((data.chats || []).filter((chat) => chat.archived));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to load archived chats");
+    } finally {
+      setArchivedChatsLoaded(true);
+    }
+  }, []);
+
   useEffect(() => {
-    if (open) void loadMcpServers();
-  }, [loadMcpServers, open]);
+    if (open) {
+      void loadMcpServers();
+      void loadArchivedChats();
+    }
+  }, [loadArchivedChats, loadMcpServers, open]);
+
+  async function updateArchivedChat(id: string, archived: boolean) {
+    const res = await fetch(`/api/chats/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ archived }),
+    });
+    if (!res.ok) {
+      toast.error("Failed to update chat");
+      return;
+    }
+    await loadArchivedChats();
+    onChatsChanged();
+    toast.success(archived ? "Chat archived" : "Chat restored");
+  }
+
+  async function deleteArchivedChat(id: string) {
+    const res = await fetch(`/api/chats/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      toast.error("Failed to delete chat");
+      return;
+    }
+    await loadArchivedChats();
+    onChatsChanged();
+    toast.success("Chat deleted");
+  }
 
   async function addMemory() {
     const content = draft.trim();
@@ -292,7 +347,7 @@ export function SettingsPanel({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[min(90dvh,48rem)] w-[calc(100%-2rem)] max-w-2xl flex-col gap-0 overflow-hidden p-0">
+      <DialogContent className="flex min-h-[32rem] min-w-[min(36rem,calc(100vw-2rem))] max-h-[min(90dvh,48rem)] w-[calc(100%-2rem)] max-w-2xl flex-col gap-0 overflow-hidden p-0">
         <DialogHeader className="shrink-0 space-y-1 border-b border-border px-6 py-5 pr-12">
           <DialogTitle>Settings</DialogTitle>
           <DialogDescription>Memories and session.</DialogDescription>
@@ -301,6 +356,7 @@ export function SettingsPanel({
         <Tabs defaultValue="general" className="min-h-0 flex-1 gap-0">
           <TabsList className="h-auto w-full shrink-0 justify-start overflow-x-auto rounded-none border-b border-border bg-transparent px-6 pt-2">
             <TabsTrigger value="general">General</TabsTrigger>
+            <TabsTrigger value="archived">Archived chats</TabsTrigger>
             <TabsTrigger value="connection">Connection</TabsTrigger>
             <TabsTrigger value="mcp">MCP Servers</TabsTrigger>
             <TabsTrigger value="memories">
@@ -348,6 +404,63 @@ export function SettingsPanel({
                   <p className="text-xs text-muted-foreground">
                     Browser notifications are unavailable.
                   </p>
+                )}
+              </section>
+            </TabsContent>
+
+            <TabsContent value="archived" className="mt-0 px-6 py-6">
+              <section className="flex flex-col gap-4">
+                <div>
+                  <h3 className="flex items-center gap-2 text-sm font-medium">
+                    <Archive className="size-4 text-muted-foreground" />
+                    Archived chats
+                  </h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Archived chats disappear from the sidebar but remain available in chat search.
+                  </p>
+                </div>
+                {!archivedChatsLoaded ? (
+                  <div className="rounded-lg border border-dashed border-border px-3 py-8 text-center text-sm text-muted-foreground">
+                    Loading archived chats…
+                  </div>
+                ) : archivedChats.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-border px-3 py-8 text-center text-sm text-muted-foreground">
+                    No archived chats.
+                  </div>
+                ) : (
+                  <ul className="flex flex-col gap-2">
+                    {archivedChats.map((chat) => (
+                      <li
+                        key={chat.id}
+                        className="flex items-center gap-3 rounded-lg border border-border/60 bg-card/40 p-3"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium">{chat.title || "Untitled"}</p>
+                          <p className="mt-0.5 text-xs text-muted-foreground">
+                            Archived chat
+                          </p>
+                        </div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void updateArchivedChat(chat.id, false)}
+                        >
+                          <ArchiveRestore className="size-3.5" />
+                          Restore
+                        </Button>
+                        <Button
+                          type="button"
+                          size="icon-sm"
+                          variant="ghost"
+                          aria-label={`Delete ${chat.title || "archived chat"}`}
+                          onClick={() => void deleteArchivedChat(chat.id)}
+                        >
+                          <Trash2 className="size-3.5" />
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </section>
             </TabsContent>
@@ -450,7 +563,7 @@ export function SettingsPanel({
                     <Textarea
                       value={mcpDraft.args}
                       onChange={(e) => setMcpDraft((current) => ({ ...current, args: e.target.value }))}
-                      placeholder={"One argument per line\n-y\n@modelcontextprotocol/server-filesystem\n/home/f1shy312"}
+                      placeholder={"One argument per line\n-y\n@modelcontextprotocol/server-filesystem\n/path/to/allowed-directory"}
                       aria-label="MCP arguments"
                       rows={4}
                     />
@@ -483,7 +596,7 @@ export function SettingsPanel({
                 <ul className="flex flex-col gap-2">
                   {!mcpLoaded ? (
                     [0, 1, 2].map((item) => (
-                      <li key={item} className="space-y-2 rounded-lg border border-border/60 bg-card/40 p-3" aria-label="MCP-Server werden geladen" role="status">
+                      <li key={item} className="space-y-2 rounded-lg border border-border/60 bg-card/40 p-3" aria-label="Loading MCP servers" role="status">
                         <Skeleton className="h-4 w-2/5" />
                         <Skeleton className="h-3 w-3/5" />
                       </li>

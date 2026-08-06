@@ -6,12 +6,14 @@ import { Markdown } from "@/components/markdown";
 export type CanvasWorkspaceCardProps = {
   title: string;
   content: string;
+  workspaceLink?: string;
   onOpen?: () => void;
 };
 
 export function CanvasWorkspaceCard({
   title,
   content,
+  workspaceLink,
   onOpen,
 }: CanvasWorkspaceCardProps) {
   return (
@@ -30,6 +32,7 @@ export function CanvasWorkspaceCard({
           <div className="mt-1 max-h-24 overflow-hidden text-xs text-muted-foreground">
             {content ? <Markdown content={content} /> : <p>No canvas details available yet.</p>}
           </div>
+          {workspaceLink ? <p className="mt-1 truncate text-[10px] text-pink-300/70">{workspaceLink}</p> : null}
         </div>
         {onOpen ? (
           <button

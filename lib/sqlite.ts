@@ -2,10 +2,10 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID, pbkdf2Sync, randomBytes } from "node:crypto";
+import { config } from "@/lib/config";
 
-const dataDir = process.env.CHAT_DATA_DIR?.trim() || path.join(process.cwd(), "data");
-export const databasePath =
-  process.env.CHAT_DB_PATH?.trim() || path.join(dataDir, "chat.sqlite");
+const dataDir = config.dataDir;
+export const databasePath = config.databasePath;
 
 let database: DatabaseSync | undefined;
 
@@ -28,14 +28,15 @@ function hashPassword(password: string, salt = randomBytes(16).toString("hex")) 
   return `${salt}:${pbkdf2Sync(password, salt, 120_000, 32, "sha256").toString("hex")}`;
 }
 
-function syncLegacyMemories(db: DatabaseSync, memoriesPath: string) {
+function syncLegacyMemories(db: DatabaseSync, memoriesPath: string, ownerId?: string) {
   const insertMemory = db.prepare(
-    "INSERT OR IGNORE INTO memories (id, data, updated_at) VALUES (?, ?, ?)",
+    "INSERT OR IGNORE INTO memories (id, owner_id, data, updated_at) VALUES (?, ?, ?, ?)",
   );
   for (const memory of json<Array<Record<string, unknown>>>(memoriesPath, [])) {
     if (typeof memory.id === "string") {
       insertMemory.run(
         memory.id,
+        ownerId ?? null,
         JSON.stringify(memory),
         typeof memory.updatedAt === "string" ? memory.updatedAt : new Date().toISOString(),
       );
@@ -53,7 +54,13 @@ function migrateLegacy(db: DatabaseSync) {
   const memoriesPath = path.join(dataDir, "memories.json");
   const settingsPath = path.join(dataDir, "settings.json");
   if (hasMigration && userCount > 0 && ownerMigration) {
-    syncLegacyMemories(db, memoriesPath);
+    const ownerId = (db.prepare("SELECT id FROM users ORDER BY created_at ASC LIMIT 1").get() as { id?: string } | undefined)?.id;
+    syncLegacyMemories(db, memoriesPath, ownerId);
+    if (ownerId) {
+      db.prepare("UPDATE memories SET owner_id = ? WHERE owner_id IS NULL").run(ownerId);
+      db.prepare("UPDATE settings SET owner_id = ? WHERE owner_id IS NULL").run(ownerId);
+      db.prepare("UPDATE settings SET key = ? WHERE key = 'global'").run(`global:${ownerId}`);
+    }
     return;
   }
 
@@ -64,7 +71,7 @@ function migrateLegacy(db: DatabaseSync) {
   if (!users.length && process.env.CHAT_PASSWORD?.trim()) {
     users.push({
       id: randomUUID(),
-      username: process.env.CHAT_USERNAME?.trim() || "f1shy312",
+      username: config.chatUsername,
       passwordHash: hashPassword(process.env.CHAT_PASSWORD.trim()),
       createdAt: new Date().toISOString(),
     });
@@ -78,10 +85,6 @@ function migrateLegacy(db: DatabaseSync) {
   for (const user of users) {
     insertUser.run(user.id, user.username, user.passwordHash, user.createdAt);
   }
-  if (users.length === 1 && !process.env.CHAT_USERNAME?.trim() && users[0].username === "admin") {
-    db.prepare("UPDATE users SET username = 'f1shy312' WHERE id = ?").run(users[0].id);
-  }
-
   const sessions = json<Array<{ tokenHash: string; userId: string; expiresAt: string }>>(
     sessionsPath,
     [],
@@ -116,12 +119,14 @@ function migrateLegacy(db: DatabaseSync) {
     insertChat.run(String(chat.id), typeof ownerId === "string" ? ownerId : null, JSON.stringify(chat), createdAt, updatedAt);
   }
 
-  syncLegacyMemories(db, memoriesPath);
+  const ownerId = (db.prepare("SELECT id FROM users ORDER BY created_at ASC LIMIT 1").get() as { id?: string } | undefined)?.id;
+  syncLegacyMemories(db, memoriesPath, ownerId);
   const settings = json<Record<string, unknown>>(settingsPath, {});
-  db.prepare("INSERT OR REPLACE INTO settings (key, data) VALUES ('global', ?)").run(
+  db.prepare("INSERT OR REPLACE INTO settings (key, owner_id, data) VALUES (?, ?, ?)").run(
+    ownerId ? `global:${ownerId}` : "global",
+    ownerId ?? null,
     JSON.stringify(settings),
   );
-  const ownerId = (db.prepare("SELECT id FROM users ORDER BY created_at ASC LIMIT 1").get() as { id?: string } | undefined)?.id;
   if (ownerId && !db.prepare("SELECT value FROM meta WHERE key = 'legacy_owner_assigned'").get()) {
     const legacyChats = db.prepare("SELECT id, data FROM chats WHERE owner_id IS NULL").all() as Array<{ id: string; data: string }>;
     const assign = db.prepare("UPDATE chats SET owner_id = ?, data = ? WHERE id = ?");
@@ -135,6 +140,10 @@ function migrateLegacy(db: DatabaseSync) {
       }
     }
     db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('legacy_owner_assigned', '1')").run();
+  }
+  if (ownerId) {
+    db.prepare("UPDATE memories SET owner_id = ? WHERE owner_id IS NULL").run(ownerId);
+    db.prepare("UPDATE settings SET owner_id = ? WHERE owner_id IS NULL").run(ownerId);
   }
   db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('json_migrated', '1')").run();
 
@@ -160,6 +169,14 @@ export function getDatabase(): DatabaseSync {
       password_hash TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS user_model_permissions (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      model_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (user_id, model_id)
+    );
+    CREATE INDEX IF NOT EXISTS user_model_permissions_model
+      ON user_model_permissions(model_id);
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -175,10 +192,15 @@ export function getDatabase(): DatabaseSync {
     CREATE INDEX IF NOT EXISTS chats_owner_updated ON chats(owner_id, updated_at DESC);
     CREATE TABLE IF NOT EXISTS memories (
       id TEXT PRIMARY KEY,
+      owner_id TEXT REFERENCES users(id) ON DELETE CASCADE,
       data TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, data TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      owner_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+      data TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
       chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
@@ -206,7 +228,21 @@ export function getDatabase(): DatabaseSync {
       created_at TEXT NOT NULL
     );
   `);
+  for (const statement of [
+    "ALTER TABLE memories ADD COLUMN owner_id TEXT REFERENCES users(id) ON DELETE CASCADE",
+    "ALTER TABLE settings ADD COLUMN owner_id TEXT REFERENCES users(id) ON DELETE CASCADE",
+  ]) {
+    try {
+      database.exec(statement);
+    } catch {
+      // Columns already exist on databases created with the account-aware schema.
+    }
+  }
   migrateLegacy(database);
+  database.prepare(
+    `INSERT OR IGNORE INTO user_model_permissions (user_id, model_id, created_at)
+     SELECT id, '*', ? FROM users`,
+  ).run(new Date().toISOString());
   return database;
 }
 

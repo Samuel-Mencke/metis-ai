@@ -1,3 +1,6 @@
+import path from "node:path";
+import { config } from "@/lib/config";
+
 export type McpServerMap = Record<
   string,
   {
@@ -16,6 +19,7 @@ export type McpContext = {
 };
 
 export function getMcpServers(context: McpContext = {}): McpServerMap {
+  const appRoot = config.root;
   const env = Object.fromEntries(
     Object.entries({
       ...process.env,
@@ -28,15 +32,18 @@ export function getMcpServers(context: McpContext = {}): McpServerMap {
     gateway: {
       type: "stdio",
       command: process.execPath,
-      args: ["/home/f1shy312/ai-chat/lib/internal-mcp-server.mjs"],
-      cwd: "/home/f1shy312/ai-chat",
+      args: [
+        process.env.AI_CHAT_INTERNAL_MCP_SERVER?.trim() ||
+          path.join(appRoot, "lib", "internal-mcp-server.mjs"),
+      ],
+      cwd: appRoot,
       env,
     },
   };
 }
 
 export function getAgentCwd(): string {
-  return process.env.AGENT_CWD?.trim() || "/home/f1shy312";
+  return config.agentCwd;
 }
 
 export async function checkGatewayHealth(): Promise<{

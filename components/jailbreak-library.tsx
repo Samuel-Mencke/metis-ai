@@ -123,7 +123,7 @@ export default function JailbreakLibrary() {
   if (error) {
     return (
       <div className="flex min-h-dvh items-center justify-center p-8 text-sm text-muted-foreground">
-        prompts.json konnte nicht geladen werden: {error}
+          Could not load prompts.json: {error}
       </div>
     );
   }
@@ -173,9 +173,9 @@ export default function JailbreakLibrary() {
       <div className="flex items-center gap-2 border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-[13px] text-red-200">
         <span className="size-2 shrink-0 rounded-full bg-red-500 shadow-[0_0_10px] shadow-red-500" />
         <span>
-          <b className="text-red-400">Autorisiertes Testing only.</b> Diese Sammlung dient der
-          AI-Safety-Forschung &amp; Red-Teaming eigener Systeme. Nicht gegen fremde Systeme/Personen
-          verwenden.
+          <b className="text-red-400">Authorized testing only.</b> This collection is for
+          AI safety research and red-teaming your own systems. Do not use it against
+          third-party systems or people.
         </span>
       </div>
 
@@ -183,8 +183,7 @@ export default function JailbreakLibrary() {
         <div>
           <h1 className="text-xl font-bold tracking-tight">🔓 Jailbreak Prompt Library</h1>
           <p className="mt-1 text-[13px] text-muted-foreground">
-            Öffentliche Red-Teaming-Prompts zum Durchstöbern &amp; Auswählen — für viele
-            verschiedene KI-Modelle.
+            Public red-teaming prompts to browse and select — for many different AI models.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -193,7 +192,7 @@ export default function JailbreakLibrary() {
           </span>
           <Button asChild variant="ghost" size="sm">
             <Link href="/">
-              <ArrowLeft className="size-3.5" /> Zurück zum Chat
+              <ArrowLeft className="size-3.5" /> Back to chat
             </Link>
           </Button>
         </div>
@@ -207,7 +206,7 @@ export default function JailbreakLibrary() {
             <Input
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="Prompts durchsuchen…"
+              placeholder="Search prompts…"
               className="pl-8"
             />
           </div>
@@ -254,7 +253,7 @@ export default function JailbreakLibrary() {
           </div>
 
           <Button variant="outline" size="sm" className="mt-3 w-full" onClick={reset}>
-            <RotateCcw className="size-3.5" /> Filter zurücksetzen
+            <RotateCcw className="size-3.5" /> Reset filters
           </Button>
         </aside>
 
@@ -262,7 +261,7 @@ export default function JailbreakLibrary() {
         <main>
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
             <div className="text-[13px] text-muted-foreground">
-              <b className="text-foreground">{filtered.length}</b> von {data.prompts.length} Prompts
+              <b className="text-foreground">{filtered.length}</b> of {data.prompts.length} prompts
             </div>
             <div className="flex items-center gap-1 rounded-lg border border-border bg-card p-0.5">
               {(["default", "alpha", "cat"] as const).map((s) => (
@@ -282,7 +281,7 @@ export default function JailbreakLibrary() {
 
           {shown.length === 0 ? (
             <div className="py-16 text-center text-sm text-muted-foreground">
-              Keine Treffer für die aktuellen Filter.
+              No matches for the current filters.
             </div>
           ) : (
             <>
@@ -321,7 +320,7 @@ export default function JailbreakLibrary() {
                         {copiedId === p.id ? "Kopiert" : "Kopieren"}
                       </Button>
                       <Button size="sm" variant="outline" className="flex-1" onClick={() => setActive(p)}>
-                        <Filter className="size-3.5" /> Öffnen
+                        <Filter className="size-3.5" /> Open
                       </Button>
                     </div>
                   </div>
@@ -345,7 +344,7 @@ export default function JailbreakLibrary() {
             >
               AUTHENSOR/ai-seclists <ExternalLink className="size-3" />
             </a>{" "}
-            · Nur für autorisiertes Red-Teaming &amp; Safety-Research.
+            · For authorized red-teaming and safety research only.
           </footer>
         </main>
       </div>
@@ -375,7 +374,7 @@ export default function JailbreakLibrary() {
               <Copy className="size-4" />
               {copiedId === active?.id ? "Kopiert" : "In Zwischenablage kopieren"}
             </Button>
-            <Button variant="outline" onClick={() => setActive(null)}>Schließen</Button>
+            <Button variant="outline" onClick={() => setActive(null)}>Close</Button>
           </div>
         </DialogContent>
       </Dialog>

@@ -1,5 +1,6 @@
 import { Cursor } from "@cursor/sdk";
-import { isAuthenticated } from "@/lib/auth";
+import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
+import { filterAllowedModels } from "@/lib/model-access";
 import { UNCENSORED_PARAMETER } from "@/lib/model-params";
 
 export const runtime = "nodejs";
@@ -58,12 +59,16 @@ export async function GET(req: Request) {
   if (!(await isAuthenticated(req))) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
+  const userId = await getAuthenticatedUserId(req);
 
   const apiKey = process.env.CURSOR_API_KEY?.trim();
   if (!apiKey) {
+    const allowedModels = filterAllowedModels(userId ?? undefined, FALLBACK_MODELS);
     return Response.json({
-      models: FALLBACK_MODELS,
-      defaultModelId: "composer-2.5",
+      models: allowedModels,
+      defaultModelId: allowedModels.some((model) => model.id === "composer-2.5")
+        ? "composer-2.5"
+        : allowedModels[0]?.id || "",
       source: "fallback",
     });
   }
@@ -96,15 +101,21 @@ export async function GET(req: Request) {
           .map((p) => ({ id: p.id, value: p.value })),
       };
     });
+    const allowedModels = filterAllowedModels(userId ?? undefined, models);
     return Response.json({
-      models,
-      defaultModelId: "composer-2.5",
+      models: allowedModels,
+      defaultModelId: allowedModels.some((model) => model.id === "composer-2.5")
+        ? "composer-2.5"
+        : allowedModels[0]?.id || "",
       source: "cursor",
     });
   } catch (err) {
+    const allowedModels = filterAllowedModels(userId ?? undefined, FALLBACK_MODELS);
     return Response.json({
-      models: FALLBACK_MODELS,
-      defaultModelId: "composer-2.5",
+      models: allowedModels,
+      defaultModelId: allowedModels.some((model) => model.id === "composer-2.5")
+        ? "composer-2.5"
+        : allowedModels[0]?.id || "",
       source: "fallback",
       error: err instanceof Error ? err.message : "Failed to list models",
     });

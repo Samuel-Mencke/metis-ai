@@ -58,6 +58,8 @@ export async function PATCH(req: Request, { params }: Params) {
     modelId?: string | null;
     modelParams?: Array<{ id: string; value: string }> | null;
     queuedMessages?: Array<{ id: string; text: string }> | null;
+    pinned?: boolean;
+    archived?: boolean;
     canvas?: string | null;
     workspaces?: WorkspaceItem[] | null;
     browserContext?: BrowserContext | null;
@@ -72,6 +74,8 @@ export async function PATCH(req: Request, { params }: Params) {
       modelId?: string | null;
       modelParams?: Array<{ id: string; value: string }> | null;
       queuedMessages?: Array<{ id: string; text: string }> | null;
+    pinned?: boolean;
+    archived?: boolean;
       canvas?: string | null;
       workspaces?: WorkspaceItem[] | null;
       browserContext?: BrowserContext | null;
@@ -88,7 +92,7 @@ export async function PATCH(req: Request, { params }: Params) {
     chat = updateChat(id, body, ownerId);
   } catch (error) {
     if (error instanceof Error && error.name === "WorkspaceNameConflict") {
-      return Response.json({ error: "Ein Plan mit diesem Namen existiert bereits" }, { status: 409 });
+      return Response.json({ error: "A plan with this name already exists" }, { status: 409 });
     }
     throw error;
   }

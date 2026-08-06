@@ -1,4 +1,4 @@
-import { isAuthenticated } from "@/lib/auth";
+import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { createMemory, listMemories } from "@/lib/db-store";
 
 export const runtime = "nodejs";
@@ -8,7 +8,7 @@ export async function GET(req: Request) {
   if (!(await isAuthenticated(req))) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
-  return Response.json({ memories: listMemories() });
+  return Response.json({ memories: listMemories((await getAuthenticatedUserId(req)) ?? undefined) });
 }
 
 export async function POST(req: Request) {
@@ -28,6 +28,6 @@ export async function POST(req: Request) {
     return Response.json({ error: "content is required" }, { status: 400 });
   }
 
-  const memory = createMemory(content, body.tags);
+  const memory = createMemory(content, body.tags, (await getAuthenticatedUserId(req)) ?? undefined);
   return Response.json({ memory }, { status: 201 });
 }

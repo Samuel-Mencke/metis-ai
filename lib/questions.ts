@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { config } from "@/lib/config";
 
 export type QuestionOption = {
   label: string;
@@ -24,7 +25,7 @@ type PersistedQuestion = Pick<PendingQuestion, "questionId" | "questions" | "ans
 
 const pendingQuestions = new Map<string, PendingQuestion>();
 const questionsPath = path.join(
-  process.env.CHAT_DATA_DIR?.trim() || path.join(process.cwd(), "data"),
+  config.dataDir,
   "questions.json",
 );
 const MAX_QUESTIONS = 8;

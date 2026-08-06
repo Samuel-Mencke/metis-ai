@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { config } from "@/lib/config";
 import "./globals.css";
 
 const geist = Geist({
@@ -16,8 +17,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI · f1shy312",
-  description: "Local Cursor agent chat on the f1shy312 VPS",
+  title: config.appName,
+  description: config.appDescription,
 };
 
 export default function RootLayout({

@@ -1,4 +1,5 @@
 import { pbkdf2Sync, randomBytes, randomUUID } from "node:crypto";
+import { ensureAllModelAccess } from "@/lib/model-access";
 import { getDatabase } from "@/lib/sqlite";
 
 function hashPassword(password: string) {
@@ -14,6 +15,7 @@ export function createAccount(username: string, password: string) {
     getDatabase().prepare(
       "INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)",
     ).run(user.id, user.username, user.passwordHash, user.createdAt);
+    ensureAllModelAccess(user.id);
     return { id: user.id, username: user.username, createdAt: user.createdAt };
   } catch {
     return null;

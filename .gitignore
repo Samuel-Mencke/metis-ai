@@ -6,5 +6,15 @@ data
 *.tsbuildinfo
 .env
 .env.local
+.env.development
+.env.production
+*.sqlite
+*.sqlite-*
 *.log
 .DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+data/mcp-state/
+data/uploads/
+data/artifacts/

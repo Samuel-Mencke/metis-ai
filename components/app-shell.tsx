@@ -17,6 +17,8 @@ import {
   ArrowUp,
   ArrowDown,
   ArrowLeft,
+  Archive,
+  ArchiveRestore,
   Check,
   ChevronDown,
   Brain,
@@ -37,6 +39,8 @@ import {
   GripVertical,
   PanelLeft,
   Pencil,
+  Pin,
+  PinOff,
   Plus,
   RotateCcw,
   Reply,
@@ -68,6 +72,7 @@ import {
 import { ThinkingBlock } from "@/components/thinking-block";
 import { PlanToolCallCard, ToolCallGroup, type ToolCallData } from "@/components/tool-call-chip";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -92,6 +97,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { modelAttrSummary } from "@/lib/model-label";
+import { clientConfig } from "@/lib/client-config";
 
 type Role = "user" | "assistant" | "system";
 
@@ -149,6 +155,7 @@ type MsgPart =
 
 type ThinkingPart = Extract<MsgPart, { type: "thinking" }>;
 type ToolMsgPart = Extract<MsgPart, { type: "tool" }>;
+type Suggestion = { label: string; prompt: string };
 
 type MsgAttachment = {
   id: string;
@@ -164,6 +171,7 @@ type Msg = {
   id: string;
   role: Role;
   content: string;
+  referenceText?: string;
   createdAt?: string;
   thinking?: string;
   thinkingDone?: boolean;
@@ -172,7 +180,7 @@ type Msg = {
   parts?: MsgPart[];
   streaming?: boolean;
   attachments?: MsgAttachment[];
-  suggestions?: string[];
+  suggestions?: Suggestion[];
   runMetadata?: RunMetadata;
   references?: ReferenceItem[];
 };
@@ -340,6 +348,8 @@ type ChatIndexEntry = {
   runUpdatedAt?: string;
   pendingQuestion?: PendingQuestion;
   badge?: "blue" | "red";
+  pinned?: boolean;
+  archived?: boolean;
 };
 
 type Chat = ChatIndexEntry & {
@@ -347,9 +357,10 @@ type Chat = ChatIndexEntry & {
     id: string;
     role: Role;
     content: string;
+    referenceText?: string;
     thinking?: string;
     tools?: ToolPart[];
-    suggestions?: string[];
+    suggestions?: Array<string | Suggestion>;
     runMetadata?: RunMetadata;
     references?: ReferenceItem[];
     attachments?: MsgAttachment[];
@@ -371,15 +382,44 @@ type ChatPage = {
 };
 
 type ChatSessionState = {
+  input?: string;
   remoteCwd?: string;
   terminalCwd?: string;
   fileCwd?: string;
   terminalSessionId?: string;
+  terminalTabs?: TerminalTab[];
+  activeTerminalTabId?: string;
   workspaceTab?: "canvas" | "plan" | "terminal" | "files" | "browser";
   activeWorkspaceId?: string | null;
   workspaceOpen?: boolean;
   workspaceWidth?: number;
 };
+
+type TerminalTab = {
+  id: string;
+  title: string;
+  cwd: string;
+  sessionId?: string;
+};
+
+function normalizeTerminalTabs(session: ChatSessionState): TerminalTab[] {
+  const tabs = (session.terminalTabs || [])
+    .filter((tab) => tab && typeof tab.id === "string" && typeof tab.cwd === "string")
+    .slice(0, 20)
+    .map((tab, index) => ({
+      id: tab.id.slice(0, 200),
+      title: tab.title?.trim().slice(0, 80) || `Terminal ${index + 1}`,
+      cwd: tab.cwd.trim() || clientConfig.defaultCwd,
+      ...(tab.sessionId ? { sessionId: tab.sessionId.slice(0, 200) } : {}),
+    }));
+  if (tabs.length) return tabs;
+  return [{
+    id: "terminal-1",
+    title: "Terminal 1",
+    cwd: session.terminalCwd || session.remoteCwd || clientConfig.defaultCwd,
+    ...(session.terminalSessionId ? { sessionId: session.terminalSessionId } : {}),
+  }];
+}
 
 type WorkspaceItem = {
   id: string;
@@ -390,15 +430,18 @@ type WorkspaceItem = {
   updatedAt: string;
 };
 
-type ReferenceKind = "file" | "canvas" | "plan" | "browser" | "memory" | "chat";
+type ReferenceKind = "file" | "canvas" | "plan" | "browser" | "memory" | "chat" | "terminal";
 
 type ReferenceItem = {
   kind: ReferenceKind;
   id: string;
   label: string;
   detail?: string;
+  chatId?: string;
+  isCurrentChat?: boolean;
   path?: string;
   content?: string;
+  sessionId?: string;
 };
 
 type StatusPayload = {
@@ -410,16 +453,16 @@ type StatusPayload = {
 const DEFAULT_MODEL = "composer-2.5";
 const CHAT_MESSAGE_LOAD_LIMIT = 2;
 const CHAT_MESSAGE_PRELOAD_MAX = 10;
-const MODEL_STORAGE_KEY = "f1shy312_ai_model";
-const PARAMS_STORAGE_KEY = "f1shy312_ai_model_params";
-const SIDEBAR_WIDTH_STORAGE_KEY = "f1shy312_ai_sidebar_width";
+const MODEL_STORAGE_KEY = `${clientConfig.storagePrefix}_model`;
+const PARAMS_STORAGE_KEY = `${clientConfig.storagePrefix}_model_params`;
+const SIDEBAR_WIDTH_STORAGE_KEY = `${clientConfig.storagePrefix}_sidebar_width`;
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 420;
-const WORKSPACE_WIDTH_STORAGE_KEY = "f1shy312_ai_workspace_width";
+const WORKSPACE_WIDTH_STORAGE_KEY = `${clientConfig.storagePrefix}_workspace_width`;
 const WORKSPACE_MIN_WIDTH = 320;
 const WORKSPACE_MAX_WIDTH = 840;
-const NOTIFICATIONS_STORAGE_KEY = "f1shy312_notifications_enabled";
-const UNREAD_CHATS_STORAGE_KEY = "f1shy312_unread_chats";
+const NOTIFICATIONS_STORAGE_KEY = `${clientConfig.storagePrefix}_notifications_enabled`;
+const UNREAD_CHATS_STORAGE_KEY = `${clientConfig.storagePrefix}_unread_chats`;
 
 function loadUnreadChatIds(): string[] {
   if (typeof window === "undefined") return [];
@@ -498,6 +541,19 @@ function workspacesFromChat(chat: Pick<Chat, "workspaces" | "canvas">): Workspac
         updatedAt: new Date().toISOString(),
       }]
     : [];
+}
+
+function mergeWorkspaceItems(current: WorkspaceItem[], workspace: WorkspaceItem) {
+  const index = current.findIndex(
+    (item) =>
+      item.id === workspace.id ||
+      (item.type === workspace.type &&
+        item.name.trim().toLowerCase() === workspace.name.trim().toLowerCase()),
+  );
+  const next = [...current];
+  if (index >= 0) next[index] = workspace;
+  else next.push(workspace);
+  return next.slice(-20);
 }
 
 function WorkspaceIcon({ type, className }: { type: WorkspaceItem["type"]; className?: string }) {
@@ -839,17 +895,39 @@ function mapApiMessages(
       id: m.id,
       role: m.role,
       content: m.content,
+      referenceText: m.referenceText,
       createdAt: m.createdAt,
       thinking: m.thinking,
       thinkingDone: Boolean(m.thinking),
       tools: m.tools,
       references: m.references,
-      suggestions: m.suggestions,
+      suggestions: normalizeSuggestions(m.suggestions),
       runMetadata: m.runMetadata,
       attachments: m.attachments,
     };
     return { ...base, parts: partsFromFlat(base) };
   });
+}
+
+function normalizeSuggestions(value: unknown): Suggestion[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === "string" && item.trim()) {
+        return { label: item.trim(), prompt: item.trim() };
+      }
+      if (!item || typeof item !== "object") return null;
+      const candidate = item as { label?: unknown; prompt?: unknown };
+      if (
+        typeof candidate.label !== "string" ||
+        typeof candidate.prompt !== "string" ||
+        !candidate.label.trim() ||
+        !candidate.prompt.trim()
+      ) return null;
+      return { label: candidate.label.trim(), prompt: candidate.prompt.trim() };
+    })
+    .filter((item): item is Suggestion => Boolean(item))
+    .slice(0, 5);
 }
 
 function mergeMessages(current: Msg[], incoming: Msg[]): Msg[] {
@@ -867,10 +945,10 @@ function mergeMessages(current: Msg[], incoming: Msg[]): Msg[] {
 
 function ChatLoadingSkeleton() {
   return (
-    <div className="flex h-full min-h-[420px] items-center justify-center" role="status" aria-label="Chat wird geladen">
+    <div className="flex h-full min-h-[420px] items-center justify-center" role="status" aria-label="Loading chat">
       <div className="flex items-center gap-3 text-sm text-muted-foreground">
         <LoaderCircle className="size-5 animate-spin" />
-        <span>Chat wird geladen…</span>
+        <span>Loading chat…</span>
       </div>
     </div>
   );
@@ -971,7 +1049,7 @@ export default function AppShell() {
   const routeChatId = searchParams.get("c");
   const [authed, setAuthed] = useState<boolean | null>(null);
   const authedRef = useRef<boolean | null>(null);
-  const [username, setUsername] = useState("f1shy312");
+  const [username, setUsername] = useState(clientConfig.username);
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState("");
   const [status, setStatus] = useState<StatusPayload | null>(null);
@@ -995,10 +1073,12 @@ export default function AppShell() {
   const [workspaces, setWorkspaces] = useState<WorkspaceItem[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [workspaceMounted, setWorkspaceMounted] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState<"canvas" | "plan" | "terminal" | "files" | "browser">("canvas");
-  const [remoteTerminalCwd, setRemoteTerminalCwd] = useState("/home/f1shy312");
-  const [remoteFileCwd, setRemoteFileCwd] = useState("/home/f1shy312");
-  const [terminalSessionId, setTerminalSessionId] = useState<string | undefined>();
+  const [remoteTerminalCwd, setRemoteTerminalCwd] = useState(clientConfig.defaultCwd);
+  const [remoteFileCwd, setRemoteFileCwd] = useState(clientConfig.defaultCwd);
+  const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
+  const [activeTerminalTabId, setActiveTerminalTabId] = useState<string | null>(null);
   const [browserUrl, setBrowserUrl] = useState("");
   const [browserInput, setBrowserInput] = useState("");
   const [browserTabs, setBrowserTabs] = useState<BrowserTab[]>([
@@ -1058,6 +1138,15 @@ export default function AppShell() {
   } | null>(null);
   const [dragOver, setDragOver] = useState(false);
 
+  useEffect(() => {
+    if (workspaceOpen) {
+      setWorkspaceMounted(true);
+      return;
+    }
+    const timer = window.setTimeout(() => setWorkspaceMounted(false), 180);
+    return () => window.clearTimeout(timer);
+  }, [workspaceOpen]);
+
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -1081,6 +1170,7 @@ export default function AppShell() {
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
   const runtimeRef = useRef<Map<string, ChatRuntime>>(new Map());
   const queueDrainRef = useRef(false);
   const textareaRef = useRef<HTMLDivElement>(null);
@@ -1094,6 +1184,7 @@ export default function AppShell() {
   const pendingFilesRef = useRef<PendingFile[]>([]);
   const notifiedQuestionRef = useRef<string | null>(null);
   const notifiedPlanRef = useRef<string | null>(null);
+  const swipeRef = useRef<{ x: number; y: number; ignored: boolean } | null>(null);
   const chatLoadRequestRef = useRef(0);
   const chatLoadAbortRef = useRef<AbortController | null>(null);
   const seenChatUpdatedAtRef = useRef<Map<string, string>>(new Map());
@@ -1110,13 +1201,15 @@ export default function AppShell() {
     activeBrowserTabId,
     remoteTerminalCwd,
     remoteFileCwd,
-    terminalSessionId,
+    terminalTabs,
+    activeTerminalTabId,
     workspaceTab,
     activeWorkspaceId,
     workspaceOpen,
     workspaceWidth,
     messageOffset,
     hasEarlierMessages,
+    input,
   });
 
   const markChatRunning = useCallback((id: string, runtime: ChatRuntime) => {
@@ -1215,6 +1308,14 @@ export default function AppShell() {
       saveUnreadChatIds(next);
       return next;
     });
+    setChats((current) =>
+      current.map((chat) => chat.id === id ? { ...chat, badge: undefined } : chat),
+    );
+    void fetch(`/api/chats/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ badge: null }),
+    }).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -1296,13 +1397,15 @@ export default function AppShell() {
       activeBrowserTabId,
       remoteTerminalCwd,
       remoteFileCwd,
-      terminalSessionId,
+      terminalTabs,
+      activeTerminalTabId,
       workspaceTab,
       activeWorkspaceId,
       workspaceOpen,
       workspaceWidth,
       messageOffset,
       hasEarlierMessages,
+      input,
     };
   }, [
     messages,
@@ -1316,13 +1419,15 @@ export default function AppShell() {
     activeBrowserTabId,
     remoteTerminalCwd,
     remoteFileCwd,
-    terminalSessionId,
+    terminalTabs,
+    activeTerminalTabId,
     workspaceTab,
     activeWorkspaceId,
     workspaceOpen,
     workspaceWidth,
     messageOffset,
     hasEarlierMessages,
+    input,
   ]);
 
   useEffect(() => {
@@ -1354,9 +1459,11 @@ export default function AppShell() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sessionState: {
+            input,
             terminalCwd: remoteTerminalCwd,
             fileCwd: remoteFileCwd,
-            terminalSessionId,
+            terminalTabs,
+            activeTerminalTabId: activeTerminalTabId || undefined,
             workspaceTab,
             activeWorkspaceId,
             workspaceOpen,
@@ -1370,11 +1477,13 @@ export default function AppShell() {
     activeChatId,
     remoteTerminalCwd,
     remoteFileCwd,
-    terminalSessionId,
+    terminalTabs,
+    activeTerminalTabId,
     workspaceTab,
     activeWorkspaceId,
     workspaceOpen,
     workspaceWidth,
+    input,
   ]);
 
   const persistActiveSnapshot = useCallback(() => {
@@ -1403,9 +1512,11 @@ export default function AppShell() {
         id,
       ),
       sessionState: {
+        input: s.input,
         terminalCwd: s.remoteTerminalCwd,
         fileCwd: s.remoteFileCwd,
-        terminalSessionId: s.terminalSessionId,
+        terminalTabs: s.terminalTabs,
+        activeTerminalTabId: s.activeTerminalTabId || undefined,
         workspaceTab: s.workspaceTab,
         activeWorkspaceId: s.activeWorkspaceId,
         workspaceOpen: s.workspaceOpen,
@@ -1429,9 +1540,11 @@ export default function AppShell() {
           updatedAt: new Date().toISOString(),
         },
         sessionState: {
+          input: s.input,
           terminalCwd: s.remoteTerminalCwd,
           fileCwd: s.remoteFileCwd,
-          terminalSessionId: s.terminalSessionId,
+          terminalTabs: s.terminalTabs,
+          activeTerminalTabId: s.activeTerminalTabId || undefined,
           workspaceTab: s.workspaceTab,
           activeWorkspaceId: s.activeWorkspaceId,
           workspaceOpen: s.workspaceOpen,
@@ -1465,7 +1578,10 @@ export default function AppShell() {
     Boolean(activeChatId) &&
     (Boolean(pendingQuestion) || attentionChatIds.includes(activeChatId ?? ""));
   const activeWorkspace =
-    workspaces.find((item) => item.id === activeWorkspaceId) ?? null;
+    (workspaceTab === "plan" || workspaceTab === "canvas"
+      ? workspaces.find((item) => item.id === activeWorkspaceId && item.type === workspaceTab) ??
+        workspaces.find((item) => item.type === workspaceTab)
+      : workspaces.find((item) => item.id === activeWorkspaceId)) ?? null;
   const toolOutputs = messages.flatMap((message) =>
     (message.parts ?? partsFromFlat(message))
       .filter((part): part is ToolMsgPart => part.type === "tool")
@@ -1476,6 +1592,46 @@ export default function AppShell() {
       .filter((part): part is ToolMsgPart => part.type === "tool")
       .filter((part) => part.kind === "subagent"),
   );
+
+  function handleTouchStart(event: React.TouchEvent<HTMLDivElement>) {
+    if (event.touches.length !== 1) {
+      swipeRef.current = null;
+      return;
+    }
+    const target = event.target as HTMLElement;
+    const ignored = Boolean(
+      target.closest("input, textarea, button, a, select, [contenteditable='true'], [data-swipe-ignore]"),
+    );
+    const touch = event.touches[0];
+    swipeRef.current = { x: touch.clientX, y: touch.clientY, ignored };
+  }
+
+  function handleTouchEnd(event: React.TouchEvent<HTMLDivElement>) {
+    const start = swipeRef.current;
+    swipeRef.current = null;
+    if (!start || start.ignored || typeof window === "undefined" || window.innerWidth >= 768) return;
+    const touch = event.changedTouches[0];
+    const deltaX = touch.clientX - start.x;
+    const deltaY = touch.clientY - start.y;
+    if (Math.abs(deltaX) < 64 || Math.abs(deltaX) < Math.abs(deltaY) * 1.35) return;
+
+    if (mobileNavOpen) {
+      if (deltaX < 0) setMobileNavOpen(false);
+      return;
+    }
+
+    if (deltaX > 0) {
+      if (workspaceOpen) {
+        setWorkspaceOpen(false);
+      } else {
+        setMobileNavOpen(true);
+      }
+      return;
+    }
+    setMobileNavOpen(false);
+    setActiveWorkspaceId((current) => current ?? workspaces[0]?.id ?? null);
+    setWorkspaceOpen(true);
+  }
 
   useEffect(() => {
     const openSubagent = (event: Event) => {
@@ -1537,6 +1693,34 @@ export default function AppShell() {
     const url = (browserUrl || browserInput).trim();
     if (!url) return;
     window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  function selectTerminalTab(tab: TerminalTab) {
+    setActiveTerminalTabId(tab.id);
+    setRemoteTerminalCwd(tab.cwd);
+  }
+
+  function openTerminalTab() {
+    const id = `terminal-${crypto.randomUUID()}`;
+    const tab: TerminalTab = {
+      id,
+      title: `Terminal ${terminalTabs.length + 1}`,
+      cwd: remoteTerminalCwd || clientConfig.defaultCwd,
+    };
+    setTerminalTabs((current) => [...current, tab].slice(-20));
+    setActiveTerminalTabId(id);
+    setRemoteTerminalCwd(tab.cwd);
+  }
+
+  function closeTerminalTab(id: string) {
+    if (terminalTabs.length <= 1) return;
+    const nextTabs = terminalTabs.filter((tab) => tab.id !== id);
+    const nextActiveId = activeTerminalTabId === id
+      ? nextTabs[Math.max(0, terminalTabs.findIndex((tab) => tab.id === id) - 1)]?.id
+      : activeTerminalTabId;
+    setTerminalTabs(nextTabs);
+    setActiveTerminalTabId(nextActiveId || nextTabs[0].id);
+    setRemoteTerminalCwd(nextTabs.find((tab) => tab.id === (nextActiveId || nextTabs[0].id))?.cwd || clientConfig.defaultCwd);
   }
 
   function notifyUser(
@@ -1610,11 +1794,8 @@ export default function AppShell() {
       const serverUnreadIds = data.chats
         .filter((chat) => chat.badge === "blue" && activeChatIdRef.current !== chat.id)
         .map((chat) => chat.id);
-      setUnreadChatIds((current) => {
-        const next = [...new Set([...current, ...serverUnreadIds])];
-        saveUnreadChatIds(next);
-        return next;
-      });
+      setUnreadChatIds(serverUnreadIds);
+      saveUnreadChatIds(serverUnreadIds);
       for (const chat of data.chats) {
         const previousUpdatedAt = seenChatUpdatedAtRef.current.get(chat.id);
         if (
@@ -1740,11 +1921,6 @@ export default function AppShell() {
     const session = snap.sessionState || {};
     clearUnread(id);
     if (snap.updatedAt) seenChatUpdatedAtRef.current.set(id, snap.updatedAt);
-    void fetch(`/api/chats/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ badge: null }),
-    });
     if (!snap.pendingQuestion) {
       setAttentionChatIds((current) => current.filter((chatId) => chatId !== id));
     }
@@ -1767,9 +1943,18 @@ export default function AppShell() {
         ? Math.min(WORKSPACE_MAX_WIDTH, Math.max(WORKSPACE_MIN_WIDTH, session.workspaceWidth))
         : 520,
     );
-    setRemoteTerminalCwd(session.terminalCwd || session.remoteCwd || "/home/f1shy312");
-    setRemoteFileCwd(session.fileCwd || session.remoteCwd || "/home/f1shy312");
-    setTerminalSessionId(session.terminalSessionId);
+    const loadedTerminalTabs = normalizeTerminalTabs(session);
+    const loadedActiveTerminalTabId =
+      session.activeTerminalTabId && loadedTerminalTabs.some((tab) => tab.id === session.activeTerminalTabId)
+        ? session.activeTerminalTabId
+        : loadedTerminalTabs[0].id;
+    setTerminalTabs(loadedTerminalTabs);
+    setActiveTerminalTabId(loadedActiveTerminalTabId);
+    setRemoteTerminalCwd(loadedTerminalTabs.find((tab) => tab.id === loadedActiveTerminalTabId)?.cwd || clientConfig.defaultCwd);
+    setRemoteFileCwd(session.fileCwd || session.remoteCwd || clientConfig.defaultCwd);
+    setInput(session.input || "");
+    setReferenceMenu(null);
+    setReferences([]);
     setMessages(snap.messages);
     setMessageOffset(snap.messageOffset);
     setHasEarlierMessages(snap.hasEarlierMessages);
@@ -1843,6 +2028,9 @@ export default function AppShell() {
       setBrowserUrl(activeTab?.url || "");
       setBrowserInput(activeTab?.url || "");
       setMessages([]);
+      setInput("");
+      setReferenceMenu(null);
+      setReferences([]);
       setMessageOffset(0);
       setHasEarlierMessages(false);
       setQueuedMessages([]);
@@ -1967,9 +2155,15 @@ export default function AppShell() {
                 ? Math.min(WORKSPACE_MAX_WIDTH, Math.max(WORKSPACE_MIN_WIDTH, session.workspaceWidth))
                 : 520,
             );
-            setRemoteTerminalCwd(session.terminalCwd || session.remoteCwd || "/home/f1shy312");
-            setRemoteFileCwd(session.fileCwd || session.remoteCwd || "/home/f1shy312");
-            setTerminalSessionId(session.terminalSessionId);
+            const loadedTerminalTabs = normalizeTerminalTabs(session);
+            const loadedActiveTerminalTabId =
+              session.activeTerminalTabId && loadedTerminalTabs.some((tab) => tab.id === session.activeTerminalTabId)
+                ? session.activeTerminalTabId
+                : loadedTerminalTabs[0].id;
+            setTerminalTabs(loadedTerminalTabs);
+            setActiveTerminalTabId(loadedActiveTerminalTabId);
+            setRemoteTerminalCwd(loadedTerminalTabs.find((tab) => tab.id === loadedActiveTerminalTabId)?.cwd || clientConfig.defaultCwd);
+            setRemoteFileCwd(session.fileCwd || session.remoteCwd || clientConfig.defaultCwd);
             setPendingQuestion(next.pendingQuestion ?? null);
             setBusy(
               next.runStatus === "running" ||
@@ -2274,6 +2468,57 @@ export default function AppShell() {
       setWorkspaceTab("browser");
       setWorkspaceOpen(true);
     };
+    const openLinkedReference = async (event: Event) => {
+      const reference = (event as CustomEvent<ReferenceItem>).detail;
+      if (!reference?.kind || !reference.id) return;
+
+      const targetChatId =
+        reference.chatId ||
+        (reference.kind === "chat" ? reference.id : undefined);
+      if (targetChatId && targetChatId !== activeChatIdRef.current) {
+        const opened = await loadChat(targetChatId);
+        if (!opened) return;
+      }
+
+      if (reference.kind === "chat") return;
+      if (reference.kind === "canvas" || reference.kind === "plan") {
+        setActiveWorkspaceId(reference.id);
+        setWorkspaceTab(reference.kind);
+        setWorkspaceOpen(true);
+        return;
+      }
+      if (reference.kind === "browser" && reference.path) {
+        navigateBrowser(reference.path);
+        setWorkspaceTab("browser");
+        setWorkspaceOpen(true);
+        return;
+      }
+      if (reference.kind === "terminal") {
+        const terminalId = reference.id.split(":").at(-1);
+        const terminal = terminalTabs.find((tab) => tab.id === terminalId);
+        if (terminal) setActiveTerminalTabId(terminal.id);
+        setWorkspaceTab("terminal");
+        setWorkspaceOpen(true);
+        return;
+      }
+      if (reference.kind === "file" && targetChatId) {
+        const response = await fetch(
+          `/api/chats/${targetChatId}?messageLimit=100&messageOffset=0`,
+          { cache: "no-store" },
+        );
+        if (!response.ok) return;
+        const data = (await response.json()) as { chat?: Chat };
+        const attachmentId = reference.id.split(":").at(-1);
+        const attachment = data.chat?.messages
+          .flatMap((message) => message.attachments || [])
+          .find((item) => item.id === attachmentId || item.name === reference.label);
+        if (attachment) {
+          setActiveAttachment({ attachment, chatId: targetChatId });
+        }
+        return;
+      }
+      if (reference.kind === "memory") setSettingsOpen(true);
+    };
     const openLinkedWorkspace = async (event: Event) => {
       const detail = (event as CustomEvent<{ type?: string; id?: string }>).detail;
       if (!detail?.id || (detail.type !== "plan" && detail.type !== "canvas")) return;
@@ -2300,12 +2545,14 @@ export default function AppShell() {
       setWorkspaceOpen(true);
     };
     window.addEventListener("ai-chat:open-browser", openLinkedUrl);
+    window.addEventListener("ai-chat:open-reference", openLinkedReference);
     window.addEventListener("ai-chat:open-workspace", openLinkedWorkspace);
     return () => {
       window.removeEventListener("ai-chat:open-browser", openLinkedUrl);
+      window.removeEventListener("ai-chat:open-reference", openLinkedReference);
       window.removeEventListener("ai-chat:open-workspace", openLinkedWorkspace);
     };
-  }, [messageOffset, workspaces]);
+  }, [activeChatId, loadChat, messageOffset, navigateBrowser, terminalTabs, workspaces]);
 
   useEffect(() => {
     if (!authed) return;
@@ -2403,7 +2650,8 @@ export default function AppShell() {
       sessionState: {
         terminalCwd: remoteTerminalCwd,
         fileCwd: remoteFileCwd,
-        terminalSessionId,
+        terminalTabs,
+        activeTerminalTabId: activeTerminalTabId || undefined,
         workspaceTab,
         activeWorkspaceId,
         workspaceOpen,
@@ -2431,7 +2679,8 @@ export default function AppShell() {
     activeBrowserTabId,
     remoteTerminalCwd,
     remoteFileCwd,
-    terminalSessionId,
+    terminalTabs,
+    activeTerminalTabId,
     workspaceTab,
     activeWorkspaceId,
     workspaceOpen,
@@ -2477,6 +2726,7 @@ export default function AppShell() {
     const el = messagesScrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
+    stickToBottomRef.current = true;
     const frame = window.requestAnimationFrame(() => {
       el.scrollTop = el.scrollHeight;
     });
@@ -2484,11 +2734,30 @@ export default function AppShell() {
   }, [activeChatId, paneKey]);
 
   useEffect(() => {
+    if (loadingChatId || !activeChatId || !messages.length) return;
+    const frame = window.requestAnimationFrame(() => {
+      const el = messagesScrollRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeChatId, loadingChatId]);
+
+  useEffect(() => {
+    const el = messagesScrollRef.current;
+    if (!el || !stickToBottomRef.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (stickToBottomRef.current) el.scrollTop = el.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [messages]);
+
+  useEffect(() => {
     const el = messagesScrollRef.current;
     if (!el) return;
     const updateScrollState = () => {
       const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
       const nearBottom = distanceFromBottom < 48;
+      stickToBottomRef.current = nearBottom;
       setShowScrollDown(!nearBottom);
       if (el.scrollTop < 80) void loadEarlierMessages();
     };
@@ -2510,6 +2779,7 @@ export default function AppShell() {
   }, [highlightedMessageId, messages.length]);
 
   function scrollMessagesToBottom() {
+    stickToBottomRef.current = true;
     setShowScrollDown(false);
     messagesScrollRef.current?.scrollTo({
       top: messagesScrollRef.current.scrollHeight,
@@ -2608,7 +2878,8 @@ export default function AppShell() {
       sessionState: {
         terminalCwd: stateRef.current.remoteTerminalCwd,
         fileCwd: stateRef.current.remoteFileCwd,
-        terminalSessionId: stateRef.current.terminalSessionId,
+        terminalTabs: stateRef.current.terminalTabs,
+        activeTerminalTabId: stateRef.current.activeTerminalTabId || undefined,
         workspaceTab: stateRef.current.workspaceTab,
         activeWorkspaceId: stateRef.current.activeWorkspaceId,
         workspaceOpen: stateRef.current.workspaceOpen,
@@ -2656,6 +2927,26 @@ export default function AppShell() {
     chatCacheRef.current.delete(id);
     clearUnread(id);
     if (activeChatId === id) openDraft();
+    await loadChats();
+  }
+
+  async function updateChatFlags(
+    id: string,
+    patch: { pinned?: boolean; archived?: boolean },
+  ) {
+    const res = await fetch(`/api/chats/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) {
+      toast.error("Chat update failed");
+      return;
+    }
+    chatCacheRef.current.delete(id);
+    if (patch.archived && activeChatIdRef.current === id) {
+      openDraft();
+    }
     await loadChats();
   }
 
@@ -2722,7 +3013,8 @@ export default function AppShell() {
         sessionState: data.chat.sessionState || {
           terminalCwd: stateRef.current.remoteTerminalCwd,
           fileCwd: stateRef.current.remoteFileCwd,
-          terminalSessionId: stateRef.current.terminalSessionId,
+          terminalTabs: stateRef.current.terminalTabs,
+          activeTerminalTabId: stateRef.current.activeTerminalTabId || undefined,
           workspaceTab: stateRef.current.workspaceTab,
           activeWorkspaceId: stateRef.current.activeWorkspaceId,
           workspaceOpen: stateRef.current.workspaceOpen,
@@ -3134,6 +3426,9 @@ export default function AppShell() {
         (localAttachments.length
           ? `Attached ${localAttachments.length} file${localAttachments.length === 1 ? "" : "s"}`
           : ""),
+      ...((referenceTextOverride ?? referenceText).trim()
+        ? { referenceText: (referenceTextOverride ?? referenceText).trim() }
+        : {}),
       ...(localAttachments.length ? { attachments: localAttachments } : {}),
       ...(referencesToSend.length ? { references: [...referencesToSend] } : {}),
     };
@@ -3295,10 +3590,7 @@ export default function AppShell() {
             event === "suggestions" &&
             Array.isArray(payload.suggestions)
           ) {
-            const nextSuggestions = payload.suggestions
-              .filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
-              .map((item) => item.trim().slice(0, 500))
-              .slice(0, 5);
+            const nextSuggestions = normalizeSuggestions(payload.suggestions);
             setMessages((m) =>
               m.map((x) =>
                 x.id === asstId
@@ -3419,7 +3711,7 @@ export default function AppShell() {
             if (activeChatIdRef.current === chatId) {
               setLiveStatus(
                 status === "running"
-                  ? `Running ${name.replaceAll("_", " ")}${detail ? ` · ${detail}` : ""}`
+                  ? `Agent running · ${name.replaceAll("_", " ")}${detail ? ` · ${detail}` : ""}`
                   : "",
               );
             }
@@ -3540,16 +3832,7 @@ export default function AppShell() {
             if (activeChatIdRef.current !== chatId) continue;
             const workspace = payload.workspace as WorkspaceItem;
             setAttentionChatIds((current) => current.includes(chatId) ? current : [...current, chatId]);
-            setWorkspaces((current) => {
-              const index = current.findIndex(
-                (item) => item.id === workspace.id ||
-                  (item.type === workspace.type && item.name.trim().toLowerCase() === workspace.name.trim().toLowerCase()),
-              );
-              const next = [...current];
-              if (index >= 0) next[index] = workspace;
-              else next.push(workspace);
-              return next.slice(-20);
-            });
+            setWorkspaces((current) => mergeWorkspaceItems(current, workspace));
             const keepCanvasVisible =
               workspace.type === "plan" && workspaceOpen && workspaceTab === "canvas";
             if (!keepCanvasVisible) {
@@ -3577,10 +3860,7 @@ export default function AppShell() {
               createdAt: now,
               updatedAt: now,
             };
-            setWorkspaces((current) => {
-              const other = current.filter((item) => item.id !== workspace.id);
-              return [...other, workspace];
-            });
+            setWorkspaces((current) => mergeWorkspaceItems(current, workspace));
             setActiveWorkspaceId(workspace.id);
             setWorkspaceOpen(true);
           } else if (
@@ -3589,10 +3869,11 @@ export default function AppShell() {
           ) {
             if (activeChatIdRef.current === chatId) setAgentId(payload.agentId);
           } else if (event === "status") {
-            const label = [
-              typeof payload.status === "string" ? payload.status : "",
-              typeof payload.message === "string" ? payload.message : "",
-            ]
+            const rawStatus = typeof payload.status === "string" ? payload.status : "";
+            const statusLabel = rawStatus.toLowerCase() === "running"
+              ? "Agent running"
+              : rawStatus;
+            const label = [statusLabel, typeof payload.message === "string" ? payload.message : ""]
               .filter(Boolean)
               .join(" · ");
             if (activeChatIdRef.current === chatId) setLiveStatus(label);
@@ -3630,11 +3911,10 @@ export default function AppShell() {
               }),
             );
           } else if (event === "done") {
-            if (
-              typeof document !== "undefined" &&
-              document.hidden
-            ) {
+            if (typeof document !== "undefined" && document.hidden) {
               markUnread(chatId);
+            } else if (activeChatIdRef.current === chatId) {
+              clearUnread(chatId);
             }
             notifyUser("Agent finished", "Your response is ready.");
             if (activeChatIdRef.current === chatId) {
@@ -3750,7 +4030,7 @@ export default function AppShell() {
   function handleComposerInputChange(value: string, cursorPosition: number) {
     setInput(value);
     const beforeCursor = value.slice(0, cursorPosition);
-    const match = beforeCursor.match(/(?:^|\s)@([^\s]*)$/);
+    const match = beforeCursor.match(/(?:^|\s)@([^\n]*)$/);
     if (!match) {
       setReferenceMenu(null);
       return;
@@ -3764,15 +4044,38 @@ export default function AppShell() {
     });
   }
 
-  function selectReference(reference: ReferenceItem) {
+  async function selectReference(reference: ReferenceItem) {
     if (!referenceMenu) return;
+    let resolvedReference = reference;
+    if (reference.kind === "terminal" && reference.sessionId && !reference.content) {
+      try {
+        const response = await fetch(
+          `/api/remote?sessionId=${encodeURIComponent(reference.sessionId)}&cursor=0`,
+          { cache: "no-store" },
+        );
+        if (response.ok) {
+          const data = (await response.json()) as {
+            chunks?: Array<{ data?: string }>;
+          };
+          resolvedReference = {
+            ...reference,
+            content: (data.chunks || [])
+              .map((chunk) => chunk.data || "")
+              .join("")
+              .slice(-30_000),
+          };
+        }
+      } catch {
+        // Keep the terminal reference usable even if its live output is unavailable.
+      }
+    }
     setReferences((current) => (
-      current.some((item) => item.kind === reference.kind && item.id === reference.id)
+      current.some((item) => item.kind === resolvedReference.kind && item.id === resolvedReference.id)
         ? current
-        : [...current, reference]
+        : [...current, resolvedReference]
     ));
     setInput((current) =>
-      `${current.slice(0, referenceMenu.start)}@${reference.label}${current.slice(referenceMenu.end)}`,
+      `${current.slice(0, referenceMenu.start)}@${resolvedReference.label}${current.slice(referenceMenu.end)}`,
     );
     setReferenceMenu(null);
     window.setTimeout(() => textareaRef.current?.focus(), 0);
@@ -3820,6 +4123,7 @@ export default function AppShell() {
       browser: "Browser",
       memory: "Memories",
       chat: "Chats",
+      terminal: "Terminals",
     }[kind];
   }
 
@@ -3831,6 +4135,7 @@ export default function AppShell() {
       browser: Globe2,
       memory: Brain,
       chat: MessageSquare,
+      terminal: Terminal,
     }[kind];
   }
 
@@ -3928,12 +4233,6 @@ export default function AppShell() {
           ))}
         </div>
       ) : null}
-      {busy && liveStatus ? (
-        <div className="flex items-center gap-2 px-2.5 text-xs text-muted-foreground/80" aria-live="polite">
-          <LoaderCircle className="size-3 animate-spin text-primary" />
-          <span className="truncate">{liveStatus}</span>
-        </div>
-      ) : null}
       <form
         onSubmit={(e) => void send(e)}
         onDragOver={onComposerDragOver}
@@ -3948,7 +4247,7 @@ export default function AppShell() {
           <div className="absolute bottom-full left-2 right-2 z-40 mb-2 max-h-72 overflow-y-auto rounded-xl border border-border/60 bg-popover p-1.5 text-sm shadow-xl animate-in fade-in-0 slide-in-from-bottom-2 duration-200">
             {!referenceMenu.kind && !referenceMenu.query ? (
               <div className="flex flex-col gap-0.5">
-                {(["file", "canvas", "plan", "browser", "memory", "chat"] as ReferenceKind[]).map((kind) => (
+                {(["file", "canvas", "plan", "browser", "terminal", "memory", "chat"] as ReferenceKind[]).map((kind) => (
                   <button
                     key={kind}
                     type="button"
@@ -4000,7 +4299,14 @@ export default function AppShell() {
                         return <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />;
                       })()}
                       <span className="min-w-0">
-                        <span className="block truncate text-xs text-foreground">{reference.label}</span>
+                        <span className="flex min-w-0 items-center gap-1.5">
+                          <span className="min-w-0 truncate text-xs text-foreground">{reference.label}</span>
+                          {reference.isCurrentChat ? (
+                            <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px]">
+                              In this chat
+                            </Badge>
+                          ) : null}
+                        </span>
                         {reference.detail ? <span className="block truncate text-[11px] text-muted-foreground">{reference.detail}</span> : null}
                       </span>
                     </button>
@@ -4097,7 +4403,6 @@ export default function AppShell() {
             mentionLabels={references.map((reference) => reference.label)}
             onChange={handleComposerInputChange}
             onPaste={onComposerPaste}
-            onLinkClick={() => void send()}
             onKeyDown={(e) => {
               if (referenceMenu && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
                 e.preventDefault();
@@ -4146,7 +4451,7 @@ export default function AppShell() {
       </form>
       <div className="flex min-h-7 items-center px-1">
         {!modelsLoaded ? (
-          <div className="flex items-center gap-2 px-2.5 text-xs text-muted-foreground/70" role="status" aria-label="Modelle werden geladen">
+          <div className="flex items-center gap-2 px-2.5 text-xs text-muted-foreground/70" role="status" aria-label="Loading models">
             <Skeleton className="h-6 w-24 rounded-full bg-muted/60" />
             <span>Loading models…</span>
           </div>
@@ -4277,7 +4582,7 @@ export default function AppShell() {
             Chats
           </p>
           {!chatsLoaded ? (
-            <div className="space-y-1 px-1.5 py-1" aria-label="Chats werden geladen" role="status">
+            <div className="space-y-1 px-1.5 py-1" aria-label="Loading chats" role="status">
               {[0, 1, 2, 3, 4].map((item) => (
                 <div key={item} className="flex items-center gap-2 rounded-lg px-1 py-2">
                   <Skeleton className="size-3.5 rounded-full bg-muted/60" />
@@ -4286,7 +4591,7 @@ export default function AppShell() {
               ))}
             </div>
           ) : chats.length === 0 ? (
-            <p className="px-2.5 py-3 text-xs text-muted-foreground/70">Noch keine Chats</p>
+            <p className="px-2.5 py-3 text-xs text-muted-foreground/70">No chats yet</p>
           ) : chats.map((c) => (
             <Fragment key={c.id}>
             <div
@@ -4318,14 +4623,20 @@ export default function AppShell() {
                   {activeChatId !== c.id && (c.badge === "red" || c.pendingQuestion || attentionChatIds.includes(c.id)) ? (
                     <span
                       className="size-2 shrink-0 rounded-full bg-red-500"
-                      aria-label="Benötigt deine Aufmerksamkeit"
-                      title="Benötigt deine Aufmerksamkeit"
+                      aria-label="Needs your attention"
+                      title="Needs your attention"
                     />
                   ) : activeChatId !== c.id && (c.badge === "blue" || unreadChatIds.includes(c.id)) ? (
                     <span
                       className="size-2 shrink-0 rounded-full bg-blue-500"
                       aria-label="Unread response"
                       title="Unread response"
+                    />
+                  ) : null}
+                  {c.pinned ? (
+                    <Pin
+                      className="size-3 shrink-0 text-primary/80"
+                      aria-label="Pinned chat"
                     />
                   ) : null}
                   <span className="min-w-0 truncate">{c.title || "Untitled"}</span>
@@ -4344,6 +4655,18 @@ export default function AppShell() {
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="z-[1200]">
+                  <DropdownMenuItem
+                    onClick={() => void updateChatFlags(c.id, { pinned: !c.pinned })}
+                  >
+                    {c.pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
+                    {c.pinned ? "Unpin" : "Pin"}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => void updateChatFlags(c.id, { archived: true })}
+                  >
+                    <Archive className="size-3.5" />
+                    Archive
+                  </DropdownMenuItem>
                   <DropdownMenuItem
                     onClick={() => openRename(c.id, c.title)}
                   >
@@ -4454,7 +4777,11 @@ export default function AppShell() {
   }
 
   return (
-    <div className="flex h-dvh overflow-hidden bg-background">
+    <div
+      className="flex h-dvh overflow-hidden bg-background"
+      onTouchStart={handleTouchStart}
+      onTouchEnd={handleTouchEnd}
+    >
       <CommandPalette
         open={commandPaletteOpen}
         onOpenChange={setCommandPaletteOpen}
@@ -4494,7 +4821,12 @@ export default function AppShell() {
       ) : null}
 
       <Sheet open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
-        <SheetContent side="left" className="w-full max-w-none border-border/40 p-0">
+        <SheetContent
+          side="left"
+          className="w-full max-w-none border-border/40 p-0"
+          onTouchStart={handleTouchStart}
+          onTouchEnd={handleTouchEnd}
+        >
           <SheetHeader className="sr-only">
             <SheetTitle>Chats</SheetTitle>
           </SheetHeader>
@@ -4594,7 +4926,7 @@ export default function AppShell() {
               >
                 {hasEarlierMessages || loadingEarlierMessages ? (
                   <div className="text-center text-xs text-muted-foreground">
-                    {loadingEarlierMessages ? "Weitere Nachrichten werden geladen …" : "Nach oben scrollen für ältere Nachrichten"}
+                    {loadingEarlierMessages ? "Loading more messages…" : "Scroll up for older messages"}
                   </div>
                 ) : null}
                 {messages.map((m) => {
@@ -4629,6 +4961,12 @@ export default function AppShell() {
                                 </span>
                               );
                             })}
+                          </div>
+                        ) : null}
+                        {m.referenceText ? (
+                          <div className="flex max-w-[85%] items-start gap-2 rounded-xl border border-primary/20 bg-primary/[0.06] px-3 py-2 text-xs text-muted-foreground">
+                            <Reply className="mt-0.5 size-3.5 shrink-0 text-primary" />
+                            <span className="whitespace-pre-wrap break-words text-left">{m.referenceText}</span>
                           </div>
                         ) : null}
                         {editingMessageId === m.id ? (
@@ -4794,7 +5132,11 @@ export default function AppShell() {
                           return (
                             <div
                               key={`text-${pi}`}
-                              className={m.streaming ? "streaming-answer" : undefined}
+                              className={cn(
+                                "block w-full",
+                                m.streaming && "streaming-answer",
+                                pi > 0 && "mt-3",
+                              )}
                             >
                               {m.streaming ? (
                                 <StreamingMarkdown content={part.content} />
@@ -4837,33 +5179,32 @@ export default function AppShell() {
                     {m.role === "assistant" && m.suggestions?.length ? (
                       <div className="mt-3 flex flex-col items-start gap-1" aria-label="Suggested next steps">
                         {m.suggestions.map((suggestion) => (
-                          <div key={suggestion} className="flex max-w-full items-center gap-1">
-                            <Button
-                              type="button"
-                              size="icon-xs"
-                              variant="ghost"
-                              className="size-6 shrink-0 text-muted-foreground"
-                              aria-label={`Edit suggestion: ${suggestion}`}
-                              title="Edit suggestion"
-                              disabled={busy}
-                              onClick={() => {
-                                setInput(suggestion);
-                                window.setTimeout(() => textareaRef.current?.focus(), 0);
-                              }}
-                            >
-                              <Pencil className="size-3" />
-                            </Button>
-                            <Button
-                              type="button"
-                              size="xs"
-                              variant="link"
-                              className="h-auto min-w-0 justify-start whitespace-normal text-left text-xs"
-                              disabled={busy}
-                              onClick={() => void send(undefined, suggestion)}
-                            >
-                              {suggestion}
-                            </Button>
-                          </div>
+                          <Button
+                            key={`${suggestion.label}-${suggestion.prompt}`}
+                            type="button"
+                            size="xs"
+                            variant="link"
+                            className="h-auto min-w-0 justify-start gap-1.5 whitespace-normal text-left text-xs text-muted-foreground hover:text-foreground"
+                            aria-label={`Use suggestion: ${suggestion.label}`}
+                            title="Use suggestion"
+                            disabled={busy}
+                            onClick={() => {
+                              setInput(suggestion.prompt);
+                              window.setTimeout(() => {
+                                const editor = textareaRef.current;
+                                if (!editor) return;
+                                editor.focus();
+                                const selection = window.getSelection();
+                                const range = document.createRange();
+                                range.selectNodeContents(editor);
+                                selection?.removeAllRanges();
+                                selection?.addRange(range);
+                              }, 0);
+                            }}
+                          >
+                            <Reply className="size-3.5 shrink-0" />
+                            <span>{suggestion.label}</span>
+                          </Button>
                         ))}
                       </div>
                     ) : null}
@@ -5062,10 +5403,10 @@ export default function AppShell() {
                     <div
                       className="mb-2 flex items-center justify-center gap-2 text-xs text-muted-foreground"
                       role="status"
-                      aria-label="Agent läuft"
+                      aria-label="Agent running"
                     >
                       <LoaderCircle className="size-3.5 animate-spin" />
-                      <span>{liveStatus || "Agent läuft…"}</span>
+                      <span>{liveStatus || "Agent running…"}</span>
                     </div>
                   ) : null}
                   {composer}
@@ -5096,9 +5437,12 @@ export default function AppShell() {
         </div>
       </div>
 
-      {workspaceOpen ? (
+      {workspaceMounted ? (
         <aside
-          className="workspace-panel-enter relative flex min-h-0 w-full shrink-0 flex-col overflow-hidden border-l border-border/40 bg-background max-md:absolute max-md:inset-0 max-md:z-30 max-md:!w-full"
+          className={cn(
+            "relative flex min-h-0 w-full shrink-0 flex-col overflow-hidden border-l border-border/40 bg-background max-md:absolute max-md:inset-0 max-md:z-30 max-md:!w-full",
+            workspaceOpen ? "workspace-panel-enter" : "workspace-panel-exit",
+          )}
           style={{ width: `min(100%, ${workspaceWidth}px)` }}
         >
           <WorkspaceResizeHandle width={workspaceWidth} onWidthChange={setWorkspaceWidth} />
@@ -5106,7 +5450,7 @@ export default function AppShell() {
             <div className="min-w-0">
               <h1 className="flex items-center gap-2 text-sm font-medium">
                 {workspaceTab === "browser" ? <Globe2 className="size-4 shrink-0 text-cyan-400" /> : workspaceTab === "terminal" ? <Terminal className="size-4 shrink-0 text-orange-400" /> : workspaceTab === "files" ? <FileCode2 className="size-4 shrink-0 text-emerald-400" /> : activeWorkspace ? <WorkspaceIcon type={activeWorkspace.type} className="size-4 shrink-0" /> : null}
-                <span className="truncate">{workspaceTab === "browser" ? "Browser" : workspaceTab === "terminal" ? "Terminal" : workspaceTab === "files" ? "Dateien" : activeWorkspace?.name || "Workspace"}</span>
+                <span className="truncate">{workspaceTab === "browser" ? "Browser" : workspaceTab === "terminal" ? "Terminal" : workspaceTab === "files" ? "Files" : activeWorkspace?.name || "Workspace"}</span>
               </h1>
             </div>
             <Button type="button" variant="ghost" size="icon-sm" aria-label="Close side panel" onClick={() => setWorkspaceOpen(false)}>
@@ -5129,7 +5473,7 @@ export default function AppShell() {
                 }}
                 className="h-7 shrink-0 capitalize"
               >
-                {tab === "plan" ? "Plans" : tab === "files" ? "Dateien" : tab === "terminal" ? "Terminal" : tab}
+                {tab === "plan" ? "Plans" : tab === "files" ? "Files" : tab === "terminal" ? "Terminal" : tab}
               </Button>
             ))}
           </div>
@@ -5170,11 +5514,51 @@ export default function AppShell() {
                 {browserUrl ? <iframe src={browserUrl} title="Embedded browser" className="min-h-0 flex-1 rounded-md border border-border/40 bg-white" /> : <div className="flex flex-1 items-center justify-center text-center text-xs text-muted-foreground">Enter a public or local URL to open it here.</div>}
               </>
             ) : workspaceTab === "terminal" ? (
-              <RemoteTerminal
-                cwd={remoteTerminalCwd}
-                sessionId={terminalSessionId}
-                onSessionIdChange={setTerminalSessionId}
-              />
+              <>
+                <div className="flex shrink-0 items-center gap-1 overflow-x-auto">
+                  {terminalTabs.map((tab) => (
+                    <div key={tab.id} className="flex shrink-0 items-center">
+                      <Button
+                        type="button"
+                        size="xs"
+                        variant={tab.id === activeTerminalTabId ? "secondary" : "ghost"}
+                        className="h-7 max-w-36 truncate rounded-r-none text-xs"
+                        onClick={() => selectTerminalTab(tab)}
+                      >
+                        {tab.title}
+                      </Button>
+                      <Button
+                        type="button"
+                        size="icon-xs"
+                        variant={tab.id === activeTerminalTabId ? "secondary" : "ghost"}
+                        className="size-7 rounded-l-none"
+                        disabled={terminalTabs.length <= 1}
+                        aria-label={`Close ${tab.title}`}
+                        onClick={() => closeTerminalTab(tab.id)}
+                      >
+                        <X className="size-3" />
+                      </Button>
+                    </div>
+                  ))}
+                  <Button type="button" size="icon-xs" variant="ghost" className="size-7 shrink-0" aria-label="New terminal tab" onClick={openTerminalTab}>
+                    <Plus className="size-3.5" />
+                  </Button>
+                </div>
+                {(() => {
+                  const activeTab = terminalTabs.find((tab) => tab.id === activeTerminalTabId) || terminalTabs[0];
+                  if (!activeTab) return null;
+                  return (
+                    <RemoteTerminal
+                      key={activeTab.id}
+                      cwd={activeTab.cwd}
+                      sessionId={activeTab.sessionId}
+                      onSessionIdChange={(sessionId) => {
+                        setTerminalTabs((current) => current.map((tab) => tab.id === activeTab.id ? { ...tab, sessionId } : tab));
+                      }}
+                    />
+                  );
+                })()}
+              </>
             ) : workspaceTab === "files" ? (
               <RemoteFileEditor cwd={remoteFileCwd} onCwdChange={setRemoteFileCwd} />
             ) : !activeWorkspace ? (
@@ -5376,6 +5760,7 @@ export default function AppShell() {
         notificationsEnabled={notificationsEnabled}
         onNotificationsEnabledChange={setNotificationsEnabled}
         onMemoriesChanged={() => void loadMemories()}
+        onChatsChanged={() => void loadChats()}
         onLogout={() => void logout()}
       />
 

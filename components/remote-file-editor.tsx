@@ -95,7 +95,7 @@ export function RemoteFileEditor({ cwd, onCwdChange }: RemoteFileEditorProps) {
     setSaving(true);
     try {
       await request({ action: "write", path: selectedPath, cwd, content });
-      toast.success("Datei gespeichert");
+      toast.success("File saved");
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "File could not be saved");
     } finally {
@@ -110,7 +110,7 @@ export function RemoteFileEditor({ cwd, onCwdChange }: RemoteFileEditorProps) {
       await request({ action: "write", path: `${cwd.replace(/\/$/, "")}/${name}`, cwd, content: "" });
       setNewName("");
       await loadDirectory(cwd);
-      toast.success("Datei erstellt");
+      toast.success("File created");
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "File could not be created");
     }
@@ -151,14 +151,14 @@ export function RemoteFileEditor({ cwd, onCwdChange }: RemoteFileEditorProps) {
   }
 
   async function deleteSelected() {
-    if (!selectedEntryPath || !window.confirm(`"${selectedEntryPath}" wirklich löschen?`)) return;
+    if (!selectedEntryPath || !window.confirm(`Delete "${selectedEntryPath}"?`)) return;
     try {
       await request({ action: "delete", path: selectedEntryPath, cwd });
       setSelectedPath("");
       setSelectedEntryPath("");
       setContent("");
       await loadDirectory(cwd);
-      toast.success("Datei gelöscht");
+      toast.success("File deleted");
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "File could not be deleted");
     }
@@ -191,11 +191,11 @@ export function RemoteFileEditor({ cwd, onCwdChange }: RemoteFileEditorProps) {
               {entry.directory ? <ChevronRight className="size-3 text-muted-foreground" /> : null}
             </button>
           ))}
-          {!loading && entries.length === 0 ? <p className="p-2 text-xs text-muted-foreground">Verzeichnis ist leer.</p> : null}
+          {!loading && entries.length === 0 ? <p className="p-2 text-xs text-muted-foreground">Directory is empty.</p> : null}
         </div>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-2">
           <div className="flex items-center gap-1">
-            <Input value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="Neue Datei…" className="h-8 min-w-0 flex-1 text-xs" />
+            <Input value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="New file…" className="h-8 min-w-0 flex-1 text-xs" />
             <Button type="button" size="icon-sm" variant="ghost" disabled={!newName.trim()} onClick={() => void createFile()} aria-label="Create file">
               <Plus className="size-3.5" />
             </Button>
@@ -220,7 +220,7 @@ export function RemoteFileEditor({ cwd, onCwdChange }: RemoteFileEditorProps) {
               </Button>
             ) : null}
           </div>
-          <Textarea value={content} onChange={(event) => setContent(event.target.value)} disabled={!selectedPath} placeholder="Datei auswählen…" className="min-h-0 flex-1 resize-none font-mono text-xs leading-5" />
+          <Textarea value={content} onChange={(event) => setContent(event.target.value)} disabled={!selectedPath} placeholder="Select a file…" className="min-h-0 flex-1 resize-none font-mono text-xs leading-5" />
         </div>
       </div>
       {selectedPath ? <p className="truncate text-[11px] text-muted-foreground">{selectedPath}</p> : null}

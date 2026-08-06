@@ -49,7 +49,7 @@ export function LinkPreview({ href, children }: LinkPreviewProps) {
           className="pointer-events-none absolute bottom-full left-0 z-50 mb-2 block w-72 rounded-xl border border-border/70 bg-popover p-3 text-left text-popover-foreground shadow-xl"
         >
           {loading ? (
-            <span className="text-xs text-muted-foreground">Link wird geladen…</span>
+            <span className="text-xs text-muted-foreground">Loading link…</span>
           ) : (
             <span className="flex gap-2.5">
               {preview?.favicon ? (

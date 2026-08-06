@@ -1,0 +1,8 @@
+{
+  "name": "@ai-chat/mcp-gateway",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.mjs"
+  }
+}

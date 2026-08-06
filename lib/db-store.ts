@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getDatabase, parseData, transaction } from "@/lib/sqlite";
+import { config } from "@/lib/config";
 import type {
   BrowserContext,
   Chat,
@@ -21,7 +22,10 @@ function rowChat(row: unknown): Chat | null {
   return parseData<Chat>(row);
 }
 
-export function listChatsForUser(ownerId?: string): ChatIndexEntry[] {
+export function listChatsForUser(
+  ownerId?: string,
+  options: { includeArchived?: boolean } = {},
+): ChatIndexEntry[] {
   const db = getDatabase();
   const rows = ownerId
     ? db.prepare("SELECT data FROM chats WHERE owner_id = ? ORDER BY updated_at DESC").all(ownerId)
@@ -29,7 +33,9 @@ export function listChatsForUser(ownerId?: string): ChatIndexEntry[] {
   return rows
     .map((row) => rowChat(row))
     .filter((chat): chat is Chat => Boolean(chat))
+    .filter((chat) => options.includeArchived || !chat.archived)
     .sort((a, b) => {
+      if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
       const aLastSentMessage = a.messages.filter((message) => message.role === "user").at(-1)?.createdAt || "";
       const bLastSentMessage = b.messages.filter((message) => message.role === "user").at(-1)?.createdAt || "";
       if (Boolean(aLastSentMessage) !== Boolean(bLastSentMessage)) {
@@ -49,6 +55,8 @@ export function listChatsForUser(ownerId?: string): ChatIndexEntry[] {
       runUpdatedAt: chat.runUpdatedAt,
       pendingQuestion: chat.pendingQuestion,
       badge: chat.badge,
+      pinned: chat.pinned,
+      archived: chat.archived,
     }));
 }
 
@@ -70,7 +78,7 @@ export function searchChatsForUser(
   if (!normalized) return [];
 
   const results: ChatSearchResult[] = [];
-  for (const entry of listChatsForUser(ownerId)) {
+  for (const entry of listChatsForUser(ownerId, { includeArchived: true })) {
     const chat = getChat(entry.id, ownerId);
     if (!chat) continue;
 
@@ -173,6 +181,8 @@ export function updateChat(
     modelId?: string | null;
     modelParams?: Array<{ id: string; value: string }> | null;
     queuedMessages?: Array<{ id: string; text: string }> | null;
+    pinned?: boolean;
+    archived?: boolean;
     canvas?: string | null;
     workspaces?: WorkspaceItem[] | null;
     browserContext?: BrowserContext | null;
@@ -197,6 +207,14 @@ export function updateChat(
     else if (patch.modelParams) next.modelParams = patch.modelParams;
     if (patch.queuedMessages === null) delete next.queuedMessages;
     else if (patch.queuedMessages) next.queuedMessages = patch.queuedMessages;
+    if (patch.pinned !== undefined) {
+      if (patch.pinned) next.pinned = true;
+      else delete next.pinned;
+    }
+    if (patch.archived !== undefined) {
+      if (patch.archived) next.archived = true;
+      else delete next.archived;
+    }
     if (patch.canvas === null) delete next.canvas;
     else if (patch.canvas !== undefined) next.canvas = patch.canvas;
     if (patch.workspaces === null) {
@@ -276,54 +294,58 @@ export const titleFromMessage = (content: string) => {
   return cleaned ? (cleaned.length > 48 ? `${cleaned.slice(0, 48)}…` : cleaned) : "New chat";
 };
 
-export function listMemories(): Memory[] {
+export function listMemories(ownerId?: string): Memory[] {
+  const query = ownerId
+    ? "SELECT data FROM memories WHERE owner_id = ? ORDER BY updated_at ASC"
+    : "SELECT data FROM memories ORDER BY updated_at ASC";
   return getDatabase()
-    .prepare("SELECT data FROM memories ORDER BY updated_at ASC")
-    .all()
+    .prepare(query)
+    .all(...(ownerId ? [ownerId] : []))
     .map((row) => parseData<Memory>(row))
     .filter((memory): memory is Memory => Boolean(memory));
 }
 
-export function saveMemories(memories: Memory[]) {
+export function saveMemories(memories: Memory[], ownerId?: string) {
   transaction(() => {
     const db = getDatabase();
-    db.prepare("DELETE FROM memories").run();
-    const insert = db.prepare("INSERT INTO memories (id, data, updated_at) VALUES (?, ?, ?)");
-    for (const memory of memories) insert.run(memory.id, JSON.stringify(memory), memory.updatedAt);
+    if (ownerId) db.prepare("DELETE FROM memories WHERE owner_id = ?").run(ownerId);
+    else db.prepare("DELETE FROM memories").run();
+    const insert = db.prepare("INSERT INTO memories (id, owner_id, data, updated_at) VALUES (?, ?, ?, ?)");
+    for (const memory of memories) insert.run(memory.id, ownerId ?? null, JSON.stringify(memory), memory.updatedAt);
   });
 }
 
-export function getGlobalModelSettings(): GlobalModelSettings {
-  const row = getDatabase().prepare("SELECT data FROM settings WHERE key = 'global'").get();
+export function getGlobalModelSettings(ownerId?: string): GlobalModelSettings {
+  const row = getDatabase().prepare("SELECT data FROM settings WHERE key = ?").get(ownerId ? `global:${ownerId}` : "global");
   return parseData<GlobalModelSettings>({ data: (row as { data?: string } | undefined)?.data }) || {};
 }
 
-export function saveGlobalModelSettings(settings: GlobalModelSettings) {
+export function saveGlobalModelSettings(settings: GlobalModelSettings, ownerId?: string) {
   getDatabase()
-    .prepare("INSERT OR REPLACE INTO settings (key, data) VALUES ('global', ?)")
-    .run(JSON.stringify(settings));
+    .prepare("INSERT OR REPLACE INTO settings (key, owner_id, data) VALUES (?, ?, ?)")
+    .run(ownerId ? `global:${ownerId}` : "global", ownerId ?? null, JSON.stringify(settings));
   return settings;
 }
 
-export function createMemory(content: string, tags?: string[]): Memory {
+export function createMemory(content: string, tags?: string[], ownerId?: string): Memory {
   const memory: Memory = { id: randomUUID(), content: content.trim(), tags, createdAt: now(), updatedAt: now() };
-  saveMemories([...listMemories(), memory]);
+  saveMemories([...listMemories(ownerId), memory], ownerId);
   return memory;
 }
 
-export function updateMemory(id: string, patch: { content?: string; tags?: string[] }) {
-  const memory = listMemories().find((item) => item.id === id);
+export function updateMemory(id: string, patch: { content?: string; tags?: string[] }, ownerId?: string) {
+  const memory = listMemories(ownerId).find((item) => item.id === id);
   if (!memory) return null;
   const updated = { ...memory, ...patch, updatedAt: now() };
-  saveMemories(listMemories().map((item) => (item.id === id ? updated : item)));
+  saveMemories(listMemories(ownerId).map((item) => (item.id === id ? updated : item)), ownerId);
   return updated;
 }
 
-export function deleteMemory(id: string) {
-  const memories = listMemories();
+export function deleteMemory(id: string, ownerId?: string) {
+  const memories = listMemories(ownerId);
   const next = memories.filter((item) => item.id !== id);
   if (next.length === memories.length) return false;
-  saveMemories(next);
+  saveMemories(next, ownerId);
   return true;
 }
 
@@ -332,7 +354,7 @@ export function buildSystemContext(memories: Memory[]) {
 }
 
 export function getDataPaths() {
-  return { DATA_DIR: process.env.CHAT_DATA_DIR || "data", databasePath: getDatabase() };
+  return { DATA_DIR: config.dataDir, databasePath: config.databasePath };
 }
 
 export type { BrowserContext, Chat, ChatIndexEntry, ChatMessage, GlobalModelSettings, Memory, PendingChatQuestion, ToolPart, WorkspaceItem };

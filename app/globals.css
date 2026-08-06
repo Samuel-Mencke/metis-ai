@@ -370,6 +370,27 @@
   animation: soft-message-in 240ms ease-out both;
 }
 
+@keyframes streaming-token-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.streaming-token-fade {
+  display: inline;
+  animation: streaming-token-in 180ms ease-out both;
+}
+
+.streaming-markdown > .markdown-body,
+.streaming-markdown > .markdown-body > p {
+  display: inline;
+}
+
 @keyframes workspace-panel-in {
   from {
     opacity: 0;
@@ -385,8 +406,26 @@
   animation: workspace-panel-in 180ms ease-out both;
 }
 
+.workspace-panel-exit {
+  animation: workspace-panel-out 180ms ease-in both;
+  pointer-events: none;
+}
+
+@keyframes workspace-panel-out {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(18px);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .workspace-panel-enter {
+  .streaming-token-fade,
+  .workspace-panel-enter,
+  .workspace-panel-exit {
     animation: none;
   }
 }

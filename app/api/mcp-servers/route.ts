@@ -1,4 +1,4 @@
-import { isAuthenticated } from "@/lib/auth";
+import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,11 +8,13 @@ type GatewayResult = {
   isError?: boolean;
 };
 
-async function gatewayTool(name: string, args: Record<string, unknown> = {}) {
+async function gatewayTool(req: Request, name: string, args: Record<string, unknown> = {}) {
   // The gateway core is an ESM runtime module shared with the stdio MCP entrypoint.
   // @ts-expect-error The runtime module has no generated TypeScript declarations.
-  const { dispatchGatewayTool } = await import("@/lib/mcp-core/gateway-core.mjs");
-  const result = (await dispatchGatewayTool(name, args)) as GatewayResult;
+  const { dispatchGatewayTool } = await import("@/packages/mcp-gateway/index.mjs");
+  const result = (await dispatchGatewayTool(name, args, {
+    context: { userId: (await getAuthenticatedUserId(req)) ?? undefined },
+  })) as GatewayResult;
   const text = result.content?.map((item) => item.text || "").join("\n") || "";
   if (result.isError) throw new Error(text || "MCP operation failed");
   try {
@@ -97,7 +99,7 @@ function parseServer(body: Record<string, unknown>) {
 export async function GET(req: Request) {
   if (!(await isAuthenticated(req))) return Response.json({ error: "Unauthorized" }, { status: 401 });
   try {
-    const servers = await gatewayTool("list_mcp_servers", { include_disabled: true });
+    const servers = await gatewayTool(req, "list_mcp_servers", { include_disabled: true });
     return Response.json({
       servers: Array.isArray(servers) ? servers.map(sanitizeServer) : [],
     });
@@ -110,7 +112,7 @@ export async function POST(req: Request) {
   if (!(await isAuthenticated(req))) return Response.json({ error: "Unauthorized" }, { status: 401 });
   try {
     const body = (await req.json()) as Record<string, unknown>;
-    const server = await gatewayTool("upsert_mcp_server", parseServer(body));
+    const server = await gatewayTool(req, "upsert_mcp_server", parseServer(body));
     return Response.json({ server: sanitizeServer((server as { server?: unknown }).server) }, { status: 201 });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Failed to save MCP server" }, { status: 400 });

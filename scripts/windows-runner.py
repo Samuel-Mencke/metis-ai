@@ -5,7 +5,7 @@ import time
 import traceback
 from pathlib import Path
 
-BASE = Path.home() / ".samuel-mcp-runner"
+BASE = Path.home() / ".metis-ai-mcp-runner"
 JOBS = BASE / "jobs"
 RESULTS = BASE / "results"
 LOG = BASE / "runner.log"

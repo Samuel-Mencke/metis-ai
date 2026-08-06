@@ -117,13 +117,14 @@ function planInfo(input?: string, result?: string, detail?: string) {
         ? parsed.value as Record<string, unknown>
         : {};
       const content = [parsed.plan, parsed.content, value.plan, value.content]
-        .find((candidate): candidate is string => typeof candidate === "string" && Boolean(candidate.trim()));
-      if (content) {
+        .find((candidate): candidate is string => typeof candidate === "string");
+      if (content !== undefined) {
         const title = [parsed.title, parsed.name, value.title, value.name]
           .find((candidate): candidate is string => typeof candidate === "string" && Boolean(candidate.trim()));
         return {
           title: title?.trim() || "Plan",
           content: content.trim(),
+          workspaceLink: typeof parsed.workspaceLink === "string" ? parsed.workspaceLink : undefined,
         };
       }
     } catch {
@@ -144,13 +145,14 @@ function canvasInfo(input?: string, result?: string, detail?: string) {
         ? parsed.value as Record<string, unknown>
         : {};
       const content = [parsed.canvas, parsed.content, value.canvas, value.content]
-        .find((candidate): candidate is string => typeof candidate === "string" && Boolean(candidate.trim()));
-      if (content) {
+        .find((candidate): candidate is string => typeof candidate === "string");
+      if (content !== undefined) {
         const title = [parsed.title, parsed.name, value.title, value.name]
           .find((candidate): candidate is string => typeof candidate === "string" && Boolean(candidate.trim()));
         return {
           title: title?.trim() || "Canvas",
           content: content.trim(),
+          workspaceLink: typeof parsed.workspaceLink === "string" ? parsed.workspaceLink : undefined,
         };
       }
     } catch {
@@ -314,6 +316,7 @@ export function ToolCallChip({
       <PlanWorkspaceCard
         title={plan.title}
         content={plan.content}
+        workspaceLink={plan.workspaceLink}
         onOpen={onOpenWorkspace}
         onBuild={() => onBuildPlan?.(plan)}
         buildDisabled={buildDisabled}
@@ -328,6 +331,7 @@ export function ToolCallChip({
       <CanvasWorkspaceCard
         title={canvas.title}
         content={canvas.content}
+        workspaceLink={canvas.workspaceLink}
         onOpen={onOpenWorkspace}
       />
     );

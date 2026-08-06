@@ -2,7 +2,14 @@
 
 import { LinkPreview } from "@/components/link-preview";
 
-type Reference = { label: string };
+type Reference = {
+  kind?: string;
+  id?: string;
+  label: string;
+  chatId?: string;
+  path?: string;
+  sessionId?: string;
+};
 
 export function RichUserText({
   content,
@@ -32,10 +39,26 @@ export function RichUserText({
     <>
       {parts.map((part, index) => {
         if (part.kind === "mention") {
+          const reference = references.find(
+            (item) => `@${item.label.trim()}` === part.text,
+          );
           return (
-            <span key={`${part.text}-${index}`} className="text-primary underline underline-offset-2">
+            <button
+              key={`${part.text}-${index}`}
+              type="button"
+              className="inline cursor-pointer border-0 bg-transparent p-0 text-primary underline underline-offset-2 hover:text-primary/80"
+              title={reference ? `Open ${reference.label}` : part.text}
+              onClick={() => {
+                if (!reference?.kind || !reference.id) return;
+                window.dispatchEvent(
+                  new CustomEvent("ai-chat:open-reference", {
+                    detail: { ...reference, label: reference.label.trim() },
+                  }),
+                );
+              }}
+            >
               {part.text}
-            </span>
+            </button>
           );
         }
         if (part.kind === "link") {

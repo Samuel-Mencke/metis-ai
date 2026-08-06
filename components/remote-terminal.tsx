@@ -72,7 +72,7 @@ export function RemoteTerminal({ cwd, sessionId, onSessionIdChange }: RemoteTerm
         });
       }
       const data = (await response.json()) as { sessionId?: string; error?: string };
-      if (!response.ok || !data.sessionId) throw new Error(data.error || "Terminal konnte nicht gestartet werden");
+      if (!response.ok || !data.sessionId) throw new Error(data.error || "Could not start terminal");
       sessionIdRef.current = data.sessionId;
       onSessionIdChange(data.sessionId);
       setStarting(false);
@@ -112,7 +112,7 @@ export function RemoteTerminal({ cwd, sessionId, onSessionIdChange }: RemoteTerm
     void start().catch((nextError) => {
       if (!disposed) {
         setStarting(false);
-        setError(nextError instanceof Error ? nextError.message : "Terminal konnte nicht gestartet werden");
+        setError(nextError instanceof Error ? nextError.message : "Could not start terminal");
       }
     });
 
@@ -143,8 +143,13 @@ export function RemoteTerminal({ cwd, sessionId, onSessionIdChange }: RemoteTerm
           <RotateCcw className="size-3.5" />
         </Button>
       </div>
-      <div ref={terminalElementRef} className="min-h-0 flex-1 overflow-hidden rounded-md bg-[#09090b] p-2" aria-label="Remote terminal">
-        {starting ? <LoaderCircle className="size-4 animate-spin text-muted-foreground" /> : null}
+      <div className="relative min-h-0 flex-1 overflow-hidden rounded-md bg-[#09090b] p-2">
+        <div ref={terminalElementRef} className="h-full w-full" aria-label="Remote terminal" />
+        {starting ? (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[#09090b]/70">
+            <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
+          </div>
+        ) : null}
       </div>
       {error ? <p className="whitespace-pre-wrap text-xs text-destructive">{error}</p> : null}
     </div>

@@ -1,6 +1,7 @@
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { enqueueJob } from "@/lib/db-jobs";
 import { appendMessage, getChat, titleFromMessage, updateChat } from "@/lib/db-store";
+import { isModelAllowed } from "@/lib/model-access";
 import { saveAttachments, type IncomingAttachment } from "@/lib/uploads";
 
 export const runtime = "nodejs";
@@ -34,6 +35,7 @@ export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as ChatBody;
   const chatId = body.chatId?.trim();
   const message = body.message?.trim() || "";
+  const requestedModelId = body.modelId?.trim();
   const attachments = Array.isArray(body.attachments) ? body.attachments : [];
   const references = Array.isArray(body.references)
     ? body.references
@@ -53,8 +55,14 @@ export async function POST(req: Request) {
           ...(typeof reference.content === "string" ? { content: reference.content.slice(0, 8_000) } : {}),
         }))
     : [];
+  const referenceText = typeof body.referenceText === "string"
+    ? body.referenceText.trim().slice(0, 100_000)
+    : "";
   if (!chatId || (!message && !attachments.length)) {
     return Response.json({ error: "chatId and message or attachments are required" }, { status: 400 });
+  }
+  if (requestedModelId && !isModelAllowed(ownerId, requestedModelId)) {
+    return Response.json({ error: "This model is not available for your account" }, { status: 403 });
   }
   const chat = getChat(chatId, ownerId);
   if (!chat) return Response.json({ error: "Chat not found" }, { status: 404 });
@@ -70,6 +78,7 @@ export async function POST(req: Request) {
     id: messageId,
     role: "user",
     content: message || `Attached ${stored.length} file${stored.length === 1 ? "" : "s"}`,
+    ...(referenceText ? { referenceText } : {}),
     ...(references.length ? { references } : {}),
     ...(stored.length ? { attachments: stored } : {}),
   });
@@ -84,7 +93,7 @@ export async function POST(req: Request) {
     ...(body.referenceText ? { referenceText: body.referenceText.slice(0, 100_000) } : {}),
     ...(references.length ? { references } : {}),
     ...(body.agentId ? { agentId: body.agentId } : {}),
-    ...(body.modelId ? { modelId: body.modelId } : {}),
+    ...(requestedModelId ? { modelId: requestedModelId } : {}),
     ...(body.modelParams ? { modelParams: body.modelParams } : {}),
     ...(stored.length ? { attachments: stored } : {}),
   });
