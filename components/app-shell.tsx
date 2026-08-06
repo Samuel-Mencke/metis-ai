@@ -4883,7 +4883,6 @@ export default function AppShell() {
         onOpenModel={() => setModelMenuOpen(true)}
         onToggleSidebar={() => setDesktopSidebarOpen((open) => !open)}
         onExport={exportCurrentChat}
-        sidebarOpen={desktopSidebarOpen}
       />
       {desktopSidebarOpen ? (
         <aside

@@ -4,10 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=metis
-WorkingDirectory=/opt/metis-ai
-EnvironmentFile=/etc/metis-ai/metis-ai.env
-ExecStart=/usr/bin/env node /opt/metis-ai/node_modules/tsx/dist/cli.mjs worker.ts
+User=__METIS_USER__
+WorkingDirectory=__METIS_DIR__
+EnvironmentFile=__METIS_ENV__
+ExecStart=/usr/bin/env node __METIS_DIR__/node_modules/tsx/dist/cli.mjs __METIS_DIR__/worker.ts
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Restart=always
 RestartSec=3
 NoNewPrivileges=true

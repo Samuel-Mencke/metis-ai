@@ -1,0 +1,22 @@
+{
+  "repository": "f1shyondrugs/metis-ai",
+  "branch": "master",
+  "minimumNode": 20,
+  "defaultWebPort": 3100,
+  "defaultMcpPort": 8787,
+  "installPaths": {
+    "linux": "~/.local/share/metis-ai",
+    "macos": "~/.local/share/metis-ai",
+    "windows": "%LOCALAPPDATA%/MetisAI"
+  },
+  "publicInstallUrls": {
+    "linux": "https://metis-ai.f1shy312.com/install/linux",
+    "macos": "https://metis-ai.f1shy312.com/install/macos",
+    "windows": "https://metis-ai.f1shy312.com/install/windows"
+  },
+  "sourcePolicy": {
+    "default": "github",
+    "repositoryIsPrivate": true,
+    "allowedSources": ["github", "https", "local-directory"]
+  }
+}

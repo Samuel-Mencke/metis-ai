@@ -1,0 +1,11 @@
+@'
+$baseUrl = if ($env:METIS_AI_INSTALLER_BASE_URL) { $env:METIS_AI_INSTALLER_BASE_URL } else { "https://metis-ai.f1shy312.com/install" }
+$scriptPath = Join-Path $env:TEMP ("metis-ai-install-" + [Guid]::NewGuid().ToString("N") + ".ps1")
+try {
+  Invoke-WebRequest -Uri "$baseUrl/install.ps1" -OutFile $scriptPath
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath @args
+  exit $LASTEXITCODE
+} finally {
+  Remove-Item -Force -ErrorAction SilentlyContinue $scriptPath
+}
+'@ | Invoke-Expression

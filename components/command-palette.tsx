@@ -45,16 +45,15 @@ type Props = {
   onOpenModel: () => void;
   onToggleSidebar: () => void;
   onExport: () => void;
-  sidebarOpen: boolean;
 };
 
 const commandItems = [
   { id: "new", label: "New chat", hint: "Ctrl/Cmd+N", icon: SquarePen },
   { id: "memories", label: "Open memories", icon: Brain },
   { id: "settings", label: "Open settings", icon: Settings },
-  { id: "workspace", label: "Open workspace", icon: LayoutPanelLeft },
+  { id: "workspace", label: "Toggle workspace", icon: LayoutPanelLeft },
   { id: "model", label: "Choose model", icon: Sparkles },
-  { id: "sidebar", label: "Toggle sidebar", icon: PanelLeft },
+  { id: "sidebar", label: "Toggle chat bar", icon: PanelLeft },
   { id: "export", label: "Export current chat", icon: FileDown },
 ] as const;
 
@@ -84,7 +83,6 @@ export function CommandPalette({
   onOpenModel,
   onToggleSidebar,
   onExport,
-  sidebarOpen,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
@@ -240,7 +238,7 @@ export function CommandPalette({
                         onClick={() => runCommand(command.id)}
                       >
                         <Icon className="size-4 text-muted-foreground" />
-                        <span className="flex-1 text-sm">{command.id === "sidebar" ? `${command.label} (${sidebarOpen ? "open" : "closed"})` : command.label}</span>
+                        <span className="flex-1 text-sm">{command.label}</span>
                         {"hint" in command && command.hint ? <kbd className="text-[10px] text-muted-foreground">{command.hint}</kbd> : null}
                       </button>
                     );
@@ -300,7 +298,7 @@ export function CommandPalette({
                     onClick={() => runCommand(command.id)}
                   >
                     <Icon className="size-4 text-muted-foreground" />
-                    <span className="flex-1 text-sm">{command.id === "sidebar" ? `${command.label} (${sidebarOpen ? "open" : "closed"})` : command.label}</span>
+                    <span className="flex-1 text-sm">{command.label}</span>
                     {"hint" in command && command.hint ? <kbd className="text-[10px] text-muted-foreground">{command.hint}</kbd> : null}
                   </button>
                 );

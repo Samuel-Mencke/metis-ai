@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+set -eu
+
+base_url="${METIS_AI_INSTALLER_BASE_URL:-https://metis-ai.f1shy312.com/install}"
+tmp="${TMPDIR:-/tmp}/metis-ai-install-$$.sh"
+trap 'rm -f "$tmp"' EXIT INT TERM
+curl -fsSL "$base_url/install.sh" -o "$tmp"
+exec bash "$tmp" "$@"
