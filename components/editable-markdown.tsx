@@ -89,7 +89,8 @@ export function EditableMarkdown({
       aria-label={ariaLabel}
       data-placeholder={placeholder}
       className={cn(
-        "editable-markdown min-h-0 w-full flex-1 overflow-y-auto rounded-md p-3 text-sm leading-6 outline-none",
+        "editable-markdown min-h-0 w-full flex-1 overflow-y-auto rounded-md p-2 text-[13px] leading-5 outline-none",
+        "[&_.markdown-body_p]:my-2 [&_.markdown-body_ul]:my-2 [&_.markdown-body_ol]:my-2",
         "focus-visible:ring-2 focus-visible:ring-ring/50",
         className,
       )}

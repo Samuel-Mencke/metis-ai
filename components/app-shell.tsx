@@ -98,6 +98,7 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuLabel,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -523,9 +524,9 @@ const PARAMS_STORAGE_KEY = `${clientConfig.storagePrefix}_model_params`;
 const SIDEBAR_WIDTH_STORAGE_KEY = `${clientConfig.storagePrefix}_sidebar_width`;
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 420;
-const WORKSPACE_WIDTH_STORAGE_KEY = `${clientConfig.storagePrefix}_workspace_width`;
-const WORKSPACE_MIN_WIDTH = 320;
-const WORKSPACE_MAX_WIDTH = 840;
+const WORKSPACE_WIDTH_STORAGE_KEY = `${clientConfig.storagePrefix}_workspace_width_compact`;
+const WORKSPACE_MIN_WIDTH = 280;
+const WORKSPACE_MAX_WIDTH = 480;
 const NOTIFICATIONS_STORAGE_KEY = `${clientConfig.storagePrefix}_notifications_enabled`;
 const SOUND_CUES_STORAGE_KEY = `${clientConfig.storagePrefix}_sound_cues_enabled`;
 const FINISH_SOUND_STORAGE_KEY = `${clientConfig.storagePrefix}_finish_sound`;
@@ -1291,7 +1292,7 @@ export default function AppShell() {
     const saved = Number(localStorage.getItem(WORKSPACE_WIDTH_STORAGE_KEY));
     return Number.isFinite(saved)
       ? Math.min(WORKSPACE_MAX_WIDTH, Math.max(WORKSPACE_MIN_WIDTH, saved))
-      : 520;
+      : 380;
   });
   const [activeDiff, setActiveDiff] = useState<ActiveDiff | null>(null);
   const [activeRawTool, setActiveRawTool] = useState<ActiveRawTool | null>(null);
@@ -2583,7 +2584,7 @@ export default function AppShell() {
     setWorkspaceWidth(
       typeof session.workspaceWidth === "number"
         ? Math.min(WORKSPACE_MAX_WIDTH, Math.max(WORKSPACE_MIN_WIDTH, session.workspaceWidth))
-        : 520,
+        : 380,
     );
     const loadedTerminalTabs = normalizeTerminalTabs(session);
     const loadedActiveTerminalTabId =
@@ -2793,7 +2794,7 @@ export default function AppShell() {
             setWorkspaceWidth(
               typeof session.workspaceWidth === "number"
                 ? Math.min(WORKSPACE_MAX_WIDTH, Math.max(WORKSPACE_MIN_WIDTH, session.workspaceWidth))
-                : 520,
+                : 380,
             );
             const loadedTerminalTabs = normalizeTerminalTabs(session);
             const loadedActiveTerminalTabId =
@@ -6606,8 +6607,8 @@ export default function AppShell() {
       {workspaceMounted ? (
         <aside
           className={cn(
-            "relative flex min-h-0 w-full shrink-0 flex-col overflow-hidden border-l border-border/40 bg-background max-md:absolute max-md:inset-0 max-md:z-30 max-md:!w-full",
-            browserFullscreen && workspaceTab === "browser" && "fixed inset-[1%] z-50 !w-auto rounded-2xl border border-border shadow-2xl ring-1 ring-foreground/10",
+            "relative flex min-h-0 w-full shrink-0 flex-col overflow-hidden border-l border-border/30 bg-background/95 max-md:absolute max-md:inset-0 max-md:z-30 max-md:!w-full",
+            browserFullscreen && workspaceTab === "browser" && "fixed inset-[1%] z-50 !w-auto rounded-xl border border-border shadow-2xl ring-1 ring-foreground/10",
             workspaceOpen ? "workspace-panel-enter" : "workspace-panel-exit",
           )}
           style={browserFullscreen && workspaceTab === "browser" ? undefined : { width: `min(100%, ${workspaceWidth}px)` }}
@@ -6615,18 +6616,18 @@ export default function AppShell() {
           {browserFullscreen && workspaceTab === "browser" ? null : (
             <WorkspaceResizeHandle width={workspaceWidth} onWidthChange={setWorkspaceWidth} />
           )}
-          <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/40 px-4 py-2.5">
+          <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/30 px-3 py-2">
             <div className="min-w-0">
-              <h1 className="flex items-center gap-2 text-sm font-medium">
+              <h1 className="flex items-center gap-1.5 text-[13px] font-medium">
                 {workspaceTab === "browser" ? <Globe2 className="size-4 shrink-0 text-cyan-400" /> : workspaceTab === "monitor" ? <Activity className="size-4 shrink-0 text-violet-400" /> : workspaceTab === "terminal" ? <Terminal className="size-4 shrink-0 text-orange-400" /> : workspaceTab === "files" ? <FileCode2 className="size-4 shrink-0 text-emerald-400" /> : activeWorkspace ? <WorkspaceIcon type={activeWorkspace.type} className="size-4 shrink-0" /> : null}
                 <span className="truncate">{workspaceTab === "browser" ? "Browser" : workspaceTab === "monitor" ? "Monitor" : workspaceTab === "terminal" ? "Terminal" : workspaceTab === "files" ? "Files" : activeWorkspace?.name || "Workspace"}</span>
               </h1>
             </div>
-            <Button type="button" variant="ghost" size="icon-sm" aria-label="Close side panel" onClick={() => { setBrowserFullscreen(false); setWorkspaceOpen(false); }}>
-              <X className="size-4" />
+            <Button type="button" variant="ghost" size="icon-xs" aria-label="Close side panel" onClick={() => { setBrowserFullscreen(false); setWorkspaceOpen(false); }}>
+              <X className="size-3.5" />
             </Button>
           </div>
-          <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-border/30 px-2 py-1.5">
+          <div className="flex shrink-0 gap-0.5 overflow-x-auto border-b border-border/30 px-2 py-1">
             {(["canvas", "plan", "files", "terminal", "browser", "monitor"] as const).map((tab) => (
               <Button
                 key={tab}
@@ -6640,13 +6641,13 @@ export default function AppShell() {
                   }
                   setWorkspaceTab(tab);
                 }}
-                className="h-7 shrink-0 capitalize"
+                className="h-6 shrink-0 rounded-md px-2 text-[11px] capitalize"
               >
                 {tab === "plan" ? "Plans" : tab === "files" ? "Files" : tab === "terminal" ? "Terminal" : tab === "monitor" ? "Monitor" : tab}
               </Button>
             ))}
           </div>
-          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-3">
+          <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden p-2.5">
             {workspaceTab === "browser" ? (
               <>
                 <div className="flex items-center gap-1 overflow-x-auto">
@@ -6682,19 +6683,28 @@ export default function AppShell() {
                     <ExternalLink className="size-3.5" />
                   </Button>
                 </form>
-                <form className="flex shrink-0 items-center gap-1" onSubmit={(event) => { event.preventDefault(); resizeBrowser(); }}>
-                  <span className="text-[10px] text-muted-foreground">Viewport</span>
-                  <Input value={browserWidthInput} onChange={(event) => setBrowserWidthInput(event.target.value)} aria-label="Browser width" className="h-7 w-16 px-2 text-[11px]" inputMode="numeric" />
-                  <span className="text-[10px] text-muted-foreground">×</span>
-                  <Input value={browserHeightInput} onChange={(event) => setBrowserHeightInput(event.target.value)} aria-label="Browser height" className="h-7 w-16 px-2 text-[11px]" inputMode="numeric" />
-                  <Button type="submit" size="xs" variant="secondary" className="h-7">Set</Button>
-                </form>
                 <div className="flex shrink-0 items-center gap-1">
                   <Button type="button" size="icon-xs" variant="ghost" aria-label="Back" title="Back" onClick={() => void performBrowserAction("back")}><ArrowLeft className="size-3.5" /></Button>
                   <Button type="button" size="icon-xs" variant="ghost" aria-label="Reload" title="Reload" onClick={() => void performBrowserAction("reload")}><RotateCcw className="size-3.5" /></Button>
                   <Button type="button" size="icon-xs" variant="ghost" aria-label={browserFullscreen ? "Exit browser fullscreen" : "Open browser fullscreen"} title={browserFullscreen ? "Exit browser fullscreen" : "Open browser fullscreen"} onClick={() => setBrowserFullscreen((current) => !current)}>
                     {browserFullscreen ? <Minimize2 className="size-3.5" /> : <Fullscreen className="size-3.5" />}
                   </Button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button type="button" size="icon-xs" variant="ghost" className="size-7" aria-label="Browser settings" title="Browser settings">
+                        <MoreHorizontal className="size-3.5" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-56">
+                      <DropdownMenuLabel>Viewport resolution</DropdownMenuLabel>
+                      <form className="flex items-center gap-1 px-1.5 pb-1" onSubmit={(event) => { event.preventDefault(); resizeBrowser(); }}>
+                        <Input value={browserWidthInput} onChange={(event) => setBrowserWidthInput(event.target.value)} aria-label="Browser width" className="h-7 w-full px-2 text-[11px]" inputMode="numeric" />
+                        <span className="text-xs text-muted-foreground">×</span>
+                        <Input value={browserHeightInput} onChange={(event) => setBrowserHeightInput(event.target.value)} aria-label="Browser height" className="h-7 w-full px-2 text-[11px]" inputMode="numeric" />
+                        <Button type="submit" size="xs" variant="secondary" className="h-7">Set</Button>
+                      </form>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                   {browserLoading ? <LoaderCircle className="ml-1 size-3.5 animate-spin text-muted-foreground" /> : null}
                   <span className="flex shrink-0 items-center gap-1 text-[10px] text-emerald-400"><span className="size-1.5 rounded-full bg-emerald-400" />Live</span>
                   <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">{browserUrl || "Server browser ready"}</span>
@@ -6818,7 +6828,7 @@ export default function AppShell() {
               </p>
             ) : activeWorkspace.type === "plan" ? (
               <>
-                <div className="flex items-center gap-1">
+                <div className="flex items-center justify-end gap-1">
                   <Button
                     type="button"
                     size="xs"
@@ -6831,18 +6841,6 @@ export default function AppShell() {
                   >
                     {busy ? "Agent running…" : "Build plan"}
                   </Button>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button type="button" size="icon-xs" variant="ghost" aria-label="Plan actions">
-                        <MoreHorizontal className="size-3.5" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem onClick={() => focusWorkspaceTitle(activeWorkspace)}>Rename</DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => duplicateWorkspace(activeWorkspace)}>Duplicate</DropdownMenuItem>
-                      <DropdownMenuItem variant="destructive" onClick={() => deleteWorkspace(activeWorkspace)}>Delete</DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
                 </div>
                 <div className="flex min-h-0 flex-1 flex-col gap-2">
                   <div className="flex items-center gap-1">
@@ -6858,7 +6856,7 @@ export default function AppShell() {
                       }}
                       aria-label="Plan title"
                       placeholder="Plan title"
-                      className="h-9 flex-1 text-sm font-medium"
+                      className="h-8 flex-1 text-sm font-medium"
                     />
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
@@ -6866,7 +6864,7 @@ export default function AppShell() {
                           type="button"
                           size="icon-sm"
                           variant="ghost"
-                          className="size-9 shrink-0"
+                          className="size-8 shrink-0"
                           aria-label="Choose plan"
                           title="Choose plan"
                         >
@@ -6891,8 +6889,8 @@ export default function AppShell() {
                     </DropdownMenu>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <Button type="button" size="icon-sm" variant="ghost" className="size-9 shrink-0" aria-label="Plan actions">
-                          <MoreHorizontal className="size-4" />
+                        <Button type="button" size="icon-sm" variant="ghost" className="size-8 shrink-0" aria-label="Plan actions">
+                          <MoreHorizontal className="size-3.5" />
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
@@ -6934,7 +6932,7 @@ export default function AppShell() {
                       }}
                       aria-label="Canvas title"
                       placeholder="Canvas title"
-                      className="h-9 flex-1 text-sm font-medium"
+                      className="h-8 flex-1 text-sm font-medium"
                     />
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
@@ -6942,7 +6940,7 @@ export default function AppShell() {
                           type="button"
                           size="icon-sm"
                           variant="ghost"
-                          className="size-9 shrink-0"
+                          className="size-8 shrink-0"
                           aria-label="Choose canvas"
                           title="Choose canvas"
                         >
@@ -6967,8 +6965,8 @@ export default function AppShell() {
                     </DropdownMenu>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <Button type="button" size="icon-sm" variant="ghost" className="size-9 shrink-0" aria-label="Canvas actions">
-                          <MoreHorizontal className="size-4" />
+                        <Button type="button" size="icon-sm" variant="ghost" className="size-8 shrink-0" aria-label="Canvas actions">
+                          <MoreHorizontal className="size-3.5" />
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">

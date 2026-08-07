@@ -22,27 +22,27 @@ export function PlanWorkspaceCard({
   buildDisabled = false,
 }: PlanWorkspaceCardProps) {
   return (
-    <section className="my-3 w-full rounded-xl border border-blue-400/30 bg-blue-400/[0.07] p-3 shadow-sm">
+    <section className="my-2.5 w-full rounded-lg border border-border/50 border-l-blue-400/60 bg-muted/20 p-2.5">
       <div className="flex items-start gap-2">
-        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-blue-400/15 text-blue-300">
-          <ClipboardList className="size-4" />
+        <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-blue-400/10 text-blue-300">
+          <ClipboardList className="size-3.5" />
         </span>
         <div className="min-w-0 flex-1">
-          <p className="text-[11px] font-medium uppercase tracking-wide text-blue-300/80">
+          <p className="text-[10px] font-medium uppercase tracking-wide text-blue-300/80">
             Plan ready
           </p>
-          <h3 className="truncate text-sm font-semibold text-foreground" title={title}>
+          <h3 className="truncate text-[13px] font-medium text-foreground" title={title}>
             {title}
           </h3>
-          <div className="mt-1 max-h-24 overflow-hidden text-xs text-muted-foreground">
+          <div className="mt-0.5 max-h-20 overflow-hidden text-xs text-muted-foreground">
             {content ? <Markdown content={content} /> : <p>No plan details available yet.</p>}
           </div>
-          {workspaceLink ? <p className="mt-1 truncate text-[10px] text-blue-300/70">{workspaceLink}</p> : null}
+          {workspaceLink ? <p className="mt-0.5 truncate text-[10px] text-muted-foreground/70">{workspaceLink}</p> : null}
         </div>
         {onOpen ? (
           <button
             type="button"
-            className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+            className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
             aria-label="Pop out plan"
             title="Pop out plan"
             onClick={onOpen}
@@ -51,11 +51,11 @@ export function PlanWorkspaceCard({
           </button>
         ) : null}
       </div>
-      <div className="mt-3 flex items-center justify-end gap-2">
+      <div className="mt-2 flex items-center justify-end gap-1">
         {onOpen ? (
           <button
             type="button"
-            className="rounded-md border border-border/60 px-2.5 py-1.5 text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+            className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
             onClick={onOpen}
           >
             Edit plan
@@ -66,7 +66,7 @@ export function PlanWorkspaceCard({
             type="button"
             disabled={buildDisabled}
             className={cn(
-              "rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90",
+              "rounded-md bg-primary px-2 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90",
               "disabled:cursor-not-allowed disabled:opacity-50",
             )}
             onClick={onBuild}
