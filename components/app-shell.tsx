@@ -26,6 +26,7 @@ import {
   ArchiveRestore,
   Check,
   ChevronDown,
+  CircleAlert,
   Brain,
   AudioLines,
   PanelRight,
@@ -33,9 +34,11 @@ import {
   FileText,
   FileCode2,
   ExternalLink,
+  FileClock,
   Fullscreen,
   Globe2,
   Image as ImageIcon,
+  Link2,
   LoaderCircle,
   Menu,
   Minimize2,
@@ -70,6 +73,8 @@ import { RemoteTerminal } from "@/components/remote-terminal";
 import { RichUserText } from "@/components/rich-user-text";
 import { CommandPalette } from "@/components/command-palette";
 import type { MemoryItem } from "@/components/memories-panel";
+import type { ChatLogEntry, ChatLogCategory } from "@/lib/chat-logs";
+import { ProviderLogo } from "@/components/provider-logo";
 import { ModelOptionsMenu } from "@/components/model-options-menu";
 import {
   SettingsPanel,
@@ -106,14 +111,18 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { modelAttrSummary } from "@/lib/model-label";
 import { clientConfig } from "@/lib/client-config";
+import { modelKey, parseModelKey } from "@/lib/providers/types";
 
 type Role = "user" | "assistant" | "system";
 
 type RunMetadata = {
+  providerId?: string;
   modelId?: string;
+  connectionId?: string;
   outputTokens?: number;
   inputTokens?: number;
   totalTokens?: number;
+  costUsd?: number;
   completedAt: string;
 };
 
@@ -195,6 +204,7 @@ type Msg = {
   id: string;
   role: Role;
   content: string;
+  errorMessage?: string;
   referenceText?: string;
   createdAt?: string;
   thinking?: string;
@@ -207,6 +217,11 @@ type Msg = {
   suggestions?: Suggestion[];
   runMetadata?: RunMetadata;
   references?: ReferenceItem[];
+};
+
+type SourceLink = {
+  label: string;
+  url: string;
 };
 
 type PendingFile = {
@@ -381,6 +396,7 @@ type Chat = ChatIndexEntry & {
     id: string;
     role: Role;
     content: string;
+    errorMessage?: string;
     referenceText?: string;
     thinking?: string;
     tools?: ToolPart[];
@@ -475,11 +491,25 @@ type ReferenceItem = {
 
 type StatusPayload = {
   authenticated: boolean;
-  cursorApiKey: boolean;
+  cursorSdkConfigured: boolean;
   mcp: { ok: boolean; url: string; detail: string };
+  providers?: Array<{
+    id: string;
+    providerKey: string;
+    label: string;
+    enabled: boolean;
+    hasSecret: boolean;
+    lastError?: string;
+  }>;
 };
 
-const DEFAULT_MODEL = "composer-2.5";
+type ConfiguredModelProvider = {
+  id: string;
+  providerKey: string;
+  label: string;
+  enabled: boolean;
+};
+
 const CHAT_MESSAGE_LOAD_LIMIT = 2;
 const CHAT_MESSAGE_PRELOAD_MAX = 10;
 const MODEL_STORAGE_KEY = `${clientConfig.storagePrefix}_model`;
@@ -545,26 +575,6 @@ function saveFinishSound(sound: FinishSound | null) {
   }
 }
 
-function loadStoredModelParams(): ModelParamSelection[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const parsed: unknown = JSON.parse(
-      localStorage.getItem(PARAMS_STORAGE_KEY) || "[]",
-    );
-    return Array.isArray(parsed)
-      ? parsed.filter(
-          (param): param is ModelParamSelection =>
-            Boolean(param) &&
-            typeof param === "object" &&
-            typeof (param as { id?: unknown }).id === "string" &&
-            typeof (param as { value?: unknown }).value === "string",
-        )
-      : [];
-  } catch {
-    return [];
-  }
-}
-
 function chatHref(id: string | null): string {
   return id ? `/?c=${encodeURIComponent(id)}` : "/";
 }
@@ -618,6 +628,90 @@ function WorkspaceIcon({ type, className }: { type: WorkspaceItem["type"]; class
   return type === "plan"
     ? <ClipboardList className={className} />
     : <PanelRight className={className} />;
+}
+
+function ErrorMessageCard({ message }: { message: string }) {
+  return (
+    <section
+      role="alert"
+      className="my-3 w-full rounded-xl border border-red-500/35 bg-red-500/[0.08] p-3 shadow-sm"
+    >
+      <div className="flex items-start gap-2">
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-red-500/15 text-red-500 dark:text-red-300">
+          <CircleAlert className="size-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-red-600/80 dark:text-red-300/80">
+            Error
+          </p>
+          <p className="mt-1 whitespace-pre-wrap break-words text-sm text-red-950/90 dark:text-red-100/90">
+            {message}
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function extractMessageSources(message: Msg): SourceLink[] {
+  const sources = new Map<string, SourceLink>();
+  const add = (url: string, label?: string) => {
+    const cleanUrl = url.replace(/[),.;!?]+$/g, "");
+    if (!/^https?:\/\//i.test(cleanUrl) || sources.has(cleanUrl)) return;
+    let fallbackLabel = cleanUrl;
+    try {
+      fallbackLabel = new URL(cleanUrl).hostname.replace(/^www\./i, "");
+    } catch {
+      // Keep the full URL when it cannot be parsed.
+    }
+    sources.set(cleanUrl, { label: label?.trim() || fallbackLabel, url: cleanUrl });
+  };
+  const addFromSourceBlock = (text: string) => {
+    for (const match of text.matchAll(/\[([^\]]{1,200})\]\((https?:\/\/[^)\s]+)\)/gi)) {
+      add(match[2], match[1]);
+    }
+    for (const match of text.matchAll(/https?:\/\/[^\s<>"'`)\]]+/gi)) {
+      add(match[0]);
+    }
+  };
+
+  for (const match of message.content.matchAll(/```sources\s*([\s\S]*?)```/gi)) {
+    addFromSourceBlock(match[1]);
+  }
+  return [...sources.values()].slice(0, 12);
+}
+
+function stripSourceBlocks(content: string) {
+  return content.replace(/```sources\s*[\s\S]*?```/gi, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function MessageSources({ sources }: { sources: SourceLink[] }) {
+  return (
+    <details className="group mt-3 text-muted-foreground">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[11px] font-medium marker:hidden [&::-webkit-details-marker]:hidden hover:text-foreground">
+        <Link2 className="size-3.5 shrink-0" />
+        <span>Sources</span>
+        <span className="text-[10px] opacity-70">({sources.length})</span>
+        <ChevronDown className="ml-auto size-3.5 opacity-60 transition-transform group-open:rotate-180" />
+      </summary>
+      <ol className="mt-1.5 space-y-1 pl-5">
+        {sources.map((source, index) => (
+          <li key={source.url} className="flex min-w-0 items-start gap-2 text-xs">
+            <span className="mt-0.5 shrink-0 opacity-60">{index + 1}.</span>
+            <a
+              href={source.url}
+              target="_blank"
+              rel="noreferrer"
+              className="min-w-0 truncate underline decoration-border underline-offset-2 hover:text-foreground"
+              title={source.url}
+            >
+              {source.label}
+            </a>
+          </li>
+        ))}
+      </ol>
+    </details>
+  );
 }
 
 function modelDisplayName(model: ModelInfo) {
@@ -951,12 +1045,22 @@ function WorkspaceResizeHandle({
 
 function mapApiMessages(
   messages: Chat["messages"],
+  runStatus?: Chat["runStatus"],
 ): Msg[] {
+  const latestAssistantId = runStatus === "error"
+    ? [...messages].reverse().find((message) => message.role === "assistant")?.id
+    : undefined;
   return messages.map((m) => {
+    const legacyError = !m.errorMessage &&
+      m.role === "assistant" &&
+      (m.id === latestAssistantId || /^⚠\s*/.test(m.content))
+      ? m.content.replace(/^⚠\s*/, "").trim() || "Agent run failed."
+      : "";
     const base = {
       id: m.id,
       role: m.role,
-      content: m.content,
+      content: legacyError ? "" : m.content,
+      errorMessage: m.errorMessage || legacyError || undefined,
       referenceText: m.referenceText,
       createdAt: m.createdAt,
       thinking: m.thinking,
@@ -1126,14 +1230,22 @@ export default function AppShell() {
   const [chatTitle, setChatTitle] = useState("New chat");
   const [loadingChatId, setLoadingChatId] = useState<string | null>(null);
   const [agentId, setAgentId] = useState<string | undefined>();
-  const [modelId, setModelId] = useState(DEFAULT_MODEL);
+  const [modelId, setModelId] = useState("");
+  const [defaultModelId, setDefaultModelId] = useState("");
+  const [defaultModelParams, setDefaultModelParams] = useState<ModelParamSelection[]>([]);
+  const [modelParamsByModel, setModelParamsByModel] = useState<Record<string, ModelParamSelection[]>>({});
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [configuredModelProviders, setConfiguredModelProviders] = useState<ConfiguredModelProvider[]>([]);
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [modelParams, setModelParams] = useState<ModelParamSelection[]>([]);
+  const [customModelInputs, setCustomModelInputs] = useState<Record<string, string>>({});
+  const [favoriteModelKeys, setFavoriteModelKeys] = useState<string[]>([]);
+  const [modelProviderFilter, setModelProviderFilter] = useState("all");
   const [subagentModelEnabled, setSubagentModelEnabled] = useState(false);
   const [subagentModelId, setSubagentModelId] = useState("");
+  const [subagentModelParams, setSubagentModelParams] = useState<ModelParamSelection[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceItem[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
@@ -1233,6 +1345,11 @@ export default function AppShell() {
 
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [chatLogsOpen, setChatLogsOpen] = useState(false);
+  const [chatLogs, setChatLogs] = useState<ChatLogEntry[]>([]);
+  const [chatLogsChatId, setChatLogsChatId] = useState<string | null>(null);
+  const [chatLogsLoading, setChatLogsLoading] = useState(false);
+  const [chatLogsCategory, setChatLogsCategory] = useState<"all" | ChatLogCategory>("all");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
@@ -1283,6 +1400,8 @@ export default function AppShell() {
     chatTitle,
     agentId,
     modelId,
+    defaultModelId,
+    defaultModelParams,
     modelParams,
     queuedMessages,
     workspaces,
@@ -1493,6 +1612,8 @@ export default function AppShell() {
       chatTitle,
       agentId,
       modelId,
+      defaultModelId,
+      defaultModelParams,
       modelParams,
       queuedMessages,
       workspaces,
@@ -1515,6 +1636,8 @@ export default function AppShell() {
     chatTitle,
     agentId,
     modelId,
+    defaultModelId,
+    defaultModelParams,
     modelParams,
     queuedMessages,
     workspaces,
@@ -1886,12 +2009,13 @@ export default function AppShell() {
       socket.onmessage = (event) => {
         if (typeof event.data === "string") {
           try {
-            const message = JSON.parse(event.data) as { type?: string; url?: string; tabId?: string; title?: string; viewport?: { width: number; height: number }; tabs?: BrowserTab[]; message?: string };
+            const message = JSON.parse(event.data) as { type?: string; url?: string; tabId?: string; activeTabId?: string; title?: string; viewport?: { width: number; height: number }; tabs?: BrowserTab[]; message?: string };
             if (message.type === "meta") {
               const url = message.url || "";
               setBrowserUrl(url);
               if (!browserInputDirtyRef.current) setBrowserInput(url);
-              if (message.tabId) setActiveBrowserTabId(message.tabId);
+              if (message.activeTabId) setActiveBrowserTabId(message.activeTabId);
+              else if (message.tabId) setActiveBrowserTabId(message.tabId);
               if (message.title && message.tabId) setBrowserTabs((current) => current.map((tab) => tab.id === message.tabId ? { ...tab, title: message.title!, url } : tab));
               if (message.tabs) setBrowserTabs(message.tabs);
               if (message.viewport) {
@@ -2120,8 +2244,10 @@ export default function AppShell() {
     const data = (await res.json()) as {
       models: ModelInfo[];
       defaultModelId?: string;
+      providers?: ConfiguredModelProvider[];
     };
     setModels(data.models);
+    setConfiguredModelProviders(data.providers || []);
     setModelsLoaded(true);
 
     const savedModel =
@@ -2132,13 +2258,13 @@ export default function AppShell() {
       (savedModel && data.models.some((m) => m.id === savedModel)
         ? savedModel
         : null) ||
-      (data.models.some((m) => m.id === DEFAULT_MODEL)
-        ? DEFAULT_MODEL
-        : data.defaultModelId) ||
+      data.defaultModelId ||
       data.models[0]?.id ||
-      DEFAULT_MODEL;
+      "";
 
-    setModelId(nextModelId);
+    const firstAvailableModelId = data.defaultModelId || data.models[0]?.id || "";
+    setDefaultModelId((current) => current || firstAvailableModelId);
+    if (!activeChatIdRef.current) setModelId(nextModelId);
     const meta = data.models.find((m) => m.id === nextModelId);
     let savedParams: ModelParamSelection[] | null = null;
     try {
@@ -2149,9 +2275,9 @@ export default function AppShell() {
     }
     const allowed = new Set((meta?.parameters ?? []).map((p) => p.id));
     const filtered = (savedParams ?? []).filter((p) => allowed.has(p.id));
-    setModelParams(
-      filtered.length > 0 ? filtered : meta?.defaultParams ?? [],
-    );
+    const nextParams = filtered.length > 0 ? filtered : meta?.defaultParams ?? [];
+    setDefaultModelParams((current) => current.length ? current : nextParams);
+    if (!activeChatIdRef.current) setModelParams(nextParams);
   }, []);
 
   useEffect(() => {
@@ -2163,31 +2289,65 @@ export default function AppShell() {
         settings?: {
           modelId?: string;
           modelParams?: ModelParamSelection[];
+          modelParamsByModel?: Record<string, ModelParamSelection[]>;
           subagentModelEnabled?: boolean;
           subagentModelId?: string;
           draftInput?: string;
+          favoriteModelKeys?: string[];
+          modelAliases?: Record<string, string>;
         };
       } | null) => {
         if (cancelled || !data?.settings) return;
         const settings = data.settings;
+        const paramsByModel = settings.modelParamsByModel || {};
+        setModelParamsByModel(paramsByModel);
         const nextId = settings.modelId && models.some((model) => model.id === settings.modelId)
           ? settings.modelId
           : null;
-        if (nextId) setModelId(nextId);
-        if (settings.modelParams) setModelParams(settings.modelParams);
+        if (nextId) {
+          setDefaultModelId(nextId);
+          if (!activeChatIdRef.current) setModelId(nextId);
+        }
+        const defaultParams = nextId && Object.prototype.hasOwnProperty.call(paramsByModel, nextId)
+          ? paramsByModel[nextId] || []
+          : settings.modelParams || [];
+        if (defaultParams.length || settings.modelParams || nextId) {
+          setDefaultModelParams(defaultParams);
+          if (!activeChatIdRef.current) setModelParams(defaultParams);
+        }
         setSubagentModelEnabled(Boolean(settings.subagentModelEnabled));
         if (settings.subagentModelId && models.some((model) => model.id === settings.subagentModelId)) {
           setSubagentModelId(settings.subagentModelId);
+          setSubagentModelParams(
+            Object.prototype.hasOwnProperty.call(paramsByModel, settings.subagentModelId)
+              ? paramsByModel[settings.subagentModelId] || []
+              : models.find((model) => model.id === settings.subagentModelId)?.defaultParams || [],
+          );
         }
-        draftInputRef.current = settings.draftInput || "";
+        if (Array.isArray(settings.favoriteModelKeys)) {
+          setFavoriteModelKeys(settings.favoriteModelKeys);
+        }
+        const serverDraft = typeof settings.draftInput === "string"
+          ? settings.draftInput
+          : "";
         draftInputLoadedRef.current = true;
-        if (!activeChatIdRef.current) setInput(draftInputRef.current);
+        if (serverDraft.trim() && !activeChatIdRef.current) {
+          draftInputRef.current = serverDraft;
+          setInput(serverDraft);
+        }
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
   }, [authed, models]);
+
+  useEffect(() => {
+    if (!activeChatId || !modelId) return;
+    if (Object.prototype.hasOwnProperty.call(modelParamsByModel, modelId)) {
+      setModelParams(modelParamsByModel[modelId] || []);
+    }
+  }, [activeChatId, modelId, modelParamsByModel]);
 
   useEffect(() => {
     if (!authed || activeChatId || !draftInputLoadedRef.current) return;
@@ -2204,12 +2364,8 @@ export default function AppShell() {
 
   function applyModelParams(next: ModelParamSelection[]) {
     setModelParams(next);
+    if (modelId) persistModelParamsByModel({ ...modelParamsByModel, [modelId]: next });
     localStorage.setItem(PARAMS_STORAGE_KEY, JSON.stringify(next));
-    void fetch("/api/preferences", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ modelParams: next }),
-    });
     setAgentId(undefined);
     if (activeChatId) {
       void fetch(`/api/chats/${activeChatId}`, {
@@ -2220,10 +2376,29 @@ export default function AppShell() {
     }
   }
 
+  function toggleFavoriteModel(modelKey: string) {
+    const next = favoriteModelKeys.includes(modelKey)
+      ? favoriteModelKeys.filter((key) => key !== modelKey)
+      : [...favoriteModelKeys, modelKey].slice(-100);
+    setFavoriteModelKeys(next);
+    void fetch("/api/preferences", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ favoriteModelKeys: next }),
+    });
+  }
+
   function updateSubagentModelEnabled(enabled: boolean) {
     const nextId = subagentModelId || models[0]?.id || "";
     setSubagentModelEnabled(enabled);
-    if (enabled && nextId) setSubagentModelId(nextId);
+    if (enabled && nextId) {
+      const nextParams = rememberedParamsForModel(nextId);
+      setSubagentModelId(nextId);
+      setSubagentModelParams(nextParams);
+      if (!Object.prototype.hasOwnProperty.call(modelParamsByModel, nextId)) {
+        persistModelParamsByModel({ ...modelParamsByModel, [nextId]: nextParams });
+      }
+    }
     void fetch("/api/preferences", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -2236,6 +2411,7 @@ export default function AppShell() {
 
   function updateSubagentModelId(nextId: string) {
     setSubagentModelId(nextId);
+    setSubagentModelParams(rememberedParamsForModel(nextId));
     void fetch("/api/preferences", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -2257,7 +2433,11 @@ export default function AppShell() {
     setChatTitle(snap.chatTitle);
     setAgentId(snap.agentId);
     setModelId(snap.modelId);
-    setModelParams(snap.modelParams ?? []);
+    setModelParams(
+      Object.prototype.hasOwnProperty.call(modelParamsByModel, snap.modelId)
+        ? modelParamsByModel[snap.modelId] || []
+        : snap.modelParams ?? [],
+    );
     setWorkspaces(snap.workspaces ?? []);
     setActiveWorkspaceId(
       session.activeWorkspaceId && snap.workspaces?.some((item) => item.id === session.activeWorkspaceId)
@@ -2313,7 +2493,7 @@ export default function AppShell() {
     setQuestionCustomActive(snap.pendingQuestion?.questions.map(() => false) ?? []);
     setMobileNavOpen(false);
     setPaneKey((k) => k + 1);
-  }, [acceptServerSnapshot, clearUnread]);
+  }, [acceptServerSnapshot, clearUnread, modelParamsByModel]);
 
   const openDraft = useCallback(
     (opts?: { skipNav?: boolean }) => {
@@ -2322,7 +2502,6 @@ export default function AppShell() {
       chatLoadRequestRef.current += 1;
       setLoadingChatId(null);
       const previousChatId = activeChatIdRef.current;
-      const carriedModelParams = stateRef.current.modelParams;
       persistActiveSnapshot();
       setBusy(Boolean(activeChatIdRef.current && runtimeRef.current.has(activeChatIdRef.current)));
       setPendingQuestion(null);
@@ -2336,10 +2515,8 @@ export default function AppShell() {
       setBusy(false);
       setChatTitle("New chat");
       setAgentId(undefined);
-      setModelId(stateRef.current.modelId || localStorage.getItem(MODEL_STORAGE_KEY) || DEFAULT_MODEL);
-      setModelParams(
-        previousChatId ? carriedModelParams : loadStoredModelParams(),
-      );
+      setModelId(stateRef.current.defaultModelId || "");
+      setModelParams(stateRef.current.defaultModelParams);
       const browser = normalizeBrowserContext(
         previousChatId
           ? {
@@ -2429,9 +2606,9 @@ export default function AppShell() {
             const mid =
               data.chat.modelId ||
               localStorage.getItem(MODEL_STORAGE_KEY) ||
-              DEFAULT_MODEL;
+              "";
             const next: ChatSnapshot = {
-              messages: mergeMessages(cached.messages, mapApiMessages(data.chat.messages)),
+              messages: mergeMessages(cached.messages, mapApiMessages(data.chat.messages, data.chat.runStatus)),
               chatTitle: data.chat.title,
               updatedAt: data.chat.updatedAt,
               agentId: data.chat.agentId,
@@ -2456,7 +2633,11 @@ export default function AppShell() {
             setChatTitle(next.chatTitle);
             setAgentId(next.agentId);
             setModelId(next.modelId);
-            setModelParams(next.modelParams);
+            setModelParams(
+              Object.prototype.hasOwnProperty.call(modelParamsByModel, next.modelId)
+                ? modelParamsByModel[next.modelId] || []
+                : next.modelParams,
+            );
             setMessages(next.messages);
             setQueuedMessages(next.queuedMessages.map((message) => ({ ...message, files: [] })));
             setWorkspaces(next.workspaces);
@@ -2519,9 +2700,9 @@ export default function AppShell() {
       const mid =
         data.chat.modelId ||
         localStorage.getItem(MODEL_STORAGE_KEY) ||
-        DEFAULT_MODEL;
+        "";
       const snap: ChatSnapshot = {
-        messages: mapApiMessages(data.chat.messages),
+        messages: mapApiMessages(data.chat.messages, data.chat.runStatus),
         chatTitle: data.chat.title,
         updatedAt: data.chat.updatedAt,
         agentId: data.chat.agentId,
@@ -2555,7 +2736,7 @@ export default function AppShell() {
         }
       }
     },
-    [acceptServerSnapshot, applySnapshot, clearUnread, navigateChat, persistActiveSnapshot],
+    [acceptServerSnapshot, applySnapshot, clearUnread, modelParamsByModel, navigateChat, persistActiveSnapshot],
   );
 
   const loadEarlierMessages = useCallback(async () => {
@@ -2655,25 +2836,94 @@ export default function AppShell() {
     URL.revokeObjectURL(url);
   }
 
-  async function selectModel(nextId: string) {
-    if (!nextId || nextId === modelId) return;
-    setModelId(nextId);
-    localStorage.setItem(MODEL_STORAGE_KEY, nextId);
-    setAgentId(undefined);
-    const meta = models.find((m) => m.id === nextId);
-    const defaults = meta?.defaultParams ?? [];
-    setModelParams(defaults);
-    localStorage.setItem(PARAMS_STORAGE_KEY, JSON.stringify(defaults));
+  function persistModelParamsByModel(next: Record<string, ModelParamSelection[]>) {
+    setModelParamsByModel(next);
     void fetch("/api/preferences", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ modelId: nextId, modelParams: defaults }),
+      body: JSON.stringify({ modelParamsByModel: next }),
     });
+  }
+
+  function rememberedParamsForModel(
+    id: string,
+    fallback: ModelParamSelection[] = models.find((model) => model.id === id)?.defaultParams ?? [],
+  ) {
+    return Object.prototype.hasOwnProperty.call(modelParamsByModel, id)
+      ? modelParamsByModel[id] || []
+      : fallback;
+  }
+
+  function updateDefaultModel(nextId: string) {
+    if (!nextId) return;
+    const nextParams = rememberedParamsForModel(nextId);
+    const nextMap = { ...modelParamsByModel, [nextId]: nextParams };
+    setDefaultModelId(nextId);
+    setDefaultModelParams(nextParams);
+    persistModelParamsByModel(nextMap);
+    if (!activeChatIdRef.current) {
+      setModelId(nextId);
+      setModelParams(nextParams);
+      localStorage.setItem(MODEL_STORAGE_KEY, nextId);
+      localStorage.setItem(PARAMS_STORAGE_KEY, JSON.stringify(nextParams));
+    }
+    void fetch("/api/preferences", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ modelId: nextId, modelParams: nextParams }),
+    });
+  }
+
+  function updateDefaultModelParams(next: ModelParamSelection[]) {
+    const nextMap = defaultModelId
+      ? { ...modelParamsByModel, [defaultModelId]: next }
+      : modelParamsByModel;
+    setDefaultModelParams(next);
+    if (subagentModelId === defaultModelId) setSubagentModelParams(next);
+    persistModelParamsByModel(nextMap);
+    if (!activeChatIdRef.current) {
+      setModelParams(next);
+      localStorage.setItem(PARAMS_STORAGE_KEY, JSON.stringify(next));
+    }
+    void fetch("/api/preferences", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        modelParams: next,
+      }),
+    });
+  }
+
+  function updateSubagentModelParams(next: ModelParamSelection[]) {
+    setSubagentModelParams(next);
+    if (!subagentModelId) return;
+    persistModelParamsByModel({ ...modelParamsByModel, [subagentModelId]: next });
+  }
+
+  async function selectModel(nextId: string) {
+    if (!nextId || nextId === modelId) return;
+    const nextMap = { ...modelParamsByModel };
+    if (modelId) nextMap[modelId] = modelParams;
+    const nextParams = Object.prototype.hasOwnProperty.call(nextMap, nextId)
+      ? nextMap[nextId] || []
+      : models.find((model) => model.id === nextId)?.defaultParams ?? [];
+    nextMap[nextId] = nextParams;
+    setModelParamsByModel(nextMap);
+    void fetch("/api/preferences", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ modelParamsByModel: nextMap }),
+    });
+    setModelId(nextId);
+    localStorage.setItem(MODEL_STORAGE_KEY, nextId);
+    setAgentId(undefined);
+    setModelParams(nextParams);
+    localStorage.setItem(PARAMS_STORAGE_KEY, JSON.stringify(nextParams));
     if (activeChatId) {
       await fetch(`/api/chats/${activeChatId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ modelId: nextId, modelParams: defaults }),
+        body: JSON.stringify({ modelId: nextId, modelParams: nextParams }),
       });
     }
   }
@@ -2716,9 +2966,13 @@ export default function AppShell() {
         if (!res.ok || activeChatIdRef.current !== activeChatId) return;
         const data = (await res.json()) as { chat: Chat };
         if (!acceptServerSnapshot(activeChatId, data.chat.updatedAt)) return;
-        setMessages((current) => mergeMessages(current, mapApiMessages(data.chat.messages)));
+        setMessages((current) => mergeMessages(current, mapApiMessages(data.chat.messages, data.chat.runStatus)));
         if (data.chat.modelId) setModelId(data.chat.modelId);
-        setModelParams(data.chat.modelParams ?? []);
+        setModelParams(
+          data.chat.modelId && Object.prototype.hasOwnProperty.call(modelParamsByModel, data.chat.modelId)
+            ? modelParamsByModel[data.chat.modelId] || []
+            : data.chat.modelParams ?? [],
+        );
         const serverWorkspaces = workspacesFromChat(data.chat);
         setWorkspaces(serverWorkspaces);
         setActiveWorkspaceId((current) =>
@@ -2768,7 +3022,7 @@ export default function AppShell() {
       void refreshBackgroundRun();
     }, 3000);
     return () => window.clearInterval(interval);
-  }, [acceptServerSnapshot, activeChatId, authed, loadChats, loadingChatId, pendingQuestion]);
+  }, [acceptServerSnapshot, activeChatId, authed, loadChats, loadingChatId, modelParamsByModel, pendingQuestion]);
 
   useEffect(() => {
     if (!authed) return;
@@ -3274,6 +3528,24 @@ export default function AppShell() {
     await loadChats();
   }
 
+  async function openChatLogs(id: string) {
+    setChatLogsChatId(id);
+    setChatLogsOpen(true);
+    setChatLogsLoading(true);
+    setChatLogsCategory("all");
+    try {
+      const res = await fetch(`/api/chats/${encodeURIComponent(id)}/logs`, { cache: "no-store" });
+      const data = (await res.json().catch(() => ({}))) as { logs?: ChatLogEntry[]; error?: string };
+      if (!res.ok) throw new Error(data.error || "Failed to load chat logs");
+      setChatLogs(data.logs || []);
+    } catch (error) {
+      setChatLogs([]);
+      toast.error(error instanceof Error ? error.message : "Failed to load chat logs");
+    } finally {
+      setChatLogsLoading(false);
+    }
+  }
+
   async function revertMessage(
     target: Msg,
     options: { keepMessage?: boolean; successMessage?: string | null; forEdit?: boolean } = {},
@@ -3303,7 +3575,7 @@ export default function AppShell() {
         );
         return false;
       }
-      const nextMessages = mapApiMessages(data.chat.messages);
+      const nextMessages = mapApiMessages(data.chat.messages, data.chat.runStatus);
       const nextWorkspaces = workspacesFromChat(data.chat);
       const nextModelId = data.chat.modelId || modelId;
       setMessages(nextMessages);
@@ -3873,7 +4145,7 @@ export default function AppShell() {
         setMessages((m) =>
           m.map((x) =>
             x.id === asstId
-              ? { ...x, content: msg, streaming: false, role: "system" }
+              ? { ...x, content: "", errorMessage: msg, streaming: false }
               : x,
           ),
         );
@@ -4273,26 +4545,15 @@ export default function AppShell() {
             setMessages((m) =>
               m.map((x) => {
                 if (x.id !== asstId) return x;
-                const errText = x.content
-                  ? `${x.content}\n\n⚠ ${errMsg}`
-                  : `⚠ ${errMsg}`;
                 const parts = [...(x.parts ?? partsFromFlat(x))].map((p) =>
                   p.type === "thinking" ? { ...p, done: true } : p,
                 );
-                const last = parts[parts.length - 1];
-                if (last?.type === "text") {
-                  parts[parts.length - 1] = {
-                    type: "text",
-                    content: errText,
-                  };
-                } else {
-                  parts.push({ type: "text", content: errText });
-                }
                 return {
                   ...x,
                   ...withSyncedFlat(parts, {
                     thinkingDone: true,
                     streaming: false,
+                    errorMessage: errMsg,
                   }),
                 };
               }),
@@ -4345,10 +4606,9 @@ export default function AppShell() {
             x.id === asstId
               ? {
                   ...x,
-                  content: x.content || msg,
+                  errorMessage: msg,
                   thinkingDone: true,
                   streaming: false,
-                  role: "system",
                 }
               : x,
           ),
@@ -4411,10 +4671,145 @@ export default function AppShell() {
     });
   }, [busy, pendingQuestion, queuedMessages]);
 
+  const normalizedModelSearch = modelSearch.trim().toLowerCase();
+  const availableProviderIds = new Set([
+    ...models.map((model) => model.providerId || "cursor"),
+    ...configuredModelProviders.map((provider) => provider.providerKey),
+  ]);
+  const availableProviders = [...availableProviderIds].map((providerId) => {
+    const model = models.find((entry) => (entry.providerId || "cursor") === providerId);
+    const configured = configuredModelProviders.find((provider) => provider.providerKey === providerId);
+    return {
+      value: providerId,
+      label: model?.providerName || configured?.label || (providerId === "codex" ? "Codex" : providerId),
+      connectionId: model?.connectionId || configured?.id,
+    };
+  });
+  const selectedKey = parseModelKey(modelId);
+  const selectedProvider = availableProviders.find((provider) => provider.value === selectedKey.providerKey);
   const selectedModel =
     models.find((m) => m.id === modelId) ||
-    ({ id: modelId, displayName: modelId } satisfies ModelInfo);
+    ({
+      id: modelId,
+      displayName: selectedKey.modelId || modelId || "Select a model",
+      providerId: selectedKey.providerKey,
+      providerName: selectedProvider?.label,
+    } satisfies ModelInfo);
   const selectedAttrs = modelAttrSummary(selectedModel, modelParams);
+  const providerQueryMatch = normalizedModelSearch.match(/^([a-z0-9_-]+):(.*)$/);
+  const providerQuery = providerQueryMatch &&
+    availableProviders.some((provider) => provider.value === providerQueryMatch[1])
+    ? providerQueryMatch[1]
+    : null;
+  const effectiveProviderFilter = providerQuery || modelProviderFilter;
+  const modelSearchTerm = providerQuery
+    ? providerQueryMatch?.[2].trim() || ""
+    : normalizedModelSearch;
+  const providerModels = effectiveProviderFilter === "all"
+    ? models
+    : models.filter((model) => (model.providerId || "cursor") === effectiveProviderFilter);
+  const matchingModels = providerModels.filter((model) =>
+    `${model.displayName} ${model.id} ${model.description || ""} ${model.providerName || ""}`
+      .toLowerCase()
+      .includes(modelSearchTerm),
+  );
+  const customPinnedEntries = favoriteModelKeys
+    .filter((key) => !models.some((model) => model.id === key))
+    .map((key) => {
+      const parsed = parseModelKey(key);
+      const provider = availableProviders.find((entry) => entry.value === parsed.providerKey);
+      return {
+        id: key,
+        displayName: parsed.modelId,
+        providerId: parsed.providerKey,
+        providerName: provider?.label || parsed.providerKey,
+        connectionId: parsed.connectionId,
+        source: "discovered" as const,
+      } satisfies ModelInfo;
+    })
+    .filter((model) =>
+      (effectiveProviderFilter === "all" || model.providerId === effectiveProviderFilter) &&
+      `${model.displayName} ${model.id} ${model.providerName || ""}`
+        .toLowerCase()
+        .includes(modelSearchTerm),
+    );
+  const favoriteEntries = effectiveProviderFilter === "all"
+    ? [
+        ...matchingModels.filter((model) => favoriteModelKeys.includes(model.id)),
+        ...customPinnedEntries,
+      ]
+    : [];
+  const featuredIds = new Set(favoriteEntries.map((entry) => entry.id));
+  const groupedModels = new Map<string, { label: string; models: ModelInfo[] }>();
+  if (!modelSearchTerm || effectiveProviderFilter !== "all") {
+    for (const provider of availableProviders) {
+      if (effectiveProviderFilter !== "all" && provider.value !== effectiveProviderFilter) continue;
+      groupedModels.set(provider.value, { label: provider.label, models: [] });
+    }
+  }
+  for (const model of matchingModels.filter((entry) => !featuredIds.has(entry.id))) {
+    const providerId = model.providerId || "cursor";
+    const group = groupedModels.get(providerId);
+    if (group) {
+      group.models.push(model);
+    } else {
+      groupedModels.set(providerId, {
+        label: model.providerName || providerId,
+        models: [model],
+      });
+    }
+  }
+
+  function useCustomModel(providerId: string, connectionId?: string) {
+    const customId = customModelInputs[providerId]?.trim();
+    if (!customId) return;
+    const nextId = modelKey(providerId, customId, connectionId);
+    void selectModel(nextId);
+    setModelSearch("");
+    setModelMenuOpen(false);
+  }
+
+  function renderModelOption(model: ModelInfo) {
+    const favorite = favoriteModelKeys.includes(model.id);
+    return (
+      <DropdownMenuItem
+        key={model.id}
+        onClick={() => {
+          void selectModel(model.id);
+          setModelSearch("");
+        }}
+        className="flex items-center gap-2"
+      >
+        <Check
+          className={cn(
+            "size-3.5 shrink-0",
+            model.id === modelId ? "opacity-100" : "opacity-0",
+          )}
+        />
+        <ProviderLogo providerId={model.providerId} />
+        <span className="min-w-0 flex-1 truncate">
+          {modelDisplayName(model)}
+          {model.providerName ? (
+            <span className="ml-1 text-[10px] text-muted-foreground">
+              · {model.providerName}
+            </span>
+          ) : null}
+        </span>
+        <button
+          type="button"
+          className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
+          aria-label={favorite ? `Unpin ${model.displayName}` : `Pin ${model.displayName}`}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            toggleFavoriteModel(model.id);
+          }}
+        >
+          <Pin className={cn("size-3", favorite ? "fill-current text-primary" : "")} />
+        </button>
+      </DropdownMenuItem>
+    );
+  }
 
   const canSend = Boolean(input.trim() || pendingFiles.length);
 
@@ -4914,6 +5309,7 @@ export default function AppShell() {
                   size="sm"
                   className="h-7 max-w-[min(100vw-8rem,28rem)] gap-1.5 rounded-full px-2.5 text-xs font-normal hover:text-foreground"
                 >
+                  <ProviderLogo providerId={selectedModel.providerId} />
                   <span className="min-w-0 truncate">
                     <span className="text-foreground">
                       {modelDisplayName(selectedModel)}
@@ -4937,44 +5333,110 @@ export default function AppShell() {
                     ref={modelSearchRef}
                     value={modelSearch}
                     onChange={(event) => setModelSearch(event.target.value)}
-                    placeholder="Search models…"
+                    placeholder="Search or provider:model…"
                     aria-label="Search models"
                     className="h-8 text-xs"
                     onKeyDown={(event) => event.stopPropagation()}
                   />
                 </div>
+                <div className="flex gap-1 overflow-x-auto border-b border-border/60 px-1 pb-1">
+                  {[
+                    { value: "all", label: "All" },
+                    ...availableProviders,
+                  ].map((provider) => (
+                    <button
+                      key={provider.value}
+                      type="button"
+                      className={cn(
+                        "inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] transition-colors",
+                        effectiveProviderFilter === provider.value
+                          ? "bg-primary text-primary-foreground"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                      )}
+                      onClick={() => {
+                        setModelProviderFilter(provider.value);
+                        setModelSearch("");
+                      }}
+                    >
+                      {provider.value === "all" ? null : <ProviderLogo providerId={provider.value} className="size-3" />}
+                      {provider.label}
+                    </button>
+                  ))}
+                </div>
                 <div className="max-h-60 overflow-y-auto">
-                  {models
-                    .filter((m) =>
-                      `${m.displayName} ${m.id} ${m.description || ""}`
-                        .toLowerCase()
-                        .includes(modelSearch.trim().toLowerCase()),
-                    )
-                    .map((m) => (
-                      <DropdownMenuItem
-                        key={m.id}
-                        onClick={() => {
-                          void selectModel(m.id);
-                          setModelSearch("");
-                        }}
-                        className="flex items-center gap-2"
-                      >
-                        <Check
-                          className={cn(
-                            "size-3.5 shrink-0",
-                            m.id === modelId ? "opacity-100" : "opacity-0",
-                          )}
-                        />
-                        <span className="min-w-0 flex-1 truncate">
-                          {modelDisplayName(m)}
-                        </span>
-                      </DropdownMenuItem>
-                    ))}
-                  {!models.some((m) =>
-                    `${m.displayName} ${m.id} ${m.description || ""}`
-                      .toLowerCase()
-                      .includes(modelSearch.trim().toLowerCase()),
-                  ) ? (
+                  {favoriteEntries.length ? (
+                    <div>
+                      <div className="flex items-center gap-1.5 px-2.5 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                        <Pin className="size-3 fill-current text-primary" aria-hidden="true" />
+                        Pinned
+                      </div>
+                      {favoriteEntries.map(renderModelOption)}
+                    </div>
+                  ) : null}
+                  {[...groupedModels.entries()].map(([providerId, group]) => {
+                    const connectionId =
+                      group.models.find((model) => model.connectionId)?.connectionId ||
+                      availableProviders.find((provider) => provider.value === providerId)?.connectionId;
+                    const pinnedCustom = customPinnedEntries.find((model) => model.providerId === providerId);
+                    const customValue =
+                      customModelInputs[providerId] ||
+                      pinnedCustom?.displayName ||
+                      (selectedKey.providerKey === providerId && !models.some((model) => model.id === modelId)
+                        ? selectedKey.modelId
+                        : "");
+                    const customKey = customValue.trim()
+                      ? modelKey(providerId, customValue.trim(), connectionId)
+                      : "";
+                    const customPinned = customKey ? favoriteModelKeys.includes(customKey) : false;
+                    return (
+                      <div key={providerId}>
+                        <div className="flex items-center gap-1.5 px-2.5 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                          <ProviderLogo providerId={providerId} className="size-3" />
+                          {group.label}
+                        </div>
+                        {group.models.map(renderModelOption)}
+                        <div className="py-1">
+                          <div className="flex items-center gap-1.5 rounded-md px-1.5 py-1">
+                            <Check className={cn("size-3.5 shrink-0", modelId === customKey ? "opacity-100" : "opacity-0")} />
+                            <ProviderLogo providerId={providerId} className="size-4" />
+                            <Input
+                              value={customValue}
+                              onChange={(event) =>
+                                setCustomModelInputs((current) => ({
+                                  ...current,
+                                  [providerId]: event.target.value,
+                                }))
+                              }
+                              onKeyDown={(event) => {
+                                event.stopPropagation();
+                                if (event.key === "Enter") {
+                                  event.preventDefault();
+                                  useCustomModel(providerId, connectionId);
+                                }
+                              }}
+                              placeholder="Custom model ID"
+                              aria-label={`Custom ${group.label} model ID`}
+                              className="h-7 min-w-0 flex-1 border-0 bg-transparent px-0 pl-1.5 text-xs shadow-none focus-visible:ring-0"
+                            />
+                            <button
+                              type="button"
+                              disabled={!customKey}
+                              className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+                              aria-label={customPinned ? `Unpin custom ${group.label} model` : `Pin custom ${group.label} model`}
+                              onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                if (customKey) toggleFavoriteModel(customKey);
+                              }}
+                            >
+                              <Pin className={cn("size-3", customPinned ? "fill-current text-primary" : "")} />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {matchingModels.length === 0 && customPinnedEntries.length === 0 ? (
                     <p className="px-2.5 py-3 text-xs text-muted-foreground">
                       No models found.
                     </p>
@@ -4982,15 +5444,12 @@ export default function AppShell() {
                 </div>
               </DropdownMenuContent>
             </DropdownMenu>
-            {selectedModel.parameters &&
-            selectedModel.parameters.length > 0 ? (
-              <ModelOptionsMenu
-                model={selectedModel}
-                modelParams={modelParams}
-                onModelParamsChange={applyModelParams}
-                onInsertPrompt={(text) => setInput(text)}
-              />
-            ) : null}
+            <ModelOptionsMenu
+              model={selectedModel}
+              modelParams={modelParams}
+              onModelParamsChange={applyModelParams}
+              onInsertPrompt={(text) => setInput(text)}
+            />
           </div>
         )}
       </div>
@@ -5121,6 +5580,12 @@ export default function AppShell() {
                   >
                     <Pencil className="size-3.5" />
                     Rename
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => void openChatLogs(c.id)}
+                  >
+                    <FileClock className="size-3.5" />
+                    View logs
                   </DropdownMenuItem>
                   <DropdownMenuItem
                     variant="destructive"
@@ -5379,6 +5844,9 @@ export default function AppShell() {
                 ) : null}
                 {messages.map((m) => {
                   const canRevert = m.role === "user";
+                  const sourceLinks = m.role === "assistant" && !m.streaming
+                    ? extractMessageSources(m)
+                    : [];
                   return (
                   <article
                     key={m.id}
@@ -5499,7 +5967,7 @@ export default function AppShell() {
                         )}
                       </div>
                     ) : m.role === "system" ? (
-                      <p className="text-sm text-destructive/90">{m.content}</p>
+                      <ErrorMessageCard message={m.errorMessage || m.content} />
                     ) : (
                       <div className="text-[15px] leading-relaxed text-foreground/95">
                         {(() => {
@@ -5577,6 +6045,7 @@ export default function AppShell() {
                               />
                             );
                           }
+                          const displayContent = stripSourceBlocks(part.content);
                           return (
                             <div
                               key={`text-${pi}`}
@@ -5587,9 +6056,9 @@ export default function AppShell() {
                               )}
                             >
                               {m.streaming ? (
-                                <StreamingMarkdown content={part.content} />
+                                <StreamingMarkdown content={displayContent} />
                               ) : (
-                                <Markdown content={part.content} />
+                                <Markdown content={displayContent} />
                               )}
                             </div>
                           );
@@ -5613,8 +6082,10 @@ export default function AppShell() {
                             </>
                           );
                         })()}
+                        {m.errorMessage ? <ErrorMessageCard message={m.errorMessage} /> : null}
                       </div>
                     )}
+                    {sourceLinks.length ? <MessageSources sources={sourceLinks} /> : null}
                     {m.role === "assistant" && !m.streaming && m.runMetadata ? (
                       <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
                         {typeof m.runMetadata.outputTokens === "number" ? (
@@ -6276,6 +6747,78 @@ export default function AppShell() {
         </aside>
       ) : null}
 
+      <Dialog
+        open={chatLogsOpen}
+        onOpenChange={(open) => {
+          setChatLogsOpen(open);
+          if (!open) setChatLogsChatId(null);
+        }}
+      >
+        <DialogContent className="flex h-[min(52rem,calc(100dvh-1rem))] max-w-6xl flex-col gap-0 overflow-hidden p-0">
+          <DialogHeader className="shrink-0 border-b border-border px-6 py-5 pr-14">
+            <DialogTitle>Chat logs</DialogTitle>
+            <p className="text-xs text-muted-foreground">
+              Prompts, responses, tool calls, workspaces, statuses, and errors
+              {chatLogsChatId ? ` · ${chatLogsChatId}` : ""}
+            </p>
+          </DialogHeader>
+          <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-border bg-muted/20 px-4 py-3">
+            {(["all", "prompt", "response", "stream", "tool", "workspace", "status", "error", "system"] as const).map((category) => (
+              <Button
+                key={category}
+                type="button"
+                size="sm"
+                variant={chatLogsCategory === category ? "default" : "ghost"}
+                className="h-8 shrink-0 rounded-full px-3 text-xs capitalize"
+                onClick={() => setChatLogsCategory(category)}
+              >
+                {category === "all" ? "All" : `${category}s`}
+              </Button>
+            ))}
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            {chatLogsLoading ? (
+              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                Loading logs…
+              </div>
+            ) : chatLogs.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                No logs recorded for this chat.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {[...chatLogs]
+                  .reverse()
+                  .filter((entry) => chatLogsCategory === "all" || entry.category === chatLogsCategory)
+                  .map((entry) => (
+                    <article key={entry.id} className="rounded-lg border border-border/60 bg-card/40 p-3">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                        <span className="font-semibold text-foreground">{entry.category}</span>
+                        <span>{entry.title}</span>
+                        <span>{formatCompletedAt(entry.timestamp)}</span>
+                        {entry.jobId ? <span className="font-mono">{entry.jobId}</span> : null}
+                      </div>
+                      <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-xs leading-5 text-foreground/90">
+                        {entry.content || "—"}
+                      </pre>
+                      {entry.metadata !== undefined ? (
+                        <details className="mt-2">
+                          <summary className="cursor-pointer text-[10px] text-muted-foreground">
+                            Raw metadata
+                          </summary>
+                          <pre className="mt-2 max-h-64 overflow-auto rounded bg-muted/30 p-2 font-mono text-[10px] leading-4 text-muted-foreground">
+                            {JSON.stringify(entry.metadata, null, 2)}
+                          </pre>
+                        </details>
+                      ) : null}
+                    </article>
+                  ))}
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <SettingsPanel
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
@@ -6286,10 +6829,18 @@ export default function AppShell() {
         soundCuesEnabled={soundCuesEnabled}
         onSoundCuesEnabledChange={setSoundCuesEnabled}
         models={models}
+        modelId={defaultModelId}
+        onModelIdChange={updateDefaultModel}
+        modelParams={defaultModelParams}
+        onModelParamsChange={updateDefaultModelParams}
+        favoriteModelKeys={favoriteModelKeys}
+        onToggleFavoriteModel={toggleFavoriteModel}
         subagentModelEnabled={subagentModelEnabled}
         onSubagentModelEnabledChange={updateSubagentModelEnabled}
         subagentModelId={subagentModelId}
         onSubagentModelIdChange={updateSubagentModelId}
+        subagentModelParams={subagentModelParams}
+        onSubagentModelParamsChange={updateSubagentModelParams}
         finishSound={finishSound}
         onFinishSoundChange={(sound) => {
           setFinishSound(sound);
@@ -6298,6 +6849,7 @@ export default function AppShell() {
         onTestFinishSound={playFinishSound}
         onMemoriesChanged={() => void loadMemories()}
         onChatsChanged={() => void loadChats()}
+        onModelsChanged={() => void loadModels()}
         onLogout={() => void logout()}
       />
 

@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { claimNextJob, getJob, recoverStaleJobs, updateJob } from "@/lib/db-jobs";
-import { updateChat } from "@/lib/db-store";
+import { appendRunEvent, claimNextJob, getJob, recoverStaleJobs, updateJob } from "@/lib/db-jobs";
+import { appendMessage, getChat, updateChat, upsertMessage } from "@/lib/db-store";
 
 const pollMs = Number(process.env.AI_CHAT_WORKER_POLL_MS || 500);
 const configuredConcurrency = Number(process.env.AI_CHAT_WORKER_CONCURRENCY || 4);
@@ -22,6 +22,31 @@ function runJobInIsolatedProcess(jobId: string) {
       updateJob(jobId, { status: "error", error: message });
       const job = getJob(jobId);
       if (job) {
+        appendRunEvent(job.id, job.chatId, job.userId, "error", { message });
+        const chat = getChat(job.chatId, job.userId);
+        if (chat && !chat.messages.some(
+          (entry) => entry.role === "assistant" && (
+            entry.errorMessage === message || entry.content.includes(message)
+          ),
+        )) {
+          const pendingAssistant = [...chat.messages]
+            .reverse()
+            .find((entry) => entry.role === "assistant" && !entry.content.trim());
+          if (pendingAssistant) {
+            upsertMessage(job.chatId, {
+              id: pendingAssistant.id,
+              role: "assistant",
+              content: "",
+              errorMessage: message,
+            });
+          } else {
+            appendMessage(job.chatId, {
+              role: "assistant",
+              content: "",
+              errorMessage: message,
+            });
+          }
+        }
         updateChat(job.chatId, {
           runStatus: "error",
           runUpdatedAt: new Date().toISOString(),
@@ -30,6 +55,7 @@ function runJobInIsolatedProcess(jobId: string) {
       }
     };
     let forceKillTimer: NodeJS.Timeout | undefined;
+    let stderr = "";
     const timeout = setTimeout(() => {
       markFailed(`Worker job exceeded the ${Math.round(maxJobMs / 60_000)} minute limit.`);
       child.kill("SIGTERM");
@@ -41,9 +67,12 @@ function runJobInIsolatedProcess(jobId: string) {
       {
         cwd: process.cwd(),
         env: process.env,
-        stdio: "inherit",
+        stdio: ["ignore", "inherit", "pipe"],
       },
     );
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr = `${stderr}${chunk.toString()}`.slice(-4_000);
+    });
     child.once("error", reject);
     child.once("exit", (code, signal) => {
       clearTimeout(timeout);
@@ -52,9 +81,14 @@ function runJobInIsolatedProcess(jobId: string) {
         resolveProcess();
         return;
       }
-      const message = signal
+      const baseMessage = signal
         ? `Isolated worker exited with signal ${signal}.`
         : `Isolated worker exited with code ${code ?? "unknown"}.`;
+      const detail = stderr
+        .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+        .replace(/(api[_-]?key|access[_-]?token|refresh[_-]?token)\s*[:=]\s*\S+/gi, "$1=[redacted]")
+        .trim();
+      const message = detail ? `${baseMessage} ${detail.slice(-2_000)}` : baseMessage;
       markFailed(message);
       reject(new Error(message));
     });

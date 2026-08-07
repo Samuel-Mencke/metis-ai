@@ -17,6 +17,12 @@ import { appendRunEvent, enqueueJob, getJob, touchJob, updateJob } from "@/lib/d
 import { isModelAllowed } from "@/lib/model-access";
 import { buildAttachmentPrompt } from "@/lib/uploads";
 import type { AgentJob } from "@/lib/jobs";
+import {
+  findActiveConnection,
+  getProviderConnectionSecret,
+} from "@/lib/provider-connections";
+import { parseModelKey } from "@/lib/providers/types";
+import { runAlternativeProviderJob } from "@/lib/providers/runner";
 
 const AGENT_INIT_TIMEOUT_MS = 90_000;
 const AGENT_INACTIVITY_TIMEOUT_MS = 5 * 60_000;
@@ -325,14 +331,32 @@ export async function runQueuedJob(job: AgentJob) {
     updateJob(job.id, { status: "error", error: "Chat not found or access denied." });
     return;
   }
-  const requestedModelId = job.modelId || chat.modelId || "composer-2.5";
+  const requestedModelId = job.modelId || chat.modelId || "";
+  if (!requestedModelId) {
+    updateJob(job.id, { status: "error", error: "No model is selected for this chat." });
+    return;
+  }
   if (!isModelAllowed(job.userId, requestedModelId)) {
     updateJob(job.id, { status: "error", error: "This model is not available for your account." });
     return;
   }
-  const apiKey = process.env.CURSOR_API_KEY?.trim();
-  if (!apiKey) {
-    updateJob(job.id, { status: "error", error: "CURSOR_API_KEY is not configured." });
+  const modelReference = parseModelKey(requestedModelId);
+  if (modelReference.providerKey !== "cursor") {
+    await runAlternativeProviderJob(job, chat);
+    return;
+  }
+  const cursorConnection = job.userId
+    ? findActiveConnection(job.userId, "cursor")
+    : null;
+  const cursorCredential = cursorConnection && job.userId
+    ? getProviderConnectionSecret(cursorConnection.id, job.userId)
+    : null;
+  const apiKey = cursorCredential?.secret;
+  if (!cursorConnection || !apiKey) {
+    updateJob(job.id, {
+      status: "error",
+      error: "No enabled Cursor SDK connection is configured for this user.",
+    });
     return;
   }
   const assistantMessageId = crypto.randomUUID();
@@ -372,6 +396,9 @@ export async function runQueuedJob(job: AgentJob) {
   const configuredSubagentModel = globalModelSettings.subagentModelEnabled
     ? globalModelSettings.subagentModelId
     : undefined;
+  const configuredSubagentModelParams = configuredSubagentModel
+    ? globalModelSettings.modelParamsByModel?.[configuredSubagentModel] || []
+    : [];
   const customSubagentDefinitions = configuredSubagentModel
     ? Object.fromEntries(
         ["generalPurpose", "explore", "shell", "browser-use", "bugbot", "security-review", "best-of-n-runner"]
@@ -380,7 +407,12 @@ export async function runQueuedJob(job: AgentJob) {
             {
               description: `Delegate work to a ${name} subagent using the configured standard model.`,
               prompt: `Use the configured standard subagent model (${configuredSubagentModel}) for this task.`,
-              model: { id: configuredSubagentModel },
+              model: {
+                id: configuredSubagentModel,
+                ...(configuredSubagentModelParams.length
+                  ? { params: configuredSubagentModelParams }
+                  : {}),
+              },
             },
           ]),
       )
@@ -468,6 +500,7 @@ export async function runQueuedJob(job: AgentJob) {
       `Memories:\n${listMemories(job.userId).map((memory) => `- ${memory.content}`).join("\n") || "(none yet)"}`,
       `Existing workspaces:\n${chat.workspaces?.map((item) => `[${item.type}] ${item.name} (link: workspace://${item.type}/${item.id})\n${item.content}`).join("\n\n") || "(none)"}`,
       "When referring to an existing or newly created plan/canvas, include its exact Markdown link using workspace://plan/<id> or workspace://canvas/<id>.",
+      "When you use browser results, selected references, or other verifiable web sources, cite the exact URL immediately after the sentence it supports using the format [Source: Website title](URL). At the end, put every source used in exactly one fenced block starting with ```sources, with one Markdown link per line. Never invent URLs; if no verifiable source is available, do not create a sources block.",
       "To create a plan or canvas, call the MCP tools create_plan or create_canvas with title and content. Use an empty content string for a blank workspace, and do not claim creation without a completed tool call.",
       "You can create a follow-up chat by outputting exactly one or more fenced blocks in this format:\n```chat title=\"Short title\"\nMessage to send in the new chat\n```\nThe block creates a new chat for the current user, sends the message there, and starts an agent run. Do not claim a chat was created without outputting this block.",
       "When useful, offer up to five concise follow-up questions at the end using exactly this UI-only format. Use `display text => prompt to insert` when the visible label should differ from the inserted prompt:\n```suggestions\nExplain this in more detail => Explain the database synchronization in more detail, with a concrete example.\nShow me an example\n```\nDo not mention or explain this format outside the block.",
@@ -695,8 +728,11 @@ export async function runQueuedJob(job: AgentJob) {
       });
     }
     checkpoint();
-    if (!text && result.result) text = String(result.result);
-    if (!text) {
+    const resultError = result.status === "error"
+      ? result.error?.message || "Agent run failed."
+      : undefined;
+    if (!text && result.result && !resultError) text = String(result.result);
+    if (!text && !resultError) {
       text =
         result.error?.message ||
         "The agent completed without returning a textual response.";
@@ -773,6 +809,7 @@ export async function runQueuedJob(job: AgentJob) {
       id: assistantMessageId,
       role: "assistant",
       content: text,
+      ...(resultError ? { errorMessage: resultError } : {}),
       ...(extractedSuggestions.suggestions.length
         ? { suggestions: extractedSuggestions.suggestions }
         : {}),
@@ -791,22 +828,29 @@ export async function runQueuedJob(job: AgentJob) {
     if (receivedTextDelta) {
       emit("text-reset", {});
     }
-    emit("text", { text });
+    if (text) emit("text", { text });
     updateChat(job.chatId, {
       agentId: agent.agentId,
-      runStatus: result.status === "error" ? "error" : "completed",
+      runStatus: resultError ? "error" : "completed",
       runUpdatedAt: new Date().toISOString(),
     }, job.userId);
     updateJob(job.id, {
-      status: result.status === "error" ? "error" : "completed",
+      status: resultError ? "error" : "completed",
       agentId: agent.agentId,
-      ...(result.status === "error" ? { error: result.error?.message || "Agent run failed." } : {}),
+      ...(resultError ? { error: resultError } : {}),
     });
-    emit("done", { status: result.status, agentId: agent.agentId });
+    if (resultError) emit("error", { message: resultError });
+    else emit("done", { status: result.status, agentId: agent.agentId });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Agent run failed.";
     if (getJob(job.id)?.status !== "cancelled") {
-      upsertMessage(job.chatId, { id: assistantMessageId, role: "assistant", content: text, ...(tools.length ? { tools } : {}) });
+      upsertMessage(job.chatId, {
+        id: assistantMessageId,
+        role: "assistant",
+        content: text,
+        errorMessage: message,
+        ...(tools.length ? { tools } : {}),
+      });
       updateChat(job.chatId, { runStatus: "error", runUpdatedAt: new Date().toISOString() });
       updateJob(job.id, { status: "error", error: message });
       emit("error", { message });

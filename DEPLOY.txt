@@ -4,12 +4,16 @@ Metis AI deployment notes
 Keep deployment-specific URLs, credentials, host paths, and tokens outside
 the repository. Use the private deployment environment to provide:
 
-  CURSOR_API_KEY
+  AI_CHAT_SECRETS_KEY
   CHAT_PASSWORD
   MCP_BEARER_TOKEN
   AI_CHAT_ROOT
   AI_CHAT_MCP_STATE_DIR
   AGENT_CWD
+
+Cursor credentials are configured per user in Settings → Providers and are
+stored encrypted with `AI_CHAT_SECRETS_KEY`. Cursor uses its SDK connection
+directly; there is no global Cursor API-key fallback or configurable base URL.
 
 Build and run the application with the package manager configured for the
 deployment.

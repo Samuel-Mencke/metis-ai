@@ -16,6 +16,8 @@ import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
 import { normalizeMath, splitStreamingMath } from "@/lib/math";
 import { LinkPreview } from "@/components/link-preview";
+import { Link2 } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 export { normalizeMath, splitStreamingMath } from "@/lib/math";
 
@@ -27,10 +29,20 @@ function MarkdownLink({
   const isWebUrl = Boolean(href && /^https?:\/\//i.test(href));
   const isSubagentUrl = Boolean(href && /^subagent:\/\//i.test(href));
   const workspaceMatch = href?.match(/^workspace:\/\/(plan|canvas)\/([^/?#]+)(?:[?#].*)?$/i);
+  const childText = typeof children === "string"
+    ? children
+    : Array.isArray(children)
+      ? children.filter((child): child is string => typeof child === "string").join("")
+      : "";
+  const sourceTitle = childText.match(/^(?:source|quelle)\s*[:\-]\s*(.+)$/i)?.[1]?.trim();
   const link = (
     <a
       {...props}
       href={workspaceMatch ? `#workspace-${workspaceMatch[2]}` : href}
+      className={cn(
+        props.className,
+        sourceTitle && "inline-flex items-center gap-1 rounded-full border border-border/60 bg-secondary/60 px-1.5 py-0.5 text-[11px] font-medium no-underline hover:bg-secondary",
+      )}
       onClick={(event) => {
         if (workspaceMatch) {
           event.preventDefault();
@@ -59,7 +71,12 @@ function MarkdownLink({
         window.dispatchEvent(new CustomEvent("ai-chat:open-browser", { detail: href }));
       }}
     >
-      {children}
+      {sourceTitle ? (
+        <>
+          <Link2 className="size-3 shrink-0" aria-hidden="true" />
+          {sourceTitle}
+        </>
+      ) : children}
     </a>
   );
   return isWebUrl && href ? <LinkPreview href={href}>{link}</LinkPreview> : link;

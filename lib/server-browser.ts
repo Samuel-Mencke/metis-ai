@@ -34,6 +34,7 @@ type BrowserAction = {
 type BrowserResult = {
   sessionId: string;
   tabId: string;
+  activeTabId: string;
   url: string;
   title: string;
   tabs: Array<{ id: string; url: string; title: string }>;
@@ -162,6 +163,7 @@ async function resultFor(state: BrowserContextState, tabId: string): Promise<Bro
   return {
     sessionId: sessionKey(state.ownerId, state.chatId),
     tabId,
+    activeTabId: state.activeTabId,
     url: info.url,
     title: info.title,
     tabs: await Promise.all([...state.tabs.keys()].map((id) => pageInfo(state, id))),
@@ -176,6 +178,8 @@ export async function captureBrowserFrame(ownerId: string, chatId: string, reque
   const info = await pageInfo(state, tabId);
   return {
     tabId,
+    activeTabId: state.activeTabId,
+    tabs: await Promise.all([...state.tabs.keys()].map((id) => pageInfo(state, id))),
     url: info.url === "about:blank" ? "" : info.url,
     title: info.title,
     viewport: page.viewportSize() || DEFAULT_VIEWPORT,

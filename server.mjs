@@ -1,8 +1,21 @@
 import http from "node:http";
-import next from "next";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { WebSocketServer } from "ws";
-import { getAuthenticatedUser } from "./lib/auth.ts";
-import { captureBrowserFrame, performBrowserAction } from "./lib/server-browser.ts";
+
+// Next's custom-server entrypoint expects this Node primitive to be exposed
+// globally. The regular `next start` launcher does this during its bootstrap,
+// but a custom server loaded through tsx does not.
+if (!globalThis.AsyncLocalStorage) {
+  globalThis.AsyncLocalStorage = AsyncLocalStorage;
+}
+const { default: next } = await import("next");
+const { getAuthenticatedUser, passwordMatches } = await import("./lib/auth.ts");
+const { updateChat } = await import("./lib/db-store.ts");
+const {
+  captureBrowserFrame,
+  cleanupBrowserSessions,
+  performBrowserAction,
+} = await import("./lib/server-browser.ts");
 
 const port = Number(process.env.PORT || 3100);
 const dev = process.env.NODE_ENV !== "production";
@@ -25,13 +38,97 @@ async function authenticate(request, url) {
   return user && chatId ? { userId: user.id || user.username, chatId } : null;
 }
 
+function internalEngineAuthorized(request) {
+  const configured =
+    process.env.AI_CHAT_INTERNAL_TOKEN?.trim() ||
+    process.env.MCP_BEARER_TOKEN?.trim();
+  if (configured) {
+    return request.headers.authorization === `Bearer ${configured}`;
+  }
+  return request.headers["x-ai-chat-internal"] === "1" &&
+    passwordMatches(request.headers["x-chat-password"]);
+}
+
+async function readRequestJson(request) {
+  const chunks = [];
+  for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+}
+
+function persistBrowserContext(userId, chatId, result) {
+  updateChat(chatId, {
+    browserContext: {
+      tabs: result.tabs,
+      activeTabId: result.tabId,
+      sessionKey: chatId,
+      updatedAt: new Date().toISOString(),
+    },
+  }, userId);
+}
+
+async function performSharedBrowserAction(userId, chatId, action) {
+  await cleanupBrowserSessions();
+  const result = await performBrowserAction(userId, chatId, action);
+  persistBrowserContext(userId, chatId, result);
+  return result;
+}
+
+async function handleBrowserEngine(request, response) {
+  if (request.method !== "POST") {
+    response.writeHead(405, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  if (!internalEngineAuthorized(request)) {
+    response.writeHead(401, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ error: "Unauthorized" }));
+    return;
+  }
+  const userId = String(request.headers["x-ai-chat-user-id"] || "").trim();
+  const chatId = String(request.headers["x-ai-chat-id"] || "").trim();
+  if (!userId || !chatId) {
+    response.writeHead(400, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ error: "Chat and user context are required" }));
+    return;
+  }
+  try {
+    const action = await readRequestJson(request);
+    const result = await performSharedBrowserAction(userId, chatId, action);
+    response.writeHead(200, {
+      "Cache-Control": "no-store",
+      "Content-Type": "application/json",
+    });
+    response.end(JSON.stringify(result));
+  } catch (error) {
+    response.writeHead(400, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      error: error instanceof Error ? error.message : "Browser action failed",
+    }));
+  }
+}
+
 async function sendFrame(socket, context, tabId, quality, streamState) {
   if (socket.readyState !== 1 || socket.bufferedAmount > 2_000_000) return tabId;
-  const frame = await captureBrowserFrame(context.userId, context.chatId, tabId, quality);
-  const metadataKey = JSON.stringify({ tabId: frame.tabId, url: frame.url, title: frame.title, viewport: frame.viewport });
+  const frame = await captureBrowserFrame(context.userId, context.chatId, undefined, quality);
+  const metadataKey = JSON.stringify({
+    tabId: frame.tabId,
+    activeTabId: frame.activeTabId,
+    url: frame.url,
+    title: frame.title,
+    tabs: frame.tabs,
+    viewport: frame.viewport,
+  });
   if (metadataKey !== streamState.metadataKey) {
     streamState.metadataKey = metadataKey;
-    socket.send(JSON.stringify({ type: "meta", tabId: frame.tabId, url: frame.url, title: frame.title, viewport: frame.viewport }));
+    socket.send(JSON.stringify({
+      type: "meta",
+      tabId: frame.tabId,
+      activeTabId: frame.activeTabId,
+      url: frame.url,
+      title: frame.title,
+      tabs: frame.tabs,
+      viewport: frame.viewport,
+    }));
   }
   socket.send(frame.data, { binary: true });
   return frame.tabId;
@@ -62,7 +159,7 @@ websocketServer.on("connection", async (socket, request, context, options) => {
     try { message = JSON.parse(raw.toString()); } catch { return; }
     if (message.type !== "action" || !message.action) return;
     try {
-      const result = await performBrowserAction(context.userId, context.chatId, {
+      const result = await performSharedBrowserAction(context.userId, context.chatId, {
         action: message.action,
         tabId: message.tabId || tabId,
         selector: message.selector,
@@ -75,7 +172,15 @@ websocketServer.on("connection", async (socket, request, context, options) => {
         height: message.height,
       });
       tabId = result.tabId;
-      socket.send(JSON.stringify({ type: "meta", tabId: result.tabId, url: result.url === "about:blank" ? "" : result.url, title: result.title, viewport: result.viewport, tabs: result.tabs }));
+      socket.send(JSON.stringify({
+        type: "meta",
+        tabId: result.tabId,
+        activeTabId: result.activeTabId,
+        url: result.url === "about:blank" ? "" : result.url,
+        title: result.title,
+        viewport: result.viewport,
+        tabs: result.tabs,
+      }));
       await push();
     } catch (error) {
       socket.send(JSON.stringify({ type: "error", message: error instanceof Error ? error.message : "Browser action failed" }));
@@ -97,7 +202,14 @@ websocketServer.on("connection", async (socket, request, context, options) => {
 });
 
 await nextApp.prepare();
-const server = http.createServer((request, response) => handle(request, response));
+const server = http.createServer(async (request, response) => {
+  const url = streamUrl(request);
+  if (url.pathname === "/__internal/browser-engine") {
+    await handleBrowserEngine(request, response);
+    return;
+  }
+  await handle(request, response);
+});
 server.on("upgrade", async (request, socket, head) => {
   const url = streamUrl(request);
   if (url.pathname !== "/api/browser/stream") {

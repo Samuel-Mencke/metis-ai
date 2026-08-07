@@ -40,6 +40,7 @@ export type ChatMessage = {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
+  errorMessage?: string;
   referenceText?: string;
   thinking?: string;
   tools?: ToolPart[];
@@ -61,10 +62,13 @@ export type ChatMessage = {
     size: number;
   }>;
   runMetadata?: {
+    providerId?: string;
     modelId?: string;
+    connectionId?: string;
     outputTokens?: number;
     inputTokens?: number;
     totalTokens?: number;
+    costUsd?: number;
     completedAt: string;
   };
   createdAt: string;
@@ -137,7 +141,7 @@ export type Chat = {
   ownerId?: string;
   title: string;
   agentId?: string;
-  /** Cursor model id, e.g. composer-2.5 */
+  /** Selected provider/model key for this chat. */
   modelId?: string;
   /** Cursor model params, e.g. [{ id: "fast", value: "true" }] */
   modelParams?: Array<{ id: string; value: string }>;
@@ -190,9 +194,12 @@ const SETTINGS_PATH = path.join(DATA_DIR, "settings.json");
 export type GlobalModelSettings = {
   modelId?: string;
   modelParams?: Array<{ id: string; value: string }>;
+  modelParamsByModel?: Record<string, Array<{ id: string; value: string }>>;
   subagentModelEnabled?: boolean;
   subagentModelId?: string;
   draftInput?: string;
+  favoriteModelKeys?: string[];
+  modelAliases?: Record<string, string>;
 };
 
 function ensureDirs() {
@@ -588,6 +595,7 @@ export function saveGlobalModelSettings(settings: GlobalModelSettings): GlobalMo
   const next = {
     ...(settings.modelId ? { modelId: settings.modelId } : {}),
     ...(settings.modelParams ? { modelParams: settings.modelParams } : {}),
+    ...(settings.modelParamsByModel ? { modelParamsByModel: settings.modelParamsByModel } : {}),
   };
   atomicWriteJson(SETTINGS_PATH, next);
   return next;

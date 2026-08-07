@@ -23,6 +23,40 @@ the MCP feature flags are centralized in `lib/config.ts`. Unset paths fall back
 to the current working directory, the current user's home directory, or local
 loopback bindings; no machine-specific path is required.
 
+## AI provider connections
+
+Provider connections are configured from Settings → Providers. API keys and
+supported account credential bundles are encrypted at rest and are never sent
+back to the browser. Set `AI_CHAT_SECRETS_KEY` before saving a connection; it
+must be exactly 32 bytes, represented as 64 hexadecimal characters or base64:
+
+```bash
+openssl rand -hex 32
+```
+
+The application supports Cursor, OpenAI, Anthropic, Google Gemini, xAI/Grok,
+OpenRouter, Ollama/local endpoints, Codex, Claude Code, Antigravity's supported
+SDK credentials, and generic OpenAI-compatible providers. The generic
+connection covers providers such as Groq, DeepSeek, Mistral, Together, vLLM,
+LM Studio, and LiteLLM.
+
+Codex also supports a link/device OAuth flow through the OAuth provider adapter;
+the resulting credential file is encrypted per user. Existing official Codex
+`auth.json` credentials remain supported. Claude Code OAuth remains experimental
+and may conflict with Anthropic's current third-party usage restrictions.
+Antigravity OAuth uses the official `agy` CLI remote-login flow; the CLI stores
+its token profile in an isolated per-connection home directory.
+
+The optional API-key/Vertex Antigravity agent path requires the Python package
+in the Python environment selected by `ANTIGRAVITY_PYTHON`:
+
+```bash
+python3 -m pip install google-antigravity
+```
+
+Google Vertex/ADC connections also require a configured GCP project and
+Application Default Credentials.
+
 ## MCP gateway
 
 The gateway module boundary lives at
@@ -42,6 +76,7 @@ For a public deployment:
 
 ```bash
 pnpm exec tsc --noEmit
+pnpm run test:providers
 pnpm run lint
 pnpm run build
 ```

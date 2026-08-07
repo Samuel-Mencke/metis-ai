@@ -54,13 +54,9 @@ function migrateLegacy(db: DatabaseSync) {
   const memoriesPath = path.join(dataDir, "memories.json");
   const settingsPath = path.join(dataDir, "settings.json");
   if (hasMigration && userCount > 0 && ownerMigration) {
-    const ownerId = (db.prepare("SELECT id FROM users ORDER BY created_at ASC LIMIT 1").get() as { id?: string } | undefined)?.id;
-    syncLegacyMemories(db, memoriesPath, ownerId);
-    if (ownerId) {
-      db.prepare("UPDATE memories SET owner_id = ? WHERE owner_id IS NULL").run(ownerId);
-      db.prepare("UPDATE settings SET owner_id = ? WHERE owner_id IS NULL").run(ownerId);
-      db.prepare("UPDATE settings SET key = ? WHERE key = 'global'").run(`global:${ownerId}`);
-    }
+    // SQLite is canonical after migration. Do not re-import the legacy JSON
+    // snapshot on every process initialization, otherwise deleted memories
+    // would be resurrected on the next reload.
     return;
   }
 
@@ -177,6 +173,51 @@ export function getDatabase(): DatabaseSync {
     );
     CREATE INDEX IF NOT EXISTS user_model_permissions_model
       ON user_model_permissions(model_id);
+    CREATE TABLE IF NOT EXISTS provider_connections (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      provider_key TEXT NOT NULL,
+      slug TEXT NOT NULL,
+      label TEXT NOT NULL,
+      auth_type TEXT NOT NULL,
+      base_url TEXT,
+      config TEXT NOT NULL DEFAULT '{}',
+      secret_blob TEXT,
+      enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+      last_checked_at TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(owner_id, slug)
+    );
+    CREATE INDEX IF NOT EXISTS provider_connections_owner
+      ON provider_connections(owner_id, enabled, provider_key);
+    CREATE TABLE IF NOT EXISTS provider_models (
+      connection_id TEXT NOT NULL REFERENCES provider_connections(id) ON DELETE CASCADE,
+      canonical_id TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      description TEXT,
+      capabilities TEXT NOT NULL DEFAULT '{}',
+      discovered_at TEXT NOT NULL,
+      PRIMARY KEY (connection_id, canonical_id)
+    );
+    CREATE INDEX IF NOT EXISTS provider_models_connection
+      ON provider_models(connection_id, discovered_at DESC);
+    CREATE TABLE IF NOT EXISTS provider_oauth_flows (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      connection_id TEXT NOT NULL REFERENCES provider_connections(id) ON DELETE CASCADE,
+      provider_key TEXT NOT NULL,
+      status TEXT NOT NULL,
+      auth_url TEXT,
+      instructions TEXT,
+      manual_code TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS provider_oauth_flows_owner
+      ON provider_oauth_flows(owner_id, updated_at DESC);
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -231,6 +272,7 @@ export function getDatabase(): DatabaseSync {
   for (const statement of [
     "ALTER TABLE memories ADD COLUMN owner_id TEXT REFERENCES users(id) ON DELETE CASCADE",
     "ALTER TABLE settings ADD COLUMN owner_id TEXT REFERENCES users(id) ON DELETE CASCADE",
+    "ALTER TABLE provider_oauth_flows ADD COLUMN user_code TEXT",
   ]) {
     try {
       database.exec(statement);
@@ -239,6 +281,9 @@ export function getDatabase(): DatabaseSync {
     }
   }
   migrateLegacy(database);
+  database.prepare(
+    "INSERT OR IGNORE INTO meta (key, value) VALUES ('provider_connections_schema', '1')",
+  ).run();
   database.prepare(
     `INSERT OR IGNORE INTO user_model_permissions (user_id, model_id, created_at)
      SELECT id, '*', ? FROM users`,

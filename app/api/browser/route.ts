@@ -1,5 +1,5 @@
 import { getAuthenticatedUser, isAuthenticated } from "@/lib/auth";
-import { cleanupBrowserSessions, performBrowserAction } from "@/lib/server-browser";
+import { performSharedBrowserAction } from "@/lib/shared-browser-client";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,8 +31,7 @@ export async function GET(req: Request) {
   const chatId = url.searchParams.get("chatId")?.trim();
   if (!owner || !chatId) return Response.json({ error: "A chatId is required" }, { status: 400 });
   try {
-    await cleanupBrowserSessions();
-    const result = await performBrowserAction(owner, chatId, {
+    const result = await performSharedBrowserAction(owner, chatId, {
       action: url.searchParams.get("action") || "screenshot",
       tabId: url.searchParams.get("tabId") || undefined,
     });
@@ -59,8 +58,7 @@ export async function POST(req: Request) {
   const chatId = body.chatId?.trim();
   if (!owner || !chatId || !body.action) return Response.json({ error: "chatId and action are required" }, { status: 400 });
   try {
-    await cleanupBrowserSessions();
-    const result = await performBrowserAction(owner, chatId, { ...body, action: body.action });
+    const result = await performSharedBrowserAction(owner, chatId, { ...body, action: body.action });
     return Response.json(result);
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Browser action failed" }, { status: 400 });

@@ -3,6 +3,7 @@ import { enqueueJob, getActiveJob, listJobs, listRunEvents } from "@/lib/db-jobs
 import { appendMessage, getChat } from "@/lib/db-store";
 import { SSE_HEADERS } from "@/lib/sse";
 import { saveAttachments, type IncomingAttachment } from "@/lib/uploads";
+import { isModelAllowed } from "@/lib/model-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -77,6 +78,10 @@ export async function POST(req: Request) {
   if (!chat || (!message && !body.attachments?.length)) {
     return Response.json({ error: "chatId and message or attachments are required" }, { status: 400 });
   }
+  const requestedModelId = body.modelId?.trim();
+  if (requestedModelId && !isModelAllowed(userId, requestedModelId)) {
+    return Response.json({ error: "This model is not available for your account" }, { status: 403 });
+  }
   if (getActiveJob(chat.id, userId)) {
     return Response.json(
       { error: "This chat already has an active run. Wait for it to finish or cancel it first." },
@@ -111,7 +116,7 @@ export async function POST(req: Request) {
       ...(messageId ? { messageId } : {}),
       ...(body.referenceText ? { referenceText: body.referenceText.slice(0, 100_000) } : {}),
       ...(body.agentId ? { agentId: body.agentId } : {}),
-      ...(body.modelId ? { modelId: body.modelId } : {}),
+      ...(requestedModelId ? { modelId: requestedModelId } : {}),
       ...(body.modelParams ? { modelParams: body.modelParams } : {}),
       ...(stored.length ? { attachments: stored } : {}),
     });
