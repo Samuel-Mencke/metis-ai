@@ -5713,9 +5713,6 @@ export default function AppShell() {
           aria-hidden="true"
           className="absolute right-0 h-9 w-auto max-w-[5rem] object-contain"
         />
-        <span className="z-10 px-10 text-lg font-semibold tracking-[0.18em] text-foreground/90 [font-family:'Times_New_Roman',Times,serif]">
-          Metis
-        </span>
       </div>
       <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pt-3">
         <div className="space-y-0.5 pb-3">
