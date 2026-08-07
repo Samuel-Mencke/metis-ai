@@ -36,12 +36,12 @@ export type StoredAttachment = {
   size: number;
 };
 
-function uploadsRoot(): string {
-  return path.join(getAgentCwd(), ".ai-chat-uploads");
+function uploadsRoot(ownerId?: string): string {
+  return path.join(getAgentCwd(ownerId), ".ai-chat-uploads");
 }
 
-export function chatUploadDir(chatId: string): string {
-  return path.join(uploadsRoot(), chatId);
+export function chatUploadDir(chatId: string, ownerId?: string): string {
+  return path.join(uploadsRoot(ownerId), chatId);
 }
 
 export function isImageMime(mime: string): boolean {
@@ -71,6 +71,7 @@ export function decodeBase64Size(data: string): number {
 export function saveAttachments(
   chatId: string,
   items: IncomingAttachment[],
+  ownerId?: string,
 ): {
   stored: StoredAttachment[];
   images: Array<{ data: string; mimeType: string }>;
@@ -82,7 +83,7 @@ export function saveAttachments(
     throw new Error(`Max ${MAX_ATTACHMENTS} attachments`);
   }
 
-  const dir = chatUploadDir(chatId);
+  const dir = chatUploadDir(chatId, ownerId);
   mkdirSync(dir, { recursive: true });
 
   let total = 0;
@@ -139,11 +140,12 @@ export function saveAttachments(
 export function resolveUploadPath(
   chatId: string,
   storedName: string,
+  ownerId?: string,
 ): string | null {
   if (!chatId || chatId.includes("..") || chatId.includes("/")) return null;
   const base = path.basename(storedName);
   if (!base || base !== storedName || storedName.includes("..")) return null;
-  const dir = chatUploadDir(chatId);
+  const dir = chatUploadDir(chatId, ownerId);
   const full = path.join(dir, base);
   if (!full.startsWith(dir + path.sep) && full !== dir) return null;
   if (!existsSync(full)) return null;
@@ -153,8 +155,9 @@ export function resolveUploadPath(
 export function readUpload(
   chatId: string,
   storedName: string,
+  ownerId?: string,
 ): Buffer | null {
-  const full = resolveUploadPath(chatId, storedName);
+  const full = resolveUploadPath(chatId, storedName, ownerId);
   if (!full) return null;
   return readFileSync(full);
 }
@@ -162,11 +165,12 @@ export function readUpload(
 export function buildAttachmentPrompt(
   chatId: string,
   stored: StoredAttachment[] = [],
+  ownerId?: string,
 ): string {
   if (stored.length === 0) return "";
   let previewBytes = 0;
   const lines = stored.map((a) => {
-    const abs = path.join(chatUploadDir(chatId), a.storedName);
+    const abs = path.join(chatUploadDir(chatId, ownerId), a.storedName);
     const metadata = `- ${a.name} (${a.kind}, ${a.mimeType}, ${a.size} bytes)\n  path: ${abs}`;
     if (!isTextAttachment(a) || previewBytes >= 400_000) return metadata;
     try {

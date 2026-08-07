@@ -15,6 +15,7 @@ const {
   captureBrowserFrame,
   cleanupBrowserSessions,
   performBrowserAction,
+  setBrowserViewport,
 } = await import("./lib/server-browser.ts");
 
 const port = Number(process.env.PORT || 3100);
@@ -22,6 +23,7 @@ const dev = process.env.NODE_ENV !== "production";
 const nextApp = next({ dev, hostname: "127.0.0.1", port });
 const handle = nextApp.getRequestHandler();
 const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+const browserStreamSubscribers = new Map();
 
 function streamUrl(request) {
   const host = request.headers.host || `127.0.0.1:${port}`;
@@ -70,6 +72,10 @@ async function performSharedBrowserAction(userId, chatId, action) {
   await cleanupBrowserSessions();
   const result = await performBrowserAction(userId, chatId, action);
   persistBrowserContext(userId, chatId, result);
+  const subscribers = browserStreamSubscribers.get(`${userId}:${chatId}`);
+  if (subscribers) {
+    await Promise.allSettled([...subscribers].map((notify) => notify(result)));
+  }
   return result;
 }
 
@@ -109,7 +115,7 @@ async function handleBrowserEngine(request, response) {
 
 async function sendFrame(socket, context, tabId, quality, streamState) {
   if (socket.readyState !== 1 || socket.bufferedAmount > 2_000_000) return tabId;
-  const frame = await captureBrowserFrame(context.userId, context.chatId, undefined, quality);
+  const frame = await captureBrowserFrame(context.userId, context.chatId, tabId, quality);
   const metadataKey = JSON.stringify({
     tabId: frame.tabId,
     activeTabId: frame.activeTabId,
@@ -139,8 +145,9 @@ websocketServer.on("connection", async (socket, request, context, options) => {
   let inFlight = false;
   let stopped = false;
   const streamState = { metadataKey: "" };
-  const fps = Math.max(5, Math.min(Number(options.fps) || 10, 15));
+  const fps = Math.max(1, Math.min(Number(options.fps) || 10, 30));
   const quality = Math.max(35, Math.min(Number(options.quality) || 70, 90));
+  const realtime = options.realtime !== false;
 
   const push = async () => {
     if (stopped || inFlight || socket.readyState !== 1) return;
@@ -153,6 +160,15 @@ websocketServer.on("connection", async (socket, request, context, options) => {
       inFlight = false;
     }
   };
+
+  const subscriberKey = `${context.userId}:${context.chatId}`;
+  const subscribers = browserStreamSubscribers.get(subscriberKey) || new Set();
+  const notify = (result) => {
+    if (result?.activeTabId) tabId = result.activeTabId;
+    return push();
+  };
+  subscribers.add(notify);
+  browserStreamSubscribers.set(subscriberKey, subscribers);
 
   socket.on("message", async (raw) => {
     let message;
@@ -181,15 +197,22 @@ websocketServer.on("connection", async (socket, request, context, options) => {
         viewport: result.viewport,
         tabs: result.tabs,
       }));
-      await push();
     } catch (error) {
       socket.send(JSON.stringify({ type: "error", message: error instanceof Error ? error.message : "Browser action failed" }));
     }
   });
 
-  socket.on("close", () => { stopped = true; });
+  socket.on("close", () => {
+    stopped = true;
+    subscribers.delete(notify);
+    if (!subscribers.size) browserStreamSubscribers.delete(subscriberKey);
+  });
+  if (options.width && options.height) {
+    await setBrowserViewport(context.userId, context.chatId, options.width, options.height);
+  }
   await push();
   let timer;
+  if (!realtime) return;
   const scheduleNextFrame = () => {
     if (stopped) return;
     timer = setTimeout(async () => {
@@ -228,6 +251,9 @@ server.on("upgrade", async (request, socket, head) => {
         tabId: url.searchParams.get("tabId") || undefined,
         fps: url.searchParams.get("fps"),
         quality: url.searchParams.get("quality"),
+        realtime: url.searchParams.get("realtime") !== "0",
+        width: url.searchParams.get("width"),
+        height: url.searchParams.get("height"),
       });
     });
   } catch {

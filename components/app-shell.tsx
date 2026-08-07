@@ -38,6 +38,7 @@ import {
   Fullscreen,
   Globe2,
   Image as ImageIcon,
+  KeyRound,
   Link2,
   LoaderCircle,
   Menu,
@@ -71,6 +72,7 @@ import { RichComposerInput } from "@/components/rich-composer-input";
 import { RemoteFileEditor } from "@/components/remote-file-editor";
 import { RemoteTerminal } from "@/components/remote-terminal";
 import { RichUserText } from "@/components/rich-user-text";
+import { ProviderSetupDialog } from "@/components/provider-setup-dialog";
 import { CommandPalette } from "@/components/command-palette";
 import type { MemoryItem } from "@/components/memories-panel";
 import type { ChatLogEntry, ChatLogCategory } from "@/lib/chat-logs";
@@ -234,12 +236,16 @@ type QueuedMessage = {
   id: string;
   text: string;
   files: PendingFile[];
+  referenceText?: string;
   references?: ReferenceItem[];
+  storedAttachments?: MsgAttachment[];
 };
 
 type PersistedQueuedMessage = {
   id: string;
   text: string;
+  referenceText?: string;
+  references?: ReferenceItem[];
 };
 
 const MAX_PENDING_FILES = 8;
@@ -1237,6 +1243,7 @@ export default function AppShell() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [configuredModelProviders, setConfiguredModelProviders] = useState<ConfiguredModelProvider[]>([]);
   const [modelsLoaded, setModelsLoaded] = useState(false);
+  const [providerSetupOpen, setProviderSetupOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [modelParams, setModelParams] = useState<ModelParamSelection[]>([]);
@@ -1262,16 +1269,21 @@ export default function AppShell() {
     { id: "browser-1", title: "New tab", url: "" },
   ]);
   const [activeBrowserTabId, setActiveBrowserTabId] = useState("browser-1");
-  const [browserScreenshot, setBrowserScreenshot] = useState("");
   const [browserLoading, setBrowserLoading] = useState(false);
   const [browserError, setBrowserError] = useState("");
   const [browserViewport, setBrowserViewport] = useState({ width: 1280, height: 800 });
   const [browserWidthInput, setBrowserWidthInput] = useState("1280");
   const [browserHeightInput, setBrowserHeightInput] = useState("800");
+  const [browserRealtime, setBrowserRealtime] = useState(true);
+  const [browserFps, setBrowserFps] = useState(10);
+  const [browserDefaultViewport, setBrowserDefaultViewport] = useState({ width: 1280, height: 800 });
   const [monitorData, setMonitorData] = useState<MonitorPayload>({ current: null, history: [] });
   const browserSocketRef = useRef<WebSocket | null>(null);
   const browserStreamObjectUrlRef = useRef<string | null>(null);
+  const browserLastFrameAtRef = useRef(0);
   const browserViewportRef = useRef<HTMLDivElement | null>(null);
+  const browserScreenshotRef = useRef<HTMLImageElement | null>(null);
+  const browserScreenshotPlaceholderRef = useRef<HTMLDivElement | null>(null);
   const browserInputDirtyRef = useRef(false);
   const browserNavigationVersionRef = useRef(0);
   const [workspaceWidth, setWorkspaceWidth] = useState(() => {
@@ -1302,6 +1314,7 @@ export default function AppShell() {
   const [referenceResults, setReferenceResults] = useState<ReferenceItem[]>([]);
   const [referenceIndex, setReferenceIndex] = useState(0);
   const referenceAutocompleteDismissedRef = useRef(false);
+  const previousComposerInputRef = useRef("");
   const [referenceText, setReferenceText] = useState("");
   const [selectionAction, setSelectionAction] = useState<{ text: string; x: number; y: number } | null>(null);
   const [composerHeight, setComposerHeight] = useState(0);
@@ -1352,6 +1365,7 @@ export default function AppShell() {
   const [chatLogsCategory, setChatLogsCategory] = useState<"all" | ChatLogCategory>("all");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
+  const [desktopSidebarMounted, setDesktopSidebarMounted] = useState(true);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
@@ -1367,6 +1381,16 @@ export default function AppShell() {
       ? Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, saved))
       : 240;
   });
+
+  useEffect(() => {
+    if (desktopSidebarOpen) {
+      setDesktopSidebarMounted(true);
+      return;
+    }
+    const timer = window.setTimeout(() => setDesktopSidebarMounted(false), 180);
+    return () => window.clearTimeout(timer);
+  }, [desktopSidebarOpen]);
+
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [renameChatId, setRenameChatId] = useState<string | null>(null);
@@ -1726,7 +1750,12 @@ export default function AppShell() {
       agentId: s.agentId,
       modelId: s.modelId,
       modelParams: s.modelParams,
-      queuedMessages: s.queuedMessages.map(({ id, text }) => ({ id, text })),
+      queuedMessages: s.queuedMessages.map(({ id, text, referenceText, references }) => ({
+        id,
+        text,
+        ...(referenceText ? { referenceText } : {}),
+        ...(references?.length ? { references } : {}),
+      })),
       workspaces: s.workspaces,
       browserContext: normalizeBrowserContext(
         {
@@ -1755,9 +1784,11 @@ export default function AppShell() {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        queuedMessages: s.queuedMessages.map(({ id: messageId, text }) => ({
+        queuedMessages: s.queuedMessages.map(({ id: messageId, text, referenceText, references }) => ({
           id: messageId,
           text,
+          ...(referenceText ? { referenceText } : {}),
+          ...(references?.length ? { references } : {}),
         })),
         browserContext: {
           tabs: s.browserTabs,
@@ -1891,6 +1922,16 @@ export default function AppShell() {
     return true;
   }
 
+  function showBrowserScreenshot(source: string) {
+    if (browserScreenshotRef.current) {
+      browserScreenshotRef.current.src = source;
+      browserScreenshotRef.current.style.display = "block";
+    }
+    if (browserScreenshotPlaceholderRef.current) {
+      browserScreenshotPlaceholderRef.current.style.display = "none";
+    }
+  }
+
   async function performBrowserAction(action: string, extra: Record<string, unknown> = {}) {
     if (!activeChatId) return null;
     const navigationVersion = browserNavigationVersionRef.current;
@@ -1904,7 +1945,7 @@ export default function AppShell() {
       });
       const data = await response.json() as { error?: string; screenshot?: string; url?: string; tabId?: string; tabs?: BrowserTab[]; viewport?: { width: number; height: number } };
       if (!response.ok) throw new Error(data.error || "Browser action failed");
-      if (data.screenshot) setBrowserScreenshot(`data:image/png;base64,${data.screenshot}`);
+      if (data.screenshot) showBrowserScreenshot(`data:image/png;base64,${data.screenshot}`);
       if (data.tabs) setBrowserTabs(data.tabs);
       if (data.tabId) setActiveBrowserTabId(data.tabId);
       if (data.viewport) {
@@ -1963,7 +2004,7 @@ export default function AppShell() {
   }
 
   function clickBrowserScreenshot(event: ReactPointerEvent<HTMLImageElement>) {
-    if (!browserScreenshot) return;
+    if (!browserScreenshotRef.current?.src) return;
     const rect = event.currentTarget.getBoundingClientRect();
     const x = ((event.clientX - rect.left) / rect.width) * browserViewport.width;
     const y = ((event.clientY - rect.top) / rect.height) * browserViewport.height;
@@ -2002,7 +2043,15 @@ export default function AppShell() {
     const connect = () => {
       if (disposed) return;
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const query = new URLSearchParams({ chatId: activeChatId, tabId: activeBrowserTabId, fps: "10", quality: "70" });
+      const query = new URLSearchParams({
+        chatId: activeChatId,
+        tabId: activeBrowserTabId,
+        fps: String(browserFps),
+        quality: "70",
+        realtime: browserRealtime ? "1" : "0",
+        width: String(browserDefaultViewport.width),
+        height: String(browserDefaultViewport.height),
+      });
       const socket = new WebSocket(`${protocol}//${window.location.host}/api/browser/stream?${query}`);
       browserSocketRef.current = socket;
       socket.binaryType = "blob";
@@ -2031,7 +2080,14 @@ export default function AppShell() {
         const nextUrl = URL.createObjectURL(blob);
         if (browserStreamObjectUrlRef.current) URL.revokeObjectURL(browserStreamObjectUrlRef.current);
         browserStreamObjectUrlRef.current = nextUrl;
-        setBrowserScreenshot(nextUrl);
+        browserLastFrameAtRef.current = Date.now();
+        if (browserScreenshotRef.current) {
+          browserScreenshotRef.current.src = nextUrl;
+          browserScreenshotRef.current.style.display = "block";
+        }
+        if (browserScreenshotPlaceholderRef.current) {
+          browserScreenshotPlaceholderRef.current.style.display = "none";
+        }
       };
       socket.onclose = () => {
         if (browserSocketRef.current === socket) browserSocketRef.current = null;
@@ -2039,17 +2095,57 @@ export default function AppShell() {
       };
     };
     connect();
+    let fallbackRequestPending = false;
+    const fallbackTimer = window.setInterval(() => {
+      if (!browserRealtime || !activeChatId) return;
+      const socket = browserSocketRef.current;
+      const frameIsFresh = Date.now() - browserLastFrameAtRef.current < 2500;
+      if (socket?.readyState === WebSocket.OPEN && frameIsFresh) return;
+      if (fallbackRequestPending) return;
+      fallbackRequestPending = true;
+      void fetch(
+        `/api/browser?chatId=${encodeURIComponent(activeChatId)}&tabId=${encodeURIComponent(activeBrowserTabId)}&action=screenshot&format=image`,
+        { cache: "no-store" },
+      )
+        .then((response) => (response.ok ? response.blob() : null))
+        .then((blob) => {
+          if (!blob || disposed) return;
+          const nextUrl = URL.createObjectURL(blob);
+          if (browserStreamObjectUrlRef.current) URL.revokeObjectURL(browserStreamObjectUrlRef.current);
+          browserStreamObjectUrlRef.current = nextUrl;
+          browserLastFrameAtRef.current = Date.now();
+          if (browserScreenshotRef.current) {
+            browserScreenshotRef.current.src = nextUrl;
+            browserScreenshotRef.current.style.display = "block";
+          }
+          if (browserScreenshotPlaceholderRef.current) {
+            browserScreenshotPlaceholderRef.current.style.display = "none";
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          fallbackRequestPending = false;
+        });
+    }, 1000);
     return () => {
       disposed = true;
+      window.clearInterval(fallbackTimer);
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
       if (browserSocketRef.current) browserSocketRef.current.close();
       browserSocketRef.current = null;
       if (browserStreamObjectUrlRef.current) URL.revokeObjectURL(browserStreamObjectUrlRef.current);
       browserStreamObjectUrlRef.current = null;
+      if (browserScreenshotRef.current) {
+        browserScreenshotRef.current.removeAttribute("src");
+        browserScreenshotRef.current.style.display = "none";
+      }
+      if (browserScreenshotPlaceholderRef.current) {
+        browserScreenshotPlaceholderRef.current.style.display = "flex";
+      }
     };
   // The stream intentionally follows the active browser tab.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceTab, activeChatId, activeBrowserTabId]);
+  }, [workspaceTab, activeChatId, activeBrowserTabId, browserRealtime, browserFps, browserDefaultViewport]);
 
   useEffect(() => {
     if (workspaceTab !== "monitor") return;
@@ -2295,6 +2391,10 @@ export default function AppShell() {
           draftInput?: string;
           favoriteModelKeys?: string[];
           modelAliases?: Record<string, string>;
+          browserRealtime?: boolean;
+          browserFps?: number;
+          browserViewportWidth?: number;
+          browserViewportHeight?: number;
         };
       } | null) => {
         if (cancelled || !data?.settings) return;
@@ -2327,6 +2427,19 @@ export default function AppShell() {
         if (Array.isArray(settings.favoriteModelKeys)) {
           setFavoriteModelKeys(settings.favoriteModelKeys);
         }
+        if (typeof settings.browserRealtime === "boolean") {
+          setBrowserRealtime(settings.browserRealtime);
+        }
+        if (typeof settings.browserFps === "number") {
+          setBrowserFps(Math.max(1, Math.min(30, Math.round(settings.browserFps))));
+        }
+        const defaultWidth = typeof settings.browserViewportWidth === "number"
+          ? Math.max(320, Math.min(2560, Math.round(settings.browserViewportWidth)))
+          : 1280;
+        const defaultHeight = typeof settings.browserViewportHeight === "number"
+          ? Math.max(240, Math.min(1600, Math.round(settings.browserViewportHeight)))
+          : 800;
+        setBrowserDefaultViewport({ width: defaultWidth, height: defaultHeight });
         const serverDraft = typeof settings.draftInput === "string"
           ? settings.draftInput
           : "";
@@ -2416,6 +2529,27 @@ export default function AppShell() {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ subagentModelId: nextId }),
+    });
+  }
+
+  function updateBrowserSettings(next: {
+    browserRealtime?: boolean;
+    browserFps?: number;
+    browserViewportWidth?: number;
+    browserViewportHeight?: number;
+  }) {
+    if (next.browserRealtime !== undefined) setBrowserRealtime(next.browserRealtime);
+    if (next.browserFps !== undefined) setBrowserFps(next.browserFps);
+    if (next.browserViewportWidth !== undefined || next.browserViewportHeight !== undefined) {
+      setBrowserDefaultViewport((current) => ({
+        width: next.browserViewportWidth ?? current.width,
+        height: next.browserViewportHeight ?? current.height,
+      }));
+    }
+    void fetch("/api/preferences", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(next),
     });
   }
 
@@ -3214,7 +3348,12 @@ export default function AppShell() {
       agentId,
       modelId,
       modelParams,
-      queuedMessages: queuedMessages.map(({ id, text }) => ({ id, text })),
+      queuedMessages: queuedMessages.map(({ id, text, referenceText, references }) => ({
+        id,
+        text,
+        ...(referenceText ? { referenceText } : {}),
+        ...(references?.length ? { references } : {}),
+      })),
       workspaces,
       browserContext: normalizeBrowserContext(
         {
@@ -3288,7 +3427,12 @@ export default function AppShell() {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          queuedMessages: queuedMessages.map(({ id, text }) => ({ id, text })),
+          queuedMessages: queuedMessages.map(({ id, text, referenceText, references }) => ({
+            id,
+            text,
+            ...(referenceText ? { referenceText } : {}),
+            ...(references?.length ? { references } : {}),
+          })),
         }),
       });
     }, 0);
@@ -3450,7 +3594,12 @@ export default function AppShell() {
       agentId: undefined,
       modelId: stateRef.current.modelId,
       modelParams: stateRef.current.modelParams,
-      queuedMessages: stateRef.current.queuedMessages.map(({ id, text }) => ({ id, text })),
+      queuedMessages: stateRef.current.queuedMessages.map(({ id, text, referenceText, references }) => ({
+        id,
+        text,
+        ...(referenceText ? { referenceText } : {}),
+        ...(references?.length ? { references } : {}),
+      })),
       workspaces: [],
       browserContext: normalizeBrowserContext(data.chat.browserContext, data.chat.id),
       sessionState: {
@@ -3863,12 +4012,16 @@ export default function AppShell() {
         id: `q-${Date.now()}-${Math.random().toString(36).slice(2)}`,
         text,
         files,
+        ...(referenceText.trim() ? { referenceText: referenceText.trim() } : {}),
         ...(references.length ? { references: [...references] } : {}),
+        ...(restoredAttachments.length ? { storedAttachments: [...restoredAttachments] } : {}),
       },
     ]);
     setInput("");
+    setReferenceText("");
     setReferences([]);
     setPendingFiles([]);
+    setRestoredAttachments([]);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
@@ -3887,10 +4040,11 @@ export default function AppShell() {
         message.text,
         message.files,
         true,
-        undefined,
+        message.referenceText,
         message.references,
         message.id,
         () => setQueuedMessages((current) => current.filter((item) => item.id !== message.id)),
+        message.storedAttachments,
       )
         .finally(() => {
           queuedSendRef.current.delete(message.id);
@@ -3902,8 +4056,10 @@ export default function AppShell() {
   function editQueuedMessage(message: QueuedMessage) {
     setQueuedMessages((current) => current.filter((item) => item.id !== message.id));
     setInput(message.text);
+    setReferenceText(message.referenceText ?? "");
     setReferences(message.references ?? []);
     setPendingFiles(message.files);
+    setRestoredAttachments(message.storedAttachments ?? []);
     if (fileInputRef.current) fileInputRef.current.value = "";
     window.setTimeout(() => textareaRef.current?.focus(), 0);
   }
@@ -4013,14 +4169,24 @@ export default function AppShell() {
     const referencesToSend = referencesOverride ?? references;
     const storedAttachmentsToSend = storedAttachmentsOverride ?? restoredAttachments;
     const isOverride = textOverride !== undefined;
+    const hasComposerContent =
+      Boolean(text) ||
+      filesToSend.length > 0 ||
+      storedAttachmentsToSend.length > 0 ||
+      referencesToSend.length > 0 ||
+      Boolean((referenceTextOverride ?? referenceText).trim());
     if (
       (pendingQuestionIdRef.current && !isOverride) ||
-      (!text && !filesToSend.length && !storedAttachmentsToSend.length) ||
+      (!hasComposerContent) ||
       (busy && force === false && !isOverride)
     ) {
-      if (busy && !isOverride && (text || filesToSend.length)) {
+      if (busy && !isOverride && hasComposerContent) {
         queueCurrentMessage(text, filesToSend);
       }
+      return;
+    }
+    if (!modelId.trim()) {
+      toast.error("Select a model first");
       return;
     }
 
@@ -4812,13 +4978,25 @@ export default function AppShell() {
   }
 
   const canSend = Boolean(input.trim() || pendingFiles.length);
+  const hasConnectedProvider = Boolean(
+    status?.cursorSdkConfigured ||
+    status?.providers?.some((provider) => provider.enabled && provider.hasSecret),
+  );
+  const providerSetupRequired = modelsLoaded && status !== null && !hasConnectedProvider;
 
   function handleComposerInputChange(value: string, cursorPosition: number) {
+    const previousValue = previousComposerInputRef.current;
+    previousComposerInputRef.current = value;
     setInput(value);
     if (referenceAutocompleteDismissedRef.current) {
+      const addedAtMention =
+        (value.match(/@/g) || []).length > (previousValue.match(/@/g) || []).length ||
+        (value.endsWith("@") && !previousValue.endsWith("@"));
+      if (!addedAtMention) {
+        setReferenceMenu(null);
+        return;
+      }
       referenceAutocompleteDismissedRef.current = false;
-      setReferenceMenu(null);
-      return;
     }
     const beforeCursor = value.slice(0, cursorPosition);
     const match = beforeCursor.match(/(?:^|\s)@([^\n]*)$/);
@@ -5008,9 +5186,36 @@ export default function AppShell() {
           >
             <GripVertical className="size-3.5" aria-hidden="true" />
           </span>
-          <span className="min-w-0 flex-1 truncate text-muted-foreground">
-            {index + 1}. {message.text || `Attached ${message.files.length} file${message.files.length === 1 ? "" : "s"}`}
-          </span>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-muted-foreground">
+              {index + 1}. {message.text || `Attached ${message.files.length} file${message.files.length === 1 ? "" : "s"}`}
+            </p>
+            {message.referenceText || message.references?.length || message.storedAttachments?.length ? (
+              <div className="mt-1 flex min-w-0 flex-wrap gap-1 text-[10px] text-muted-foreground/80">
+                {message.referenceText ? (
+                  <span className="max-w-full truncate rounded border border-primary/20 bg-primary/[0.06] px-1.5 py-0.5">
+                    Referenced: {message.referenceText}
+                  </span>
+                ) : null}
+                {message.references?.map((reference) => (
+                  <span
+                    key={`${reference.kind}-${reference.id}`}
+                    className="max-w-full truncate rounded border border-border/50 bg-muted/30 px-1.5 py-0.5"
+                  >
+                    @{reference.label}
+                  </span>
+                ))}
+                {message.storedAttachments?.map((attachment) => (
+                  <span
+                    key={attachment.id}
+                    className="max-w-full truncate rounded border border-border/50 bg-muted/30 px-1.5 py-0.5"
+                  >
+                    {attachment.name}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </div>
           <Button type="button" size="xs" variant="ghost" className="h-7 shrink-0 px-2 text-xs" onClick={() => sendQueuedMessage(message)}>
             Send now
           </Button>
@@ -5025,7 +5230,21 @@ export default function AppShell() {
     </div>
   ) : null;
 
-  const composer = (
+  const composer = providerSetupRequired ? (
+    <button
+      type="button"
+      className="flex w-full items-center justify-between gap-4 rounded-3xl border border-dashed border-primary/40 bg-primary/[0.06] px-5 py-4 text-left shadow-[0_8px_40px_-12px_rgba(0,0,0,0.35)] transition-colors hover:border-primary/70 hover:bg-primary/10"
+      onClick={() => setProviderSetupOpen(true)}
+    >
+      <span className="min-w-0">
+        <span className="block text-sm font-medium">First add your provider</span>
+        <span className="mt-1 block text-xs text-muted-foreground">
+          Choose a provider and connect an API key or OAuth account to start chatting.
+        </span>
+      </span>
+      <KeyRound className="size-5 shrink-0 text-primary" />
+    </button>
+  ) : (
     <div className="w-full space-y-2">
       {queuedList}
       {referenceText ? (
@@ -5221,7 +5440,6 @@ export default function AppShell() {
                     event.stopPropagation();
                     removePendingFile(p.id);
                   }}
-                  disabled={busy}
                 >
                   <X className="size-3.5" />
                 </button>
@@ -5309,7 +5527,7 @@ export default function AppShell() {
                   size="sm"
                   className="h-7 max-w-[min(100vw-8rem,28rem)] gap-1.5 rounded-full px-2.5 text-xs font-normal hover:text-foreground"
                 >
-                  <ProviderLogo providerId={selectedModel.providerId} />
+                  {modelId ? <ProviderLogo providerId={selectedModel.providerId} /> : null}
                   <span className="min-w-0 truncate">
                     <span className="text-foreground">
                       {modelDisplayName(selectedModel)}
@@ -5456,8 +5674,30 @@ export default function AppShell() {
     </div>
   );
 
-  const sidebar = (
+  const sidebar = (mobile = false) => (
     <div className="flex h-full min-w-0 flex-col overflow-hidden">
+      <div
+        className={cn(
+          "relative shrink-0 items-center justify-center px-3 pb-2 pt-8",
+          mobile ? "flex md:hidden" : "hidden md:flex",
+        )}
+        aria-label="Metis AI"
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/hand-left.png"
+          alt=""
+          aria-hidden="true"
+          className="absolute left-0 h-9 w-auto max-w-[5rem] object-contain"
+        />
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/hand-right.png"
+          alt=""
+          aria-hidden="true"
+          className="absolute right-0 h-9 w-auto max-w-[5rem] object-contain"
+        />
+      </div>
       <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pt-3">
         <div className="space-y-0.5 pb-3">
           <button
@@ -5720,12 +5960,15 @@ export default function AppShell() {
         onToggleSidebar={() => setDesktopSidebarOpen((open) => !open)}
         onExport={exportCurrentChat}
       />
-      {desktopSidebarOpen ? (
+      {desktopSidebarMounted ? (
         <aside
-          className="relative hidden shrink-0 overflow-hidden border-r border-border/40 md:block"
+          className={cn(
+            "relative hidden shrink-0 overflow-hidden border-r border-border/40 md:block",
+            desktopSidebarOpen ? "sidebar-panel-enter" : "sidebar-panel-exit",
+          )}
           style={{ width: `${sidebarWidth}px` }}
         >
-          {sidebar}
+          {sidebar()}
           <SidebarResizeHandle
             width={sidebarWidth}
             onWidthChange={setSidebarWidth}
@@ -5743,7 +5986,7 @@ export default function AppShell() {
           <SheetHeader className="sr-only">
             <SheetTitle>Chats</SheetTitle>
           </SheetHeader>
-          {sidebar}
+          {sidebar(true)}
         </SheetContent>
       </Sheet>
 
@@ -5951,7 +6194,9 @@ export default function AppShell() {
                                     )}
                                     <span className="min-w-0">
                                       <span className="block truncate font-medium">{att.name}</span>
-                                      <span className="mt-0.5 block text-[11px] text-muted-foreground">Click to open</span>
+                                      <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                                        {att.size === undefined ? "Size unavailable" : formatMetricBytes(att.size)}
+                                      </span>
                                     </span>
                                   </button>
                                 );
@@ -6467,11 +6712,18 @@ export default function AppShell() {
                     if (!sendBrowserStreamAction("scroll", { deltaY: event.deltaY })) void performBrowserAction("scroll", { deltaY: event.deltaY });
                   }}
                 >
-                  {browserScreenshot ? (
-                    <img src={browserScreenshot} alt="Server browser page" className="block w-full cursor-crosshair" onClick={clickBrowserScreenshot} />
-                  ) : (
-                    <div className="flex h-full min-h-48 items-center justify-center px-6 text-center text-xs text-muted-foreground">Enter a URL to open it in the server browser. The page is rendered on the server, so localhost links refer to the server.</div>
-                  )}
+                  <img
+                    ref={browserScreenshotRef}
+                    alt="Server browser page"
+                    className="hidden w-full cursor-crosshair"
+                    onClick={clickBrowserScreenshot}
+                  />
+                  <div
+                    ref={browserScreenshotPlaceholderRef}
+                    className="flex h-full min-h-48 items-center justify-center px-6 text-center text-xs text-muted-foreground"
+                  >
+                    Enter a URL to open it in the server browser. The page is rendered on the server, so localhost links refer to the server.
+                  </div>
                 </div>
                 {browserError ? <div className="shrink-0 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1.5 text-xs text-destructive">{browserError}</div> : null}
               </>
@@ -6819,15 +7071,28 @@ export default function AppShell() {
         </DialogContent>
       </Dialog>
 
+      <ProviderSetupDialog
+        open={providerSetupOpen}
+        onOpenChange={setProviderSetupOpen}
+        onConnected={() => {
+          void refreshStatus();
+          void loadModels();
+        }}
+      />
+
       <SettingsPanel
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
         memories={memories}
-        status={status}
         notificationsEnabled={notificationsEnabled}
         onNotificationsEnabledChange={setNotificationsEnabled}
         soundCuesEnabled={soundCuesEnabled}
         onSoundCuesEnabledChange={setSoundCuesEnabled}
+        browserRealtime={browserRealtime}
+        browserFps={browserFps}
+        browserViewportWidth={browserDefaultViewport.width}
+        browserViewportHeight={browserDefaultViewport.height}
+        onBrowserSettingsChange={updateBrowserSettings}
         models={models}
         modelId={defaultModelId}
         onModelIdChange={updateDefaultModel}

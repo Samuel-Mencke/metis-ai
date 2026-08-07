@@ -1,4 +1,4 @@
-import { isAuthenticated } from "@/lib/auth";
+import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { getChat } from "@/lib/db-store";
 import { readUpload } from "@/lib/uploads";
 
@@ -13,7 +13,8 @@ export async function GET(req: Request, { params }: Params) {
   }
 
   const { chatId, name } = await params;
-  const chat = getChat(chatId);
+  const ownerId = await getAuthenticatedUserId(req) ?? undefined;
+  const chat = getChat(chatId, ownerId);
   if (!chat) {
     return Response.json({ error: "Not found" }, { status: 404 });
   }
@@ -23,7 +24,7 @@ export async function GET(req: Request, { params }: Params) {
     .flatMap((m) => m.attachments ?? [])
     .find((a) => a.storedName === storedName);
 
-  const buf = readUpload(chatId, storedName);
+  const buf = readUpload(chatId, storedName, ownerId);
   if (!buf) {
     return Response.json({ error: "File not found" }, { status: 404 });
   }

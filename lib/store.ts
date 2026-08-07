@@ -200,6 +200,10 @@ export type GlobalModelSettings = {
   draftInput?: string;
   favoriteModelKeys?: string[];
   modelAliases?: Record<string, string>;
+  browserRealtime?: boolean;
+  browserFps?: number;
+  browserViewportWidth?: number;
+  browserViewportHeight?: number;
 };
 
 function ensureDirs() {

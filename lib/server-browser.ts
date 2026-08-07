@@ -187,6 +187,21 @@ export async function captureBrowserFrame(ownerId: string, chatId: string, reque
   };
 }
 
+export async function setBrowserViewport(
+  ownerId: string,
+  chatId: string,
+  width: number,
+  height: number,
+) {
+  const state = await getSession(ownerId, chatId);
+  const nextWidth = Math.max(320, Math.min(2560, Math.round(width) || DEFAULT_VIEWPORT.width));
+  const nextHeight = Math.max(240, Math.min(1600, Math.round(height) || DEFAULT_VIEWPORT.height));
+  await Promise.all(
+    [...state.tabs.values()].map((page) => page.setViewportSize({ width: nextWidth, height: nextHeight })),
+  );
+  return { width: nextWidth, height: nextHeight };
+}
+
 export async function performBrowserAction(ownerId: string, chatId: string, action: BrowserAction): Promise<BrowserResult> {
   if (!ownerId || !chatId) throw new Error("Browser actions require an authenticated user and chat");
   const state = await getSession(ownerId, chatId);

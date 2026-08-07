@@ -96,7 +96,7 @@ export async function POST(req: Request) {
   }
   let stored = [];
   try {
-    stored = body.attachments?.length ? saveAttachments(chat.id, body.attachments).stored : [];
+    stored = body.attachments?.length ? saveAttachments(chat.id, body.attachments, userId).stored : [];
   } catch (error) {
     return Response.json({ error: String(error) }, { status: 400 });
   }

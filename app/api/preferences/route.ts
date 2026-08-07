@@ -28,6 +28,10 @@ export async function PATCH(req: Request) {
     draftInput?: unknown;
     favoriteModelKeys?: unknown;
     modelAliases?: unknown;
+    browserRealtime?: unknown;
+    browserFps?: unknown;
+    browserViewportWidth?: unknown;
+    browserViewportHeight?: unknown;
   };
   const userId = (await getAuthenticatedUserId(req)) ?? undefined;
   const current = getGlobalModelSettings(userId);
@@ -90,6 +94,20 @@ export async function PATCH(req: Request) {
           .map(([key, value]) => [key.trim().slice(0, 300), value.trim().slice(0, 120)]),
       )
     : undefined;
+  const browserRealtime =
+    typeof body.browserRealtime === "boolean" ? body.browserRealtime : undefined;
+  const browserFps =
+    typeof body.browserFps === "number" && Number.isFinite(body.browserFps)
+      ? Math.max(1, Math.min(30, Math.round(body.browserFps)))
+      : undefined;
+  const browserViewportWidth =
+    typeof body.browserViewportWidth === "number" && Number.isFinite(body.browserViewportWidth)
+      ? Math.max(320, Math.min(2560, Math.round(body.browserViewportWidth)))
+      : undefined;
+  const browserViewportHeight =
+    typeof body.browserViewportHeight === "number" && Number.isFinite(body.browserViewportHeight)
+      ? Math.max(240, Math.min(1600, Math.round(body.browserViewportHeight)))
+      : undefined;
   return Response.json({
     settings: saveGlobalModelSettings(
       {
@@ -102,6 +120,10 @@ export async function PATCH(req: Request) {
         ...(draftInput !== undefined ? { draftInput } : {}),
         ...(favoriteModelKeys !== undefined ? { favoriteModelKeys } : {}),
         ...(modelAliases !== undefined ? { modelAliases } : {}),
+        ...(browserRealtime !== undefined ? { browserRealtime } : {}),
+        ...(browserFps !== undefined ? { browserFps } : {}),
+        ...(browserViewportWidth !== undefined ? { browserViewportWidth } : {}),
+        ...(browserViewportHeight !== undefined ? { browserViewportHeight } : {}),
       },
       userId,
     ),

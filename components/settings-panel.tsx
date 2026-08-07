@@ -36,6 +36,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { ModelPicker } from "@/components/model-picker";
 import { ModelOptionsMenu } from "@/components/model-options-menu";
+import { ProviderLogo } from "@/components/provider-logo";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -46,20 +47,6 @@ import {
 } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import type { MemoryItem } from "@/components/memories-panel";
-
-type StatusPayload = {
-  authenticated: boolean;
-  cursorSdkConfigured: boolean;
-  mcp: { ok: boolean; url: string; detail: string };
-  providers?: Array<{
-    id: string;
-    providerKey: string;
-    label: string;
-    enabled: boolean;
-    hasSecret: boolean;
-    lastError?: string;
-  }>;
-};
 
 type ProviderDefinition = {
   key: string;
@@ -87,30 +74,9 @@ type ProviderConnection = {
   lastError?: string;
 };
 
-type ProviderConnectionGroup = "sdk" | "api-key";
-
-function isAgentProvider(provider?: ProviderDefinition) {
-  return Boolean(provider && (provider.kind.endsWith("-agent") || provider.key === "cursor"));
-}
-
-function providerSupportsGroup(provider: ProviderDefinition, group: ProviderConnectionGroup) {
-  if (group === "api-key") {
-    return provider.authTypes.includes("api_key") && !isAgentProvider(provider);
-  }
-  return isAgentProvider(provider) || provider.authTypes.some((authType) => authType !== "api_key");
-}
-
-function connectionGroup(
-  provider: ProviderDefinition | undefined,
-  authType: string,
-): ProviderConnectionGroup {
-  return authType === "api_key" && !isAgentProvider(provider) ? "api-key" : "sdk";
-}
-
-function preferredAuthType(provider: ProviderDefinition, group: ProviderConnectionGroup) {
-  if (group === "api-key" && provider.authTypes.includes("api_key")) return "api_key";
+function preferredAuthType(provider: ProviderDefinition) {
   return (
-    provider.authTypes.find((authType) => authType !== "api_key") ||
+    provider.authTypes.find((authType) => authType === "api_key") ||
     provider.authTypes[0] ||
     "api_key"
   );
@@ -131,6 +97,7 @@ type OAuthFlow = {
 type CustomSelectOption = {
   value: string;
   label: string;
+  providerLogo?: string;
 };
 
 function CustomSelect({
@@ -159,7 +126,12 @@ function CustomSelect({
           aria-label={ariaLabel}
           className={cn("h-9 min-w-0 justify-between gap-2 text-left font-normal", className)}
         >
-          <span className="min-w-0 truncate">{selected?.label || "Select…"}</span>
+          <span className="flex min-w-0 items-center gap-2">
+            {selected?.providerLogo ? (
+              <ProviderLogo providerId={selected.providerLogo} className="size-4 shrink-0" />
+            ) : null}
+            <span className="min-w-0 truncate">{selected?.label || "Select…"}</span>
+          </span>
           <ChevronDown className="size-3.5 shrink-0 opacity-60" />
         </Button>
       </DropdownMenuTrigger>
@@ -171,6 +143,9 @@ function CustomSelect({
             className="gap-2"
           >
             <Check className={cn("size-3.5 shrink-0", option.value === value ? "opacity-100" : "opacity-0")} />
+            {option.providerLogo ? (
+              <ProviderLogo providerId={option.providerLogo} className="size-4 shrink-0" />
+            ) : null}
             <span className="truncate">{option.label}</span>
           </DropdownMenuItem>
         ))}
@@ -221,6 +196,18 @@ const emptyMcpDraft: McpDraft = {
   headers: "",
 };
 
+const API_KEY_URLS: Record<string, string> = {
+  cursor: "https://cursor.com/dashboard/api",
+  openai: "https://platform.openai.com/api-keys",
+  anthropic: "https://console.anthropic.com/settings/keys",
+  google: "https://aistudio.google.com/app/apikey",
+  xai: "https://console.x.ai/",
+  openrouter: "https://openrouter.ai/keys",
+  codex: "https://platform.openai.com/api-keys",
+  "claude-code": "https://console.anthropic.com/settings/keys",
+  antigravity: "https://aistudio.google.com/app/apikey",
+};
+
 export type ModelParamValue = {
   value: string;
   displayName?: string;
@@ -261,11 +248,20 @@ type Props = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   memories: MemoryItem[];
-  status: StatusPayload | null;
   notificationsEnabled: boolean;
   onNotificationsEnabledChange: (enabled: boolean) => void;
   soundCuesEnabled: boolean;
   onSoundCuesEnabledChange: (enabled: boolean) => void;
+  browserRealtime: boolean;
+  browserFps: number;
+  browserViewportWidth: number;
+  browserViewportHeight: number;
+  onBrowserSettingsChange: (settings: {
+    browserRealtime?: boolean;
+    browserFps?: number;
+    browserViewportWidth?: number;
+    browserViewportHeight?: number;
+  }) => void;
   models: ModelInfo[];
   modelId: string;
   onModelIdChange: (modelId: string) => void;
@@ -292,11 +288,15 @@ export function SettingsPanel({
   open,
   onOpenChange,
   memories,
-  status,
   notificationsEnabled,
   onNotificationsEnabledChange,
   soundCuesEnabled,
   onSoundCuesEnabledChange,
+  browserRealtime,
+  browserFps,
+  browserViewportWidth,
+  browserViewportHeight,
+  onBrowserSettingsChange,
   models,
   modelId,
   onModelIdChange,
@@ -328,7 +328,6 @@ export function SettingsPanel({
   const [providerDefinitions, setProviderDefinitions] = useState<ProviderDefinition[]>([]);
   const [providerConnections, setProviderConnections] = useState<ProviderConnection[]>([]);
   const [providersLoaded, setProvidersLoaded] = useState(false);
-  const [providerGroup, setProviderGroup] = useState<ProviderConnectionGroup>("api-key");
   const [providerDraft, setProviderDraft] = useState({
     id: "",
     providerKey: "openai",
@@ -400,7 +399,7 @@ export function SettingsPanel({
           return {
             ...current,
             providerKey: first.key,
-            authType: first.authTypes[0] || "api_key",
+            authType: preferredAuthType(first),
             baseUrl: first.defaultBaseUrl || "",
           };
         });
@@ -573,13 +572,12 @@ export function SettingsPanel({
     toast.success("MCP server deleted");
   }
 
-  function selectProvider(providerKey: string, group = providerGroup) {
+  function selectProvider(providerKey: string) {
     const definition = providerDefinitions.find((provider) => provider.key === providerKey);
-    setProviderGroup(group);
     setProviderDraft((current) => ({
       ...current,
       providerKey,
-      authType: definition ? preferredAuthType(definition, group) : "api_key",
+      authType: definition ? preferredAuthType(definition) : "api_key",
       baseUrl: definition?.defaultBaseUrl || "",
       slug: current.id ? current.slug : `${providerKey}-main`,
       label: current.id ? current.label : definition?.name || providerKey,
@@ -589,15 +587,8 @@ export function SettingsPanel({
     }));
   }
 
-  function selectProviderGroup(group: ProviderConnectionGroup) {
-    const first = providerDefinitions.find((provider) => providerSupportsGroup(provider, group));
-    if (first) selectProvider(first.key, group);
-    else setProviderGroup(group);
-  }
-
   function editProviderConnection(connection: ProviderConnection) {
     const definition = providerDefinitions.find((provider) => provider.key === connection.providerKey);
-    setProviderGroup(connectionGroup(definition, connection.authType));
     setProviderDraft({
       id: connection.id,
       providerKey: connection.providerKey,
@@ -853,41 +844,12 @@ export function SettingsPanel({
     reader.readAsDataURL(file);
   }
 
-  const selectableProviders = providerDefinitions.filter((provider) =>
-    providerSupportsGroup(provider, providerGroup),
-  );
-  const providerConnectionSections: Array<{
-    key: ProviderConnectionGroup;
-    label: string;
-    description: string;
-    icon: typeof PlugZap;
-    connections: ProviderConnection[];
-  }> = [
-    {
-      key: "sdk",
-      label: "SDK / CLI / OAuth",
-      description: "Cursor SDK, Codex, Claude Code, Antigravity, OAuth and local connections.",
-      icon: PlugZap,
-      connections: providerConnections.filter((connection) =>
-        connectionGroup(
-          providerDefinitions.find((provider) => provider.key === connection.providerKey),
-          connection.authType,
-        ) === "sdk"
-      ),
-    },
-    {
-      key: "api-key",
-      label: "API keys",
-      description: "Direct API-key connections for hosted AI providers.",
-      icon: KeyRound,
-      connections: providerConnections.filter((connection) =>
-        connectionGroup(
-          providerDefinitions.find((provider) => provider.key === connection.providerKey),
-          connection.authType,
-        ) === "api-key"
-      ),
-    },
-  ];
+  const selectableProviders = providerDefinitions;
+  const sortedProviderConnections = [...providerConnections].sort((a, b) => {
+    const aName = providerDefinitions.find((provider) => provider.key === a.providerKey)?.name || a.providerKey;
+    const bName = providerDefinitions.find((provider) => provider.key === b.providerKey)?.name || b.providerKey;
+    return `${aName} ${a.label}`.localeCompare(`${bName} ${b.label}`);
+  });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -912,7 +874,6 @@ export function SettingsPanel({
               options={[
                 { value: "general", label: "General" },
                 { value: "archived", label: "Archived chats" },
-                { value: "connection", label: "Connection" },
                 { value: "providers", label: "Providers" },
                 { value: "mcp", label: "MCP Servers" },
                 { value: "memories", label: `Memories (${memories.length})` },
@@ -928,10 +889,6 @@ export function SettingsPanel({
             <TabsTrigger value="archived" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
               <Archive data-icon="inline-start" />
               Archived chats
-            </TabsTrigger>
-            <TabsTrigger value="connection" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
-              <PlugZap data-icon="inline-start" />
-              Connection
             </TabsTrigger>
             <TabsTrigger value="providers" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
               <KeyRound data-icon="inline-start" />
@@ -1039,6 +996,70 @@ export function SettingsPanel({
                     ? `Custom sound: ${finishSound.name}`
                     : "No custom sound uploaded. The default chime will be used."}
                 </p>
+                <div className="border-t border-border/60 pt-4">
+                  <h3 className="text-sm font-medium">Browser stream</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Configure the live browser preview, frame rate, and default viewport.
+                  </p>
+                  <div className="mt-3 flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Realtime updates</p>
+                      <p className="mt-1 text-xs text-muted-foreground/70">
+                        When off, the preview updates only after browser actions.
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant={browserRealtime ? "default" : "outline"}
+                      aria-pressed={browserRealtime}
+                      onClick={() => onBrowserSettingsChange({ browserRealtime: !browserRealtime })}
+                      className="shrink-0"
+                    >
+                      {browserRealtime ? "On" : "Action only"}
+                    </Button>
+                  </div>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                    <label className="grid gap-1 text-xs text-muted-foreground">
+                      FPS
+                      <Input
+                        type="number"
+                        min={1}
+                        max={30}
+                        value={browserFps}
+                        onChange={(event) => onBrowserSettingsChange({
+                          browserFps: Math.max(1, Math.min(30, Number(event.target.value) || 10)),
+                        })}
+                        aria-label="Browser stream FPS"
+                      />
+                    </label>
+                    <label className="grid gap-1 text-xs text-muted-foreground">
+                      Width
+                      <Input
+                        type="number"
+                        min={320}
+                        max={2560}
+                        value={browserViewportWidth}
+                        onChange={(event) => onBrowserSettingsChange({
+                          browserViewportWidth: Math.max(320, Math.min(2560, Number(event.target.value) || 1280)),
+                        })}
+                        aria-label="Browser default width"
+                      />
+                    </label>
+                    <label className="grid gap-1 text-xs text-muted-foreground">
+                      Height
+                      <Input
+                        type="number"
+                        min={240}
+                        max={1600}
+                        value={browserViewportHeight}
+                        onChange={(event) => onBrowserSettingsChange({
+                          browserViewportHeight: Math.max(240, Math.min(1600, Number(event.target.value) || 800)),
+                        })}
+                        aria-label="Browser default height"
+                      />
+                    </label>
+                  </div>
+                </div>
                 <div className="border-t border-border/60 pt-4">
                   <h3 className="text-sm font-medium">Default model</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
@@ -1166,51 +1187,8 @@ export function SettingsPanel({
                   <h3 className="text-sm font-medium">AI providers and connections</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
                     Credentials are stored encrypted on the server and are never returned to the browser.
-                    Choose the connection family first, then configure the provider.
+                    Configure API keys, OAuth, SDK, CLI, and local connections together in one list.
                   </p>
-                </div>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  {([
-                    {
-                      key: "sdk" as const,
-                      label: "SDK / CLI / OAuth",
-                      description: "Agent backends and login-based connections",
-                      icon: PlugZap,
-                    },
-                    {
-                      key: "api-key" as const,
-                      label: "API key",
-                      description: "Direct provider API access",
-                      icon: KeyRound,
-                    },
-                  ]).map((group) => {
-                    const Icon = group.icon;
-                    const active = providerGroup === group.key;
-                    return (
-                      <button
-                        key={group.key}
-                        type="button"
-                        className={cn(
-                          "flex items-start gap-3 rounded-xl border p-3 text-left transition-colors",
-                          active
-                            ? "border-primary/50 bg-primary/[0.08] text-foreground"
-                            : "border-border/60 bg-card/30 text-muted-foreground hover:border-primary/30 hover:bg-muted/40",
-                        )}
-                        onClick={() => selectProviderGroup(group.key)}
-                      >
-                        <span className={cn(
-                          "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg",
-                          active ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground",
-                        )}>
-                          <Icon className="size-4" />
-                        </span>
-                        <span className="min-w-0">
-                          <span className="block text-sm font-medium">{group.label}</span>
-                          <span className="mt-0.5 block text-xs text-muted-foreground">{group.description}</span>
-                        </span>
-                      </button>
-                    );
-                  })}
                 </div>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <CustomSelect
@@ -1221,6 +1199,7 @@ export function SettingsPanel({
                     options={selectableProviders.map((provider) => ({
                       value: provider.key,
                       label: provider.name,
+                      providerLogo: provider.key,
                     }))}
                   />
                   <CustomSelect
@@ -1290,6 +1269,16 @@ export function SettingsPanel({
                     aria-label="Provider credential"
                     autoComplete="new-password"
                   />
+                ) : null}
+                {providerDraft.authType === "api_key" && API_KEY_URLS[providerDraft.providerKey] ? (
+                  <a
+                    href={API_KEY_URLS[providerDraft.providerKey]}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs text-primary underline underline-offset-2"
+                  >
+                    Get {providerDefinitions.find((provider) => provider.key === providerDraft.providerKey)?.name || "provider"} API key
+                  </a>
                 ) : null}
                 {providerDefinitions.find((provider) => provider.key === providerDraft.providerKey)?.setupHint ? (
                   <p className="text-xs text-muted-foreground">
@@ -1389,110 +1378,35 @@ export function SettingsPanel({
                     No provider connections configured yet.
                   </div>
                 ) : (
-                  <div className="space-y-5">
-                    {providerConnectionSections.map((section) => {
-                      const Icon = section.icon;
+                  <ul className="flex flex-col gap-2">
+                    {sortedProviderConnections.map((connection) => {
+                      const definition = providerDefinitions.find((provider) => provider.key === connection.providerKey);
                       return (
-                        <section key={section.key} className="space-y-2">
-                          <div className="flex items-start gap-2 border-b border-border/50 pb-2">
-                            <Icon className="mt-0.5 size-4 shrink-0 text-primary" />
-                            <div className="min-w-0">
-                              <h4 className="text-sm font-medium">{section.label}</h4>
-                              <p className="text-xs text-muted-foreground">{section.description}</p>
-                            </div>
-                          </div>
-                          {section.connections.length ? (
-                            <ul className="flex flex-col gap-2">
-                              {section.connections.map((connection) => {
-                                const definition = providerDefinitions.find((provider) => provider.key === connection.providerKey);
-                                return (
-                                  <li key={connection.id} className="flex flex-wrap items-center gap-2 rounded-lg border border-border/60 bg-card/40 p-3">
-                                    <div className="min-w-0 flex-1">
-                                      <p className="truncate text-sm font-medium">
-                                        {connection.label}
-                                        <span className="ml-2 text-xs font-normal text-muted-foreground">
-                                          {definition?.name || connection.providerKey}
-                                        </span>
-                                      </p>
-                                      <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                                        {connection.slug} · {connection.authType} · {connection.enabled ? "enabled" : "disabled"}
-                                        {connection.hasSecret ? " · credential set" : ""}
-                                      </p>
-                                      {connection.lastError ? (
-                                        <p className="mt-1 text-xs text-red-400">{connection.lastError}</p>
-                                      ) : null}
-                                    </div>
-                                    <Button type="button" size="sm" variant={connection.enabled ? "outline" : "default"} onClick={() => void toggleProviderConnection(connection)}>
-                                      {connection.enabled ? "Disable" : "Enable"}
-                                    </Button>
-                                    <Button type="button" size="icon-sm" variant="ghost" aria-label={`Test ${connection.label}`} onClick={() => void testProviderConnection(connection)}>
-                                      <PlugZap className="size-3.5" />
-                                    </Button>
-                                    <Button type="button" size="icon-sm" variant="ghost" aria-label={`Refresh models for ${connection.label}`} onClick={() => void discoverProviderModels(connection)}>
-                                      <RefreshCw className="size-3.5" />
-                                    </Button>
-                                    <Button type="button" size="sm" variant="ghost" onClick={() => editProviderConnection(connection)}>
-                                      Edit
-                                    </Button>
-                                    <Button type="button" size="icon-sm" variant="ghost" aria-label={`Delete ${connection.label}`} onClick={() => void deleteProviderConnection(connection)}>
-                                      <Trash2 className="size-3.5" />
-                                    </Button>
-                                  </li>
-                                );
-                              })}
-                            </ul>
-                          ) : (
-                            <p className="rounded-lg border border-dashed border-border/60 px-3 py-4 text-xs text-muted-foreground">
-                              No connections in this category.
+                        <li key={connection.id} className="flex flex-wrap items-center gap-3 rounded-lg border border-border/60 bg-card/40 p-3">
+                          <ProviderLogo providerId={connection.providerKey} className="size-5" />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-medium">
+                              {connection.label}
+                              <span className="ml-2 text-xs font-normal text-muted-foreground">{definition?.name || connection.providerKey}</span>
                             </p>
-                          )}
-                        </section>
+                            <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                              {connection.slug} · {connection.authType} · {connection.enabled ? "enabled" : "disabled"}
+                              {connection.hasSecret ? " · credential set" : ""}
+                            </p>
+                            {connection.lastError ? <p className="mt-1 text-xs text-red-400">{connection.lastError}</p> : null}
+                          </div>
+                          <Button type="button" size="sm" variant={connection.enabled ? "outline" : "default"} onClick={() => void toggleProviderConnection(connection)}>
+                            {connection.enabled ? "Disable" : "Enable"}
+                          </Button>
+                          <Button type="button" size="icon-sm" variant="ghost" aria-label={`Test ${connection.label}`} onClick={() => void testProviderConnection(connection)}><PlugZap className="size-3.5" /></Button>
+                          <Button type="button" size="icon-sm" variant="ghost" aria-label={`Refresh models for ${connection.label}`} onClick={() => void discoverProviderModels(connection)}><RefreshCw className="size-3.5" /></Button>
+                          <Button type="button" size="sm" variant="ghost" onClick={() => editProviderConnection(connection)}>Edit</Button>
+                          <Button type="button" size="icon-sm" variant="ghost" aria-label={`Delete ${connection.label}`} onClick={() => void deleteProviderConnection(connection)}><Trash2 className="size-3.5" /></Button>
+                        </li>
                       );
                     })}
-                  </div>
+                  </ul>
                 )}
-              </section>
-            </TabsContent>
-
-            <TabsContent value="connection" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
-              <section className="flex flex-col gap-3">
-                <div>
-                  <h3 className="text-sm font-medium">Connection status</h3>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Check the services used by this chat.
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Badge
-                    variant="outline"
-                    className={cn(
-                      "text-xs",
-                      status?.mcp.ok
-                        ? "border-emerald-500/40 text-emerald-400"
-                        : "border-red-500/40 text-red-400",
-                    )}
-                    title={status?.mcp.detail}
-                  >
-                    MCP {status?.mcp.ok ? "ok" : "down"}
-                  </Badge>
-                  <Badge
-                    variant="outline"
-                    className={cn(
-                      "text-xs",
-                      status?.cursorSdkConfigured
-                        ? "border-emerald-500/40 text-emerald-400"
-                        : "border-amber-500/40 text-amber-400",
-                    )}
-                  >
-                    Cursor SDK {status?.cursorSdkConfigured ? "configured" : "not configured"}
-                  </Badge>
-                </div>
-                {status?.mcp.url ? (
-                  <p className="break-all text-xs text-muted-foreground">
-                    {status.mcp.url}
-                    {status.mcp.detail ? ` · ${status.mcp.detail}` : ""}
-                  </p>
-                ) : null}
               </section>
             </TabsContent>
 

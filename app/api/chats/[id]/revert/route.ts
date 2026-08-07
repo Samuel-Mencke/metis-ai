@@ -34,7 +34,7 @@ export async function POST(req: Request, { params }: Params) {
   if (index < 0) return Response.json({ error: "Message not found" }, { status: 404 });
 
   const rollbackStart = body.keepMessage === true ? index + 1 : index;
-  const result = revertMessages(chat.messages, rollbackStart, getAgentCwd());
+  const result = revertMessages(chat.messages, rollbackStart, getAgentCwd(ownerId));
   chat.messages = chat.messages.slice(0, body.keepMessage === true ? index + 1 : index);
   delete chat.agentId;
   if (result.canvasUpdated) {

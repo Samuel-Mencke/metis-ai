@@ -422,8 +422,41 @@
   }
 }
 
+@keyframes sidebar-panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(-18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.sidebar-panel-enter {
+  animation: sidebar-panel-in 180ms ease-out both;
+}
+
+.sidebar-panel-exit {
+  animation: sidebar-panel-out 180ms ease-in both;
+  pointer-events: none;
+}
+
+@keyframes sidebar-panel-out {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(-18px);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .streaming-token-fade,
+  .sidebar-panel-enter,
+  .sidebar-panel-exit,
   .workspace-panel-enter,
   .workspace-panel-exit {
     animation: none;

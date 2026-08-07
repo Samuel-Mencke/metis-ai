@@ -95,13 +95,13 @@ export async function POST(req: Request) {
           (attachment.kind === "image" || attachment.kind === "file") &&
           typeof attachment.storedName === "string" &&
           typeof attachment.size === "number" &&
-          Boolean(resolveUploadPath(chatId, attachment.storedName)),
+          Boolean(resolveUploadPath(chatId, attachment.storedName, ownerId)),
         )
         .slice(0, 8)
     : [];
   let stored = [];
   try {
-    stored = attachments.length ? saveAttachments(chatId, attachments).stored : [];
+    stored = attachments.length ? saveAttachments(chatId, attachments, ownerId).stored : [];
   } catch (error) {
     return Response.json({ error: String(error) }, { status: 400 });
   }
