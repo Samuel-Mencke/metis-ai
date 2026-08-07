@@ -155,6 +155,7 @@ function MetricSparkline({ values, color }: { values: number[]; color: string })
 type AgentQuestion = {
   id: string;
   question: string;
+  multiple?: boolean;
   options?: Array<{ label: string; value?: string }>;
 };
 
@@ -162,6 +163,18 @@ type PendingQuestion = {
   questionId: string;
   questions: AgentQuestion[];
 };
+
+function selectedQuestionValues(answer: string): string[] {
+  if (!answer) return [];
+  try {
+    const parsed = JSON.parse(answer);
+    return Array.isArray(parsed)
+      ? parsed.filter((value): value is string => typeof value === "string")
+      : [answer];
+  } catch {
+    return [answer];
+  }
+}
 
 type ToolPart = {
   id: string;
@@ -4595,6 +4608,7 @@ export default function AppShell() {
                 const value = item as {
                   id?: unknown;
                   question?: unknown;
+                  multiple?: unknown;
                   options?: unknown;
                 };
                 if (typeof value.question !== "string") return null;
@@ -4619,6 +4633,7 @@ export default function AppShell() {
                       ? value.id
                       : `question-${Math.random().toString(36).slice(2)}`,
                   question: value.question,
+                  ...(value.multiple === true ? { multiple: true } : {}),
                   ...(options?.length ? { options } : {}),
                 };
               })
@@ -5698,6 +5713,9 @@ export default function AppShell() {
           aria-hidden="true"
           className="absolute right-0 h-9 w-auto max-w-[5rem] object-contain"
         />
+        <span className="z-10 px-10 text-lg font-semibold tracking-[0.18em] text-foreground/90 [font-family:Georgia,serif]">
+          Metis
+        </span>
       </div>
       <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pt-3">
         <div className="space-y-0.5 pb-3">
@@ -6427,28 +6445,47 @@ export default function AppShell() {
                     {pendingQuestion.questions.map((question, index) => {
                       const customSelected = questionCustomActive[index] === true;
                       const selected = questionAnswers[index];
+                      const selectedValues = selectedQuestionValues(selected);
                       return (
                         <div key={question.id} className="space-y-2">
                           <p className="text-sm leading-relaxed">
                             {index + 1}. {question.question}
                           </p>
+                          {question.multiple ? (
+                            <p className="text-xs text-muted-foreground">
+                              Select one or more options.
+                            </p>
+                          ) : null}
                           <div className="flex flex-wrap gap-2">
                             {(question.options ?? []).map((option) => {
                               const value = option.value || option.label;
+                              const isSelected = question.multiple
+                                ? selectedValues.includes(value)
+                                : selected === value;
                               return (
                                 <button
                                   key={`${question.id}-${value}`}
                                   type="button"
                                   className={cn(
                                     "max-w-full rounded-xl border px-3 py-2 text-left text-sm whitespace-normal break-words transition-colors",
-                                    !customSelected && selected === value
+                                    !customSelected && isSelected
                                       ? "border-primary bg-primary/15 text-foreground"
                                       : "border-border/60 bg-background/40 text-muted-foreground hover:border-primary/50 hover:text-foreground",
                                   )}
                                   onClick={() => {
                                     setQuestionAnswers((answers) => {
                                       const next = [...answers];
-                                      next[index] = value;
+                                      if (question.multiple) {
+                                        const values = selectedQuestionValues(next[index]);
+                                        const nextValues = values.includes(value)
+                                          ? values.filter((item) => item !== value)
+                                          : [...values, value];
+                                        next[index] = nextValues.length
+                                          ? JSON.stringify(nextValues)
+                                          : "";
+                                      } else {
+                                        next[index] = value;
+                                      }
                                       return next;
                                     });
                                     setQuestionCustomActive((active) => {
@@ -7075,6 +7112,10 @@ export default function AppShell() {
         onConnected={() => {
           void refreshStatus();
           void loadModels();
+        }}
+        onStartChat={() => {
+          openDraft();
+          window.requestAnimationFrame(() => textareaRef.current?.focus());
         }}
       />
 

@@ -101,6 +101,7 @@ export type PendingChatQuestion = {
   questions: Array<{
     id: string;
     question: string;
+    multiple?: boolean;
     options?: Array<{ label: string; value?: string }>;
   }>;
 };
@@ -479,6 +480,7 @@ export function updateChat(
       .map((question) => ({
         id: question.id.slice(0, 200),
         question: question.question.slice(0, 4_000),
+        ...(question.multiple ? { multiple: true } : {}),
         ...(question.options
           ? {
               options: question.options

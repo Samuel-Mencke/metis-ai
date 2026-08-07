@@ -7,13 +7,14 @@ export function questionLimits() {
 }
 
 export function createPendingQuestion(
-  input: Array<{ question: string; options?: Array<QuestionOption | string> }>,
+  input: Array<{ question: string; multiple?: boolean; options?: Array<QuestionOption | string> }>,
   chatId: string,
   userId?: string,
 ) {
   const questions: AgentQuestion[] = input.slice(0, 8).map((item) => ({
     id: randomUUID(),
     question: item.question.trim().slice(0, 2_000),
+    ...(item.multiple ? { multiple: true } : {}),
     ...(item.options?.length ? { options: item.options.slice(0, 12).map((option) =>
       typeof option === "string" ? { label: option.slice(0, 500), value: option.slice(0, 500) } : option,
     ) } : {}),

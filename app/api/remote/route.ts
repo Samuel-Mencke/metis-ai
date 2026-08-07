@@ -28,7 +28,23 @@ function shellQuote(value: string) {
 }
 
 function readContent(raw: string) {
-  return raw.replace(/^\s*\d+\|/gm, "");
+  // The gateway may add source line prefixes such as `     123 content`,
+  // `123|content`, or `L123:content`.
+  // Keep Monaco's own line-number gutter; only strip prefixes from the content.
+  const withoutGatewayPrefixes = raw.replace(/^\s*L?\d+(?:\s+|\s*[|:]\s*)/gm, "");
+  const lines = withoutGatewayPrefixes.split(/\r?\n/);
+  let expected = 1;
+  let foundSequentialPrefixes = false;
+  const isSequentiallyNumbered = lines.every((line) => {
+    if (!line.trim()) return true;
+    const match = line.match(/^\s*(\d+)[\t ]+/);
+    if (!match || Number(match[1]) !== expected) return false;
+    expected += 1;
+    foundSequentialPrefixes = true;
+    return true;
+  });
+  if (!isSequentiallyNumbered || !foundSequentialPrefixes) return withoutGatewayPrefixes;
+  return lines.map((line) => line.replace(/^\s*\d+[\t ]+/, "")).join("\n");
 }
 
 function sessionFor(sessionId: string | null, ownerId?: string) {

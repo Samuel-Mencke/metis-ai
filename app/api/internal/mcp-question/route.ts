@@ -11,6 +11,7 @@ export const maxDuration = 960;
 
 type QuestionInput = {
   question?: unknown;
+  multiple?: unknown;
   options?: unknown;
 };
 
@@ -35,6 +36,7 @@ export async function POST(req: Request) {
     .filter((item): item is QuestionInput => Boolean(item) && typeof item === "object")
     .map((item) => ({
       question: typeof item.question === "string" ? item.question : "",
+      multiple: item.multiple === true,
       options: Array.isArray(item.options) ? item.options.filter((option) => typeof option === "string") : undefined,
     }))
     .filter((item) => item.question.trim());

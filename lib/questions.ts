@@ -11,6 +11,7 @@ export type QuestionOption = {
 export type AgentQuestion = {
   id: string;
   question: string;
+  multiple?: boolean;
   options?: QuestionOption[];
 };
 
@@ -59,6 +60,7 @@ function writePersisted(items: PersistedQuestion[]) {
 export function createPendingQuestion(
   input: Array<{
     question: string;
+    multiple?: boolean;
     options?: Array<QuestionOption | string>;
   }>,
 ): {
@@ -88,6 +90,7 @@ export function createPendingQuestion(
       return {
         id: randomUUID(),
         question,
+        ...(item.multiple ? { multiple: true } : {}),
         ...(options?.length ? { options } : {}),
       };
     })

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Check, KeyRound, LoaderCircle, ShieldCheck } from "lucide-react";
+import { ArrowRight, Check, KeyRound, LoaderCircle, PlugZap, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { ProviderLogo } from "@/components/provider-logo";
 import { Button } from "@/components/ui/button";
@@ -48,10 +48,12 @@ export function ProviderSetupDialog({
   open,
   onOpenChange,
   onConnected,
+  onStartChat,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConnected: () => void;
+  onStartChat?: () => void;
 }) {
   const [providers, setProviders] = useState<ProviderDefinition[]>([]);
   const [selectedKey, setSelectedKey] = useState("");
@@ -60,6 +62,9 @@ export function ProviderSetupDialog({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [oauthFlow, setOauthFlow] = useState<OAuthFlow | null>(null);
+  const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
+  const [connectionId, setConnectionId] = useState("");
+  const [tested, setTested] = useState(false);
 
   const selected = providers.find((provider) => provider.key === selectedKey);
   const supportsOAuth = selected?.authTypes.includes("oauth") ?? false;
@@ -67,6 +72,11 @@ export function ProviderSetupDialog({
 
   useEffect(() => {
     if (!open) return;
+    setStep(1);
+    setConnectionId("");
+    setTested(false);
+    setSecret("");
+    setOauthFlow(null);
     setLoading(true);
     setError("");
     void fetch("/api/providers", { cache: "no-store" })
@@ -89,6 +99,7 @@ export function ProviderSetupDialog({
     setSecret("");
     setOauthFlow(null);
     setError("");
+    setStep(1);
   }
 
   async function connectApiKey() {
@@ -109,14 +120,36 @@ export function ProviderSetupDialog({
           enabled: true,
         }),
       });
-      const data = (await response.json().catch(() => ({}))) as { error?: string };
+      const data = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        connection?: { id?: string };
+      };
       if (!response.ok) throw new Error(data.error || "Could not save provider.");
-      toast.success(`${selected.name} connected`);
+      setConnectionId(data.connection?.id || "");
       setSecret("");
       onConnected();
-      onOpenChange(false);
+      setStep(3);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not save provider.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function testConnection() {
+    if (!connectionId || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/providers/${encodeURIComponent(connectionId)}/test`, { method: "POST" });
+      const data = (await response.json().catch(() => ({}))) as { error?: string; detail?: string };
+      if (!response.ok) throw new Error(data.error || "Connection test failed.");
+      setTested(true);
+      toast.success(data.detail || `${selected?.name || "Provider"} is ready`);
+      setStep(4);
+      onConnected();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Connection test failed.");
     } finally {
       setBusy(false);
     }
@@ -186,9 +219,11 @@ export function ProviderSetupDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-xl">
         <DialogHeader>
-          <DialogTitle>Add your provider</DialogTitle>
+        <DialogTitle>{step === 4 ? "You’re ready to chat" : "Add your provider"}</DialogTitle>
           <DialogDescription>
-            Choose the provider you prefer, then connect it to start chatting.
+            {step === 4
+              ? "Your provider is connected. Choose how you want to continue."
+              : "A few quick steps are all it takes to start chatting."}
           </DialogDescription>
         </DialogHeader>
         {loading ? (
@@ -197,6 +232,24 @@ export function ProviderSetupDialog({
           </div>
         ) : (
           <div className="space-y-4">
+            <div className="flex items-center gap-2 text-[11px] text-muted-foreground" aria-label="Provider setup progress">
+              {["Provider", "API key", "Test", "Chat"].map((label, index) => {
+                const number = index + 1;
+                return (
+                  <div key={label} className="flex min-w-0 items-center gap-1.5">
+                    <span className={`flex size-5 items-center justify-center rounded-full text-[10px] font-medium ${
+                      step >= number ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
+                    }`}>
+                      {step > number ? <Check className="size-3" /> : number}
+                    </span>
+                    <span className="hidden sm:inline">{label}</span>
+                    {number < 4 ? <span className="mx-1 text-border">/</span> : null}
+                  </div>
+                );
+              })}
+            </div>
+            {step === 1 ? (
+            <>
             <div className="grid max-h-64 gap-2 overflow-y-auto sm:grid-cols-2">
               {providers.map((provider) => (
                 <button
@@ -218,10 +271,20 @@ export function ProviderSetupDialog({
                 </button>
               ))}
             </div>
-            {selected ? (
+            <div className="flex justify-end">
+              <Button type="button" onClick={() => setStep(2)} disabled={!selected}>
+                Continue <ArrowRight className="size-4" />
+              </Button>
+            </div>
+            </>
+            ) : null}
+            {step === 2 && selected ? (
               <div className="space-y-3 rounded-xl border border-border/60 bg-muted/20 p-4">
                 <p className="flex items-center gap-2 text-sm font-medium">
                   <KeyRound className="size-4" /> Connect {selected.name}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Paste the API key from {selected.name}. You can go back and choose another provider at any time.
                 </p>
                 <Input
                   type="password"
@@ -235,16 +298,20 @@ export function ProviderSetupDialog({
                   }}
                 />
                 {apiKeyUrl ? (
-                  <a
-                    className="inline-block text-sm text-primary underline underline-offset-4 hover:text-primary/80"
-                    href={apiKeyUrl}
-                    target="_blank"
-                    rel="noreferrer"
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    className="w-fit"
+                    onClick={() => window.open(apiKeyUrl, "_blank", "noopener,noreferrer")}
                   >
-                    Get an API key
-                  </a>
+                    Get API Key
+                  </Button>
                 ) : null}
                 <div className="flex flex-wrap justify-end gap-2">
+                  <Button type="button" variant="ghost" onClick={() => setStep(1)} disabled={busy}>
+                    Back
+                  </Button>
                   {supportsOAuth ? (
                     <Button type="button" variant="outline" onClick={() => void connectOAuth()} disabled={busy}>
                       <ShieldCheck className="size-4" /> Use OAuth
@@ -252,7 +319,7 @@ export function ProviderSetupDialog({
                   ) : null}
                   <Button type="button" onClick={() => void connectApiKey()} disabled={busy || !secret.trim()}>
                     {busy ? <LoaderCircle className="size-4 animate-spin" /> : <KeyRound className="size-4" />}
-                    Connect API key
+                    Save & continue
                   </Button>
                 </div>
                 {oauthFlow ? (
@@ -263,6 +330,51 @@ export function ProviderSetupDialog({
                     <p className="text-muted-foreground">Status: {oauthFlow.status}</p>
                   </div>
                 ) : null}
+              </div>
+            ) : null}
+            {step === 3 && selected ? (
+              <div className="space-y-4 rounded-xl border border-border/60 bg-muted/20 p-5">
+                <div>
+                  <p className="flex items-center gap-2 text-sm font-medium">
+                    <PlugZap className="size-4" /> Test your connection
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    We’ll make a quick request to confirm that {selected.name} and your API key work.
+                  </p>
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Button type="button" variant="ghost" onClick={() => setStep(2)} disabled={busy}>Back</Button>
+                  <Button type="button" onClick={() => void testConnection()} disabled={busy || !connectionId}>
+                    {busy ? <LoaderCircle className="size-4 animate-spin" /> : <PlugZap className="size-4" />}
+                    Test it out
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+            {step === 4 && selected ? (
+              <div className="space-y-4 rounded-xl border border-primary/20 bg-primary/[0.06] p-5">
+                <div>
+                  <p className="flex items-center gap-2 text-sm font-medium">
+                    <Check className="size-4 text-primary" /> {selected.name} is connected
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {tested ? "Everything looks good. Pick a model and send your first message." : "Your provider is ready."}
+                  </p>
+                </div>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button type="button" variant="secondary" onClick={() => {
+                    onOpenChange(false);
+                    onStartChat?.();
+                  }}>
+                    Test it out
+                  </Button>
+                  <Button type="button" onClick={() => {
+                    onOpenChange(false);
+                    onStartChat?.();
+                  }}>
+                    New Chat <ArrowRight className="size-4" />
+                  </Button>
+                </div>
               </div>
             ) : null}
             {error ? <p className="text-sm text-destructive">{error}</p> : null}
