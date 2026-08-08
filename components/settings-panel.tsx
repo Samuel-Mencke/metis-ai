@@ -9,6 +9,7 @@ import {
   Check,
   ChevronDown,
   KeyRound,
+  Link2,
   Lock,
   PlugZap,
   Plus,
@@ -172,6 +173,11 @@ type ArchivedChat = {
   updatedAt: string;
   pinned?: boolean;
   archived?: boolean;
+  share?: {
+    id: string;
+    active: boolean;
+    passwordProtected: boolean;
+  };
 };
 
 type McpDraft = {
@@ -344,6 +350,7 @@ export function SettingsPanel({
   const [oauthFlow, setOauthFlow] = useState<OAuthFlow | null>(null);
   const [oauthCode, setOauthCode] = useState("");
   const [archivedChats, setArchivedChats] = useState<ArchivedChat[]>([]);
+  const [sharedChats, setSharedChats] = useState<ArchivedChat[]>([]);
   const [archivedChatsLoaded, setArchivedChatsLoaded] = useState(false);
   const [browserNotificationsAvailable, setBrowserNotificationsAvailable] =
     useState(false);
@@ -372,7 +379,9 @@ export function SettingsPanel({
       const res = await fetch("/api/chats?includeArchived=true", { cache: "no-store" });
       if (!res.ok) throw new Error("Failed to load archived chats");
       const data = (await res.json()) as { chats?: ArchivedChat[] };
-      setArchivedChats((data.chats || []).filter((chat) => chat.archived));
+      const chats = data.chats || [];
+      setArchivedChats(chats.filter((chat) => chat.archived));
+      setSharedChats(chats.filter((chat) => chat.share?.active));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to load archived chats");
     } finally {
@@ -444,6 +453,17 @@ export function SettingsPanel({
     await loadArchivedChats();
     onChatsChanged();
     toast.success("Chat deleted");
+  }
+
+  async function deactivateShare(chat: ArchivedChat) {
+    const res = await fetch(`/api/chats/${chat.id}/share`, { method: "DELETE" });
+    if (!res.ok) {
+      toast.error("Failed to deactivate share");
+      return;
+    }
+    await loadArchivedChats();
+    onChatsChanged();
+    toast.success("Share link deactivated");
   }
 
   async function addMemory() {
@@ -874,7 +894,7 @@ export function SettingsPanel({
               className="h-10 w-full"
               options={[
                 { value: "general", label: "General" },
-                { value: "archived", label: "Archived chats" },
+                { value: "archived", label: "Chats" },
                 { value: "providers", label: "Providers" },
                 { value: "mcp", label: "MCP Servers" },
                 { value: "memories", label: `Memories (${memories.length})` },
@@ -889,7 +909,7 @@ export function SettingsPanel({
             </TabsTrigger>
             <TabsTrigger value="archived" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
               <Archive data-icon="inline-start" />
-              Archived chats
+              Chats
             </TabsTrigger>
             <TabsTrigger value="providers" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
               <KeyRound data-icon="inline-start" />
@@ -1179,6 +1199,49 @@ export function SettingsPanel({
                     ))}
                   </ul>
                 )}
+                <div className="border-t border-border/60 pt-5">
+                  <div>
+                    <h3 className="flex items-center gap-2 text-sm font-medium">
+                      <Link2 className="size-4 text-muted-foreground" />
+                      Shared chats
+                    </h3>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Manage active read-only links for your chats.
+                    </p>
+                  </div>
+                  {sharedChats.length === 0 ? (
+                    <div className="mt-3 rounded-lg border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">
+                      No active shared chats.
+                    </div>
+                  ) : (
+                    <ul className="mt-3 flex flex-col gap-2">
+                      {sharedChats.map((chat) => (
+                        <li key={chat.id} className="flex flex-wrap items-center gap-3 rounded-lg border border-border/60 bg-card/40 p-3">
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-medium">{chat.title || "Untitled"}</p>
+                            <p className="mt-0.5 text-xs text-muted-foreground">
+                              {chat.share?.passwordProtected ? "Password protected" : "Public link"}
+                            </p>
+                          </div>
+                          {chat.share ? (
+                            <a
+                              href={`/share?id=${encodeURIComponent(chat.share.id)}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-input px-2.5 text-xs font-medium hover:bg-accent"
+                            >
+                              <Link2 className="size-3.5" />
+                              Open link
+                            </a>
+                          ) : null}
+                          <Button type="button" size="sm" variant="outline" onClick={() => void deactivateShare(chat)}>
+                            Deactivate
+                          </Button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
               </section>
             </TabsContent>
 

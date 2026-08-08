@@ -116,6 +116,14 @@ export type ChatRunStatus =
 
 export type ChatBadge = "blue" | "red";
 
+export type ChatShare = {
+  id: string;
+  active: boolean;
+  passwordHash?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ChatSessionState = {
   input?: string;
   remoteCwd?: string;
@@ -156,6 +164,7 @@ export type Chat = {
   runUpdatedAt?: string;
   pendingQuestion?: PendingChatQuestion;
   badge?: ChatBadge;
+  share?: ChatShare;
   pinned?: boolean;
   archived?: boolean;
   createdAt: string;
@@ -176,6 +185,7 @@ export type ChatIndexEntry = {
   badge?: ChatBadge;
   pinned?: boolean;
   archived?: boolean;
+  share?: Omit<ChatShare, "passwordHash">;
 };
 
 export type Memory = {

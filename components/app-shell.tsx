@@ -25,6 +25,7 @@ import {
   Archive,
   ArchiveRestore,
   Check,
+  Copy,
   ChevronDown,
   CircleAlert,
   Brain,
@@ -40,6 +41,7 @@ import {
   Image as ImageIcon,
   KeyRound,
   Link2,
+  LockKeyhole,
   LoaderCircle,
   Menu,
   Minimize2,
@@ -56,6 +58,7 @@ import {
   RotateCcw,
   Reply,
   Search,
+  Share2,
   Settings,
   Square,
   Terminal,
@@ -419,6 +422,13 @@ type ChatIndexEntry = {
   badge?: "blue" | "red";
   pinned?: boolean;
   archived?: boolean;
+  share?: {
+    id: string;
+    active: boolean;
+    passwordProtected: boolean;
+    createdAt: string;
+    updatedAt: string;
+  };
 };
 
 type Chat = ChatIndexEntry & {
@@ -1500,6 +1510,10 @@ export default function AppShell() {
   const [renameChatId, setRenameChatId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Pick<ChatIndexEntry, "id" | "title"> | null>(null);
   const [deletingChat, setDeletingChat] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [shareData, setShareData] = useState<ChatIndexEntry["share"] | null>(null);
+  const [sharePassword, setSharePassword] = useState("");
+  const [shareBusy, setShareBusy] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
@@ -3774,6 +3788,48 @@ export default function AppShell() {
       await loadChats();
     } finally {
       setDeletingChat(false);
+    }
+  }
+
+  async function openShareDialog() {
+    if (!activeChatId) return;
+    setShareBusy(true);
+    try {
+      const res = await fetch(`/api/chats/${activeChatId}/share`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ active: true }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { share?: ChatIndexEntry["share"]; error?: string };
+      if (!res.ok || !data.share) throw new Error(data.error || "Unable to create share link");
+      setShareData(data.share);
+      setShareOpen(true);
+      void loadChats();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to create share link");
+    } finally {
+      setShareBusy(false);
+    }
+  }
+
+  async function updateShare(patch: { active?: boolean; password?: string | null }) {
+    if (!activeChatId) return;
+    setShareBusy(true);
+    try {
+      const res = await fetch(`/api/chats/${activeChatId}/share`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      const data = (await res.json().catch(() => ({}))) as { share?: ChatIndexEntry["share"]; error?: string };
+      if (!res.ok || !data.share) throw new Error(data.error || "Unable to update share");
+      setShareData(data.share);
+      setSharePassword("");
+      void loadChats();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to update share");
+    } finally {
+      setShareBusy(false);
     }
   }
 
@@ -6173,6 +6229,20 @@ export default function AppShell() {
           ) : (
             <div className="flex-1" />
           )}
+          {!isDraft && !isEmpty ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              aria-label="Share chat"
+              title="Share chat"
+              onClick={() => void openShareDialog()}
+              disabled={shareBusy}
+            >
+              <Share2 className="size-4" />
+            </Button>
+          ) : null}
           <Button
             type="button"
             variant="ghost"
@@ -7268,6 +7338,100 @@ export default function AppShell() {
           window.requestAnimationFrame(() => textareaRef.current?.focus());
         }}
       />
+
+      <Dialog open={shareOpen} onOpenChange={setShareOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Share2 className="size-4 text-primary" />
+              Share chat
+            </DialogTitle>
+          </DialogHeader>
+          {shareData ? (
+            <div className="space-y-4">
+              {!shareData.active ? (
+                <p className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-200">
+                  This link is inactive. Sharing this chat again will reactivate it.
+                </p>
+              ) : null}
+              <div className="flex gap-2">
+                <Input
+                  readOnly
+                  value={`${window.location.origin}/share?id=${encodeURIComponent(shareData.id)}`}
+                  onFocus={(event) => event.currentTarget.select()}
+                  aria-label="Share link"
+                  className="min-w-0"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  aria-label="Copy share link"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(`${window.location.origin}/share?id=${encodeURIComponent(shareData.id)}`);
+                    toast.success("Share link copied");
+                  }}
+                >
+                  <Copy className="size-4" />
+                </Button>
+              </div>
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 p-3">
+                <div>
+                  <p className="flex items-center gap-2 text-sm font-medium">
+                    <LockKeyhole className="size-4" />
+                    Password protection
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {shareData.passwordProtected ? "Visitors must enter a password." : "Anyone with the link can view it."}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={shareData.passwordProtected ? "default" : "outline"}
+                  disabled={shareBusy}
+                  onClick={() => {
+                    if (shareData.passwordProtected) void updateShare({ password: null });
+                    else setSharePassword("");
+                  }}
+                >
+                  {shareData.passwordProtected ? "Remove" : "Set password"}
+                </Button>
+              </div>
+              {!shareData.passwordProtected ? (
+                <div className="flex gap-2">
+                  <Input
+                    type="password"
+                    value={sharePassword}
+                    onChange={(event) => setSharePassword(event.target.value)}
+                    placeholder="New password"
+                    autoComplete="new-password"
+                    aria-label="New share password"
+                  />
+                  <Button
+                    type="button"
+                    disabled={shareBusy || !sharePassword.trim()}
+                    onClick={() => void updateShare({ password: sharePassword })}
+                  >
+                    Lock
+                  </Button>
+                </div>
+              ) : null}
+              {shareData.active ? (
+                <Button
+                  type="button"
+                  variant="destructive"
+                  className="w-full"
+                  disabled={shareBusy}
+                  onClick={() => void updateShare({ active: false })}
+                >
+                  Deactivate link
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
 
       <SettingsPanel
         open={settingsOpen}

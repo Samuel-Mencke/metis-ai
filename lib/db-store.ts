@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
 import { getDatabase, parseData, transaction } from "@/lib/sqlite";
 import { config } from "@/lib/config";
 import type {
@@ -9,6 +10,7 @@ import type {
   ChatMessage,
   ChatRunStatus,
   ChatSessionState,
+  ChatShare,
   GlobalModelSettings,
   Memory,
   PendingChatQuestion,
@@ -17,6 +19,39 @@ import type {
 } from "@/lib/store";
 
 const now = () => new Date().toISOString();
+
+function hashSharePassword(password: string, salt = randomBytes(16).toString("hex")) {
+  return `${salt}:${pbkdf2Sync(password, salt, 120_000, 32, "sha256").toString("hex")}`;
+}
+
+function verifySharePassword(password: string, encoded: string) {
+  const [salt, digest] = encoded.split(":");
+  if (!salt || !digest) return false;
+  const actual = pbkdf2Sync(password, salt, 120_000, 32, "sha256");
+  const expected = Buffer.from(digest, "hex");
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+export type PublicChatShare = Omit<ChatShare, "passwordHash"> & { passwordProtected: boolean };
+
+function publicShare(share?: ChatShare): PublicChatShare | undefined {
+  if (!share) return undefined;
+  return {
+    id: share.id,
+    active: share.active,
+    passwordProtected: Boolean(share.passwordHash),
+    createdAt: share.createdAt,
+    updatedAt: share.updatedAt,
+  };
+}
+
+function publicChat(chat: Chat): Omit<Chat, "ownerId"> & { share?: PublicChatShare } {
+  const { ownerId: _ownerId, share, ...rest } = chat;
+  return {
+    ...rest,
+    ...(publicShare(share) ? { share: publicShare(share) } : {}),
+  };
+}
 
 function rowChat(row: unknown): Chat | null {
   return parseData<Chat>(row);
@@ -57,6 +92,7 @@ export function listChatsForUser(
       badge: chat.badge,
       pinned: chat.pinned,
       archived: chat.archived,
+      ...(chat.share ? { share: publicShare(chat.share) } : {}),
     }));
 }
 
@@ -257,6 +293,55 @@ export function deleteChat(id: string, ownerId?: string) {
     if (!getChat(id, ownerId)) return false;
     return getDatabase().prepare("DELETE FROM chats WHERE id = ?").run(id).changes > 0;
   });
+}
+
+export function updateChatShare(
+  chatId: string,
+  patch: { active?: boolean; password?: string | null },
+  ownerId?: string,
+) {
+  return transaction(() => {
+    const chat = getChat(chatId, ownerId);
+    if (!chat) return null;
+    const timestamp = now();
+    const current = chat.share;
+    const share: ChatShare = {
+      id: current?.id || randomUUID(),
+      active: patch.active ?? current?.active ?? true,
+      createdAt: current?.createdAt || timestamp,
+      updatedAt: timestamp,
+      ...(current?.passwordHash ? { passwordHash: current.passwordHash } : {}),
+    };
+    if (patch.password !== undefined) {
+      if (patch.password?.trim()) share.passwordHash = hashSharePassword(patch.password.trim());
+      else delete share.passwordHash;
+    }
+    chat.share = share;
+    return saveChatInternal(chat);
+  });
+}
+
+export function deleteChatShare(chatId: string, ownerId?: string) {
+  return transaction(() => {
+    const chat = getChat(chatId, ownerId);
+    if (!chat) return null;
+    if (!chat.share) return chat;
+    delete chat.share;
+    return saveChatInternal(chat);
+  });
+}
+
+export function getChatByShareId(shareId: string, password?: string) {
+  if (!shareId.trim()) return { status: "not_found" as const };
+  const row = getDatabase().prepare(
+    "SELECT data FROM chats WHERE json_extract(data, '$.share.id') = ? AND json_extract(data, '$.share.active') = 1",
+  ).get(shareId.trim());
+  const chat = rowChat(row);
+  if (!chat?.share || !chat.share.active) return { status: "not_found" as const };
+  if (chat.share.passwordHash && (!password || !verifySharePassword(password, chat.share.passwordHash))) {
+    return { status: "password_required" as const, share: publicShare(chat.share) };
+  }
+  return { status: "ok" as const, chat: publicChat(chat) };
 }
 
 export function appendMessage(
