@@ -7,7 +7,6 @@
     </td>
     <td align="center" width="50%">
       <h1>Metis AI</h1>
-
     </td>
     <td align="right" width="25%">
       <img src="./public/hand-right.png" alt="Right hand" width="180">
