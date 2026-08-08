@@ -8,7 +8,7 @@ async function attachmentResponse(req: Request, body?: { id?: string; name?: str
   const url = new URL(req.url);
   const id = body?.id || url.searchParams.get("id") || "";
   const name = body?.name || url.searchParams.get("name") || "";
-  const password = body?.password || url.searchParams.get("password") || undefined;
+  const password = body?.password;
   const result = getChatByShareId(id, password);
   if (result.status === "not_found") return Response.json({ error: "Share not found" }, { status: 404 });
   if (result.status === "password_required") {

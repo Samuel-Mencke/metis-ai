@@ -18,6 +18,17 @@ and connected desktop devices. Treat a deployment as privileged infrastructure.
 6. Rotate credentials if they were ever committed, logged, or shared.
 7. Before publishing a repository, scan the complete Git history, not only the
    working tree.
+8. Keep the application-level login and share-password rate limits enabled, and
+   add a distributed proxy/WAF rate limit for multi-instance deployments.
+
+Authentication failures use generic responses and are rate-limited by client
+address and username. Share passwords are accepted only in request bodies;
+they are never read from GET query parameters. Internal bearer tokens are
+validated with fixed-length, timing-safe comparisons.
+
+Chat ownership is assigned during SQLite migration. Authenticated chat
+lookups require an explicit matching `owner_id`; ownerless legacy rows are not
+available through authenticated routes.
 
 The default MCP listener binds to `127.0.0.1`. Do not expose it publicly unless
 an authenticated, trusted proxy is in front of it. Keep

@@ -4,6 +4,7 @@ import {
   deletePendingQuestion,
 } from "@/lib/db-questions";
 import { getChat, updateChat } from "@/lib/db-store";
+import { bearerTokenMatches } from "@/lib/security";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,9 +17,7 @@ type QuestionInput = {
 };
 
 function authorized(req: Request) {
-  const configured = process.env.MCP_BEARER_TOKEN?.trim() || "";
-  const supplied = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "").trim();
-  return Boolean(configured && supplied && configured === supplied);
+  return bearerTokenMatches(req, process.env.MCP_BEARER_TOKEN);
 }
 
 export async function POST(req: Request) {

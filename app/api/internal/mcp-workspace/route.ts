@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getChat, updateChat, type WorkspaceItem } from "@/lib/db-store";
+import { bearerTokenMatches } from "@/lib/security";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -7,9 +8,7 @@ export const dynamic = "force-dynamic";
 type WorkspaceType = "plan" | "canvas";
 
 function authorized(req: Request) {
-  const configured = process.env.MCP_BEARER_TOKEN?.trim() || "";
-  const supplied = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "").trim();
-  return Boolean(configured && supplied && configured === supplied);
+  return bearerTokenMatches(req, process.env.MCP_BEARER_TOKEN);
 }
 
 export async function POST(req: Request) {

@@ -1,4 +1,5 @@
 import { passwordMatches } from "@/lib/auth";
+import { bearerTokenMatches } from "@/lib/security";
 import { performSharedBrowserAction } from "@/lib/shared-browser-client";
 
 export const runtime = "nodejs";
@@ -6,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 function internalAuthorized(req: Request) {
   const configured = process.env.AI_CHAT_INTERNAL_TOKEN?.trim() || process.env.MCP_BEARER_TOKEN?.trim();
-  if (configured) return req.headers.get("authorization") === `Bearer ${configured}`;
+  if (configured) return bearerTokenMatches(req, configured);
   return req.headers.get("x-ai-chat-internal") === "1" && passwordMatches(req.headers.get("x-chat-password"));
 }
 

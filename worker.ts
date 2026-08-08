@@ -107,8 +107,7 @@ async function main() {
       const job = claimNextJob();
       if (!job) break;
       console.log(`[ai-chat-worker] claimed ${job.id} (${job.chatId})`);
-      let task: Promise<void>;
-      task = runJobInIsolatedProcess(job.id)
+      const task = runJobInIsolatedProcess(job.id)
         .catch((error) => {
           console.error(`[ai-chat-worker] job ${job.id} failed`, error);
         })

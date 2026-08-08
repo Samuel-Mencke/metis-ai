@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { authenticateUser, CHAT_COOKIE } from "@/lib/auth";
 import { config } from "@/lib/config";
+import { consumeRateLimit, requestClientAddress, resetRateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,10 +15,23 @@ export async function POST(req: Request) {
   }
 
   const username = body.username?.trim() || config.chatUsername;
+  const address = requestClientAddress(req);
+  const rateLimitUsername = username.toLowerCase().slice(0, 128);
+  const ipLimit = consumeRateLimit(`auth:ip:${address}`, 30, 15 * 60 * 1000);
+  const userLimit = consumeRateLimit(`auth:user:${address}:${rateLimitUsername}`, 10, 15 * 60 * 1000);
+  if (!ipLimit.allowed || !userLimit.allowed) {
+    const retryAfterSeconds = Math.max(ipLimit.retryAfterSeconds, userLimit.retryAfterSeconds);
+    return NextResponse.json(
+      { error: "Too many login attempts. Please try again later." },
+      { status: 429, headers: { "Retry-After": String(retryAfterSeconds) } },
+    );
+  }
   const result = authenticateUser(username, body.password ?? "");
   if (!result) {
     return NextResponse.json({ error: "Invalid username or password" }, { status: 401 });
   }
+  resetRateLimit(`auth:ip:${address}`);
+  resetRateLimit(`auth:user:${address}:${rateLimitUsername}`);
 
   const proto = req.headers.get("x-forwarded-proto") || "http";
   const res = NextResponse.json({ ok: true });

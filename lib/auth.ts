@@ -4,9 +4,9 @@ import {
   pbkdf2Sync,
   randomBytes,
   randomUUID,
-  timingSafeEqual,
 } from "node:crypto";
 import { getDatabase } from "@/lib/sqlite";
+import { safeEqual } from "@/lib/security";
 
 export const CHAT_COOKIE = "ai_chat_auth";
 export const CHAT_USER_COOKIE = "ai_chat_user";
@@ -45,13 +45,6 @@ function users() {
   return getDatabase()
     .prepare("SELECT id, username, password_hash as passwordHash, created_at as createdAt FROM users")
     .all() as unknown as User[];
-}
-
-function safeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ab.length !== bb.length) return false;
-  return timingSafeEqual(ab, bb);
 }
 
 export function getChatPassword(): string {

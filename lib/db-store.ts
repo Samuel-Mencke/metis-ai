@@ -194,7 +194,7 @@ export function getChat(id: string, ownerId?: string): Chat | null {
   if (!id || id.includes("/") || id.includes("..")) return null;
   const db = getDatabase();
   const row = ownerId
-    ? db.prepare("SELECT data FROM chats WHERE id = ? AND (owner_id = ? OR owner_id IS NULL)").get(id, ownerId)
+    ? db.prepare("SELECT data FROM chats WHERE id = ? AND owner_id = ?").get(id, ownerId)
     : db.prepare("SELECT data FROM chats WHERE id = ?").get(id);
   const chat = rowChat(row);
   return chat && ownerId && chat.ownerId && chat.ownerId !== ownerId ? null : chat;
