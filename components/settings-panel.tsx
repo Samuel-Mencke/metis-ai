@@ -11,6 +11,7 @@ import {
   KeyRound,
   Link2,
   Lock,
+  MessagesSquare,
   PlugZap,
   Plus,
   RefreshCw,
@@ -908,7 +909,7 @@ export function SettingsPanel({
               General
             </TabsTrigger>
             <TabsTrigger value="archived" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
-              <Archive data-icon="inline-start" />
+              <MessagesSquare data-icon="inline-start" />
               Chats
             </TabsTrigger>
             <TabsTrigger value="providers" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">

@@ -120,6 +120,14 @@ export type ChatShare = {
   id: string;
   active: boolean;
   passwordHash?: string;
+  content?: {
+    attachments?: boolean;
+    thinking?: boolean;
+    tools?: boolean;
+    suggestions?: boolean;
+    sources?: boolean;
+    workspaces?: boolean;
+  };
   createdAt: string;
   updatedAt: string;
 };

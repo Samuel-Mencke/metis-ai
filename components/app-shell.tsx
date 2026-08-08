@@ -428,6 +428,14 @@ type ChatIndexEntry = {
     passwordProtected: boolean;
     createdAt: string;
     updatedAt: string;
+    content?: {
+      attachments?: boolean;
+      thinking?: boolean;
+      tools?: boolean;
+      suggestions?: boolean;
+      sources?: boolean;
+      workspaces?: boolean;
+    };
   };
 };
 
@@ -1513,7 +1521,9 @@ export default function AppShell() {
   const [shareOpen, setShareOpen] = useState(false);
   const [shareData, setShareData] = useState<ChatIndexEntry["share"] | null>(null);
   const [sharePassword, setSharePassword] = useState("");
+  const [showSharePasswordForm, setShowSharePasswordForm] = useState(false);
   const [shareBusy, setShareBusy] = useState(false);
+  const [sharePanelTab, setSharePanelTab] = useState<"link" | "content">("link");
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
@@ -3803,6 +3813,8 @@ export default function AppShell() {
       const data = (await res.json().catch(() => ({}))) as { share?: ChatIndexEntry["share"]; error?: string };
       if (!res.ok || !data.share) throw new Error(data.error || "Unable to create share link");
       setShareData(data.share);
+      setShowSharePasswordForm(false);
+      setSharePanelTab("link");
       setShareOpen(true);
       void loadChats();
     } catch (error) {
@@ -3812,7 +3824,11 @@ export default function AppShell() {
     }
   }
 
-  async function updateShare(patch: { active?: boolean; password?: string | null }) {
+  async function updateShare(patch: {
+    active?: boolean;
+    password?: string | null;
+    content?: NonNullable<ChatIndexEntry["share"]>["content"];
+  }) {
     if (!activeChatId) return;
     setShareBusy(true);
     try {
@@ -3825,12 +3841,26 @@ export default function AppShell() {
       if (!res.ok || !data.share) throw new Error(data.error || "Unable to update share");
       setShareData(data.share);
       setSharePassword("");
+      setShowSharePasswordForm(false);
       void loadChats();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to update share");
     } finally {
       setShareBusy(false);
     }
+  }
+
+  function toggleShareContent(key: "attachments" | "thinking" | "tools" | "suggestions" | "sources" | "workspaces") {
+    if (!shareData) return;
+    const content = {
+      attachments: shareData.content?.attachments ?? true,
+      thinking: shareData.content?.thinking ?? false,
+      tools: shareData.content?.tools ?? false,
+      suggestions: shareData.content?.suggestions ?? false,
+      sources: shareData.content?.sources ?? false,
+      workspaces: shareData.content?.workspaces ?? false,
+    };
+    void updateShare({ content: { ...content, [key]: !content[key] } });
   }
 
   async function updateChatFlags(
@@ -7347,8 +7377,59 @@ export default function AppShell() {
               Share chat
             </DialogTitle>
           </DialogHeader>
+          <div className="grid grid-cols-2 rounded-lg bg-muted/60 p-1">
+            {([
+              ["link", "Link"],
+              ["content", "Shared content"],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                className={cn(
+                  "rounded-md px-3 py-1.5 text-sm transition-colors",
+                  sharePanelTab === value ? "bg-background font-medium shadow-sm" : "text-muted-foreground hover:text-foreground",
+                )}
+                onClick={() => setSharePanelTab(value)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           {shareData ? (
             <div className="space-y-4">
+              {sharePanelTab === "content" ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">User and agent messages are always shared. Choose which additional features visitors can see.</p>
+                  {([
+                    ["attachments", "Attachments", "Allow visitors to open shared files and images."],
+                    ["thinking", "Agent thinking", "Show the agent’s thinking blocks."],
+                    ["tools", "Agent tool calls", "Show tool calls and their details."],
+                    ["suggestions", "Suggested next steps", "Show suggestions below agent messages."],
+                    ["sources", "Sources", "Show source links included in agent messages."],
+                    ["workspaces", "Plans & canvas", "Share read-only plans and canvas documents."],
+                  ] as const).map(([key, title, description]) => {
+                    const enabled = shareData.content?.[key] ?? (key === "attachments");
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        disabled={shareBusy}
+                        onClick={() => toggleShareContent(key)}
+                        className="flex w-full items-center justify-between gap-3 rounded-lg border border-border/60 p-3 text-left transition-colors hover:bg-muted/50 disabled:opacity-60"
+                      >
+                        <span>
+                          <span className="block text-sm font-medium">{title}</span>
+                          <span className="mt-0.5 block text-xs text-muted-foreground">{description}</span>
+                        </span>
+                        <span className={cn("relative h-5 w-9 shrink-0 rounded-full transition-colors", enabled ? "bg-primary" : "bg-muted-foreground/30")}>
+                          <span className={cn("absolute top-0.5 size-4 rounded-full bg-background transition-transform", enabled ? "translate-x-4" : "translate-x-0.5")} />
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <>
               {!shareData.active ? (
                 <p className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-200">
                   This link is inactive. Sharing this chat again will reactivate it.
@@ -7392,13 +7473,16 @@ export default function AppShell() {
                   disabled={shareBusy}
                   onClick={() => {
                     if (shareData.passwordProtected) void updateShare({ password: null });
-                    else setSharePassword("");
+                    else {
+                      setSharePassword("");
+                      setShowSharePasswordForm(true);
+                    }
                   }}
                 >
                   {shareData.passwordProtected ? "Remove" : "Set password"}
                 </Button>
               </div>
-              {!shareData.passwordProtected ? (
+              {!shareData.passwordProtected && showSharePasswordForm ? (
                 <div className="flex gap-2">
                   <Input
                     type="password"
@@ -7428,6 +7512,8 @@ export default function AppShell() {
                   Deactivate link
                 </Button>
               ) : null}
+                </>
+              )}
             </div>
           ) : null}
         </DialogContent>

@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import path from "node:path";
 import { pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
 import { getDatabase, parseData, transaction } from "@/lib/sqlite";
 import { config } from "@/lib/config";
@@ -17,6 +19,7 @@ import type {
   ToolPart,
   WorkspaceItem,
 } from "@/lib/store";
+import { chatUploadDir, resolveUploadPath } from "@/lib/uploads";
 
 const now = () => new Date().toISOString();
 
@@ -40,6 +43,14 @@ function publicShare(share?: ChatShare): PublicChatShare | undefined {
     id: share.id,
     active: share.active,
     passwordProtected: Boolean(share.passwordHash),
+    content: {
+      attachments: share.content?.attachments ?? true,
+      thinking: share.content?.thinking ?? false,
+      tools: share.content?.tools ?? false,
+      suggestions: share.content?.suggestions ?? false,
+      sources: share.content?.sources ?? false,
+      workspaces: share.content?.workspaces ?? false,
+    },
     createdAt: share.createdAt,
     updatedAt: share.updatedAt,
   };
@@ -47,8 +58,35 @@ function publicShare(share?: ChatShare): PublicChatShare | undefined {
 
 function publicChat(chat: Chat): Omit<Chat, "ownerId"> & { share?: PublicChatShare } {
   const { ownerId: _ownerId, share, ...rest } = chat;
+  const content = {
+    attachments: share?.content?.attachments ?? true,
+    thinking: share?.content?.thinking ?? false,
+    tools: share?.content?.tools ?? false,
+    suggestions: share?.content?.suggestions ?? false,
+    sources: share?.content?.sources ?? false,
+    workspaces: share?.content?.workspaces ?? false,
+  };
+  const messages = rest.messages.map((message) => ({
+    ...message,
+    content:
+      !content.sources && message.role === "assistant"
+        ? message.content.replace(/```sources\s*[\s\S]*?```/gi, "").replace(/\n{3,}/g, "\n\n").trim()
+        : message.content,
+    ...(content.attachments ? {} : { attachments: undefined }),
+    ...(content.thinking ? {} : { thinking: undefined }),
+    ...(content.tools
+      ? {}
+      : {
+          tools: content.workspaces
+            ? message.tools?.filter((tool) => tool.kind === "plan" || tool.kind === "canvas" || tool.kind === "todo")
+            : undefined,
+        }),
+    ...(content.suggestions ? {} : { suggestions: undefined }),
+  }));
   return {
     ...rest,
+    messages,
+    ...(content.workspaces ? {} : { workspaces: undefined, canvas: undefined }),
     ...(publicShare(share) ? { share: publicShare(share) } : {}),
   };
 }
@@ -297,7 +335,11 @@ export function deleteChat(id: string, ownerId?: string) {
 
 export function updateChatShare(
   chatId: string,
-  patch: { active?: boolean; password?: string | null },
+  patch: {
+    active?: boolean;
+    password?: string | null;
+    content?: ChatShare["content"];
+  },
   ownerId?: string,
 ) {
   return transaction(() => {
@@ -311,10 +353,21 @@ export function updateChatShare(
       createdAt: current?.createdAt || timestamp,
       updatedAt: timestamp,
       ...(current?.passwordHash ? { passwordHash: current.passwordHash } : {}),
+      ...(current?.content ? { content: { ...current.content } } : {}),
     };
     if (patch.password !== undefined) {
       if (patch.password?.trim()) share.passwordHash = hashSharePassword(patch.password.trim());
       else delete share.passwordHash;
+    }
+    if (patch.content) {
+      share.content = {
+        attachments: Boolean(patch.content.attachments),
+        thinking: Boolean(patch.content.thinking),
+        tools: Boolean(patch.content.tools),
+        suggestions: Boolean(patch.content.suggestions),
+        sources: Boolean(patch.content.sources),
+        workspaces: Boolean(patch.content.workspaces),
+      };
     }
     chat.share = share;
     return saveChatInternal(chat);
@@ -333,15 +386,57 @@ export function deleteChatShare(chatId: string, ownerId?: string) {
 
 export function getChatByShareId(shareId: string, password?: string) {
   if (!shareId.trim()) return { status: "not_found" as const };
-  const row = getDatabase().prepare(
-    "SELECT data FROM chats WHERE json_extract(data, '$.share.id') = ? AND json_extract(data, '$.share.active') = 1",
-  ).get(shareId.trim());
-  const chat = rowChat(row);
+  const rows = getDatabase().prepare("SELECT data FROM chats").all();
+  const chat = rows
+    .map((row) => rowChat(row))
+    .find((candidate) => candidate?.share?.id === shareId.trim() && candidate.share.active);
   if (!chat?.share || !chat.share.active) return { status: "not_found" as const };
   if (chat.share.passwordHash && (!password || !verifySharePassword(password, chat.share.passwordHash))) {
     return { status: "password_required" as const, share: publicShare(chat.share) };
   }
-  return { status: "ok" as const, chat: publicChat(chat) };
+  return { status: "ok" as const, chat: publicChat(chat), ownerId: chat.ownerId };
+}
+
+export function cloneChatByShareId(shareId: string, password: string | undefined, ownerId: string) {
+  return transaction(() => {
+    if (!shareId.trim() || !ownerId) return { status: "not_found" as const };
+    const rows = getDatabase().prepare("SELECT data FROM chats").all();
+    const source = rows
+      .map((row) => rowChat(row))
+      .find((candidate) => candidate?.share?.id === shareId.trim() && candidate.share.active);
+    if (!source?.share || (source.share.passwordHash && (!password || !verifySharePassword(password, source.share.passwordHash)))) {
+      return { status: "not_found" as const };
+    }
+
+    const timestamp = now();
+    const clonedId = randomUUID();
+    const cloned: Chat = {
+      ...source,
+      id: clonedId,
+      ownerId,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      runStatus: "idle",
+    };
+    delete cloned.share;
+    delete cloned.agentId;
+    delete cloned.runUpdatedAt;
+    delete cloned.pendingQuestion;
+
+    const attachments = cloned.messages.flatMap((message) => message.attachments || []);
+    if (attachments.length) {
+      const targetDir = chatUploadDir(clonedId, ownerId);
+      mkdirSync(targetDir, { recursive: true });
+      for (const attachment of attachments) {
+        const sourcePath = resolveUploadPath(source.id, attachment.storedName, source.ownerId);
+        if (sourcePath && existsSync(sourcePath)) {
+          copyFileSync(sourcePath, path.join(targetDir, path.basename(attachment.storedName)));
+        }
+      }
+    }
+    saveChatInternal(cloned);
+    return { status: "ok" as const, chat: cloned };
+  });
 }
 
 export function appendMessage(

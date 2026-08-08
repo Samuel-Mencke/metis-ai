@@ -1,5 +1,6 @@
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { deleteChatShare, updateChatShare } from "@/lib/db-store";
+import type { ChatShare } from "@/lib/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,9 +12,9 @@ export async function PATCH(req: Request, { params }: Params) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  let body: { active?: boolean; password?: string | null };
+  let body: { active?: boolean; password?: string | null; content?: ChatShare["content"] };
   try {
-    body = (await req.json()) as { active?: boolean; password?: string | null };
+    body = (await req.json()) as { active?: boolean; password?: string | null; content?: ChatShare["content"] };
   } catch {
     return Response.json({ error: "Invalid JSON body" }, { status: 400 });
   }
@@ -32,6 +33,7 @@ export async function PATCH(req: Request, { params }: Params) {
       id: chat.share.id,
       active: chat.share.active,
       passwordProtected: Boolean(chat.share.passwordHash),
+      content: chat.share.content,
       createdAt: chat.share.createdAt,
       updatedAt: chat.share.updatedAt,
     },
