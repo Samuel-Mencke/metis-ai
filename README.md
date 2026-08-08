@@ -7,13 +7,14 @@
     </td>
     <td align="center" width="50%">
       <h1>Metis AI</h1>
-      <h3>A private, extensible workspace for AI agents</h3>
+
     </td>
     <td align="right" width="25%">
       <img src="./public/hand-right.png" alt="Right hand" width="180">
     </td>
   </tr>
 </table>
+      <h3>A private, extensible workspace for AI agents</h3>
 
 Conversations, tools, terminals, browser sessions, memories, workspaces and
 MCP servers — brought together in one self-hosted application.
