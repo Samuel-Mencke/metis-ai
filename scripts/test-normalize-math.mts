@@ -2,7 +2,7 @@ import { normalizeMath } from "../lib/math.ts";
 
 const sample = `[ 3= \\frac{\\Gamma(4)}{\\Gamma(3)} \\cdot \\frac12\\int_{0}^{\\pi}\\sin(x),dx \\cdot \\det \\begin{pmatrix} 1&0\\\\ 0&1 \\end{pmatrix} \\cdot \\sum_{k=0}^{\\infty}\\frac1{2^{k+1}} \\cdot \\frac1e\\lim_{n\\to\\infty}\\left(1+\\frac1n\\right)^n ]
 
-Denn jeder Faktor außer dem ersten ist (1), und
+Because every factor except the first is (1), and
 
 [ \\frac{\\Gamma(4)}{\\Gamma(3)}=\\frac{3!}{2!}=3. ]
 `;

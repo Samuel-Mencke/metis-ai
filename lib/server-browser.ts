@@ -1,5 +1,6 @@
 import dns from "node:dns/promises";
 import net from "node:net";
+import path from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
 const MAX_SNAPSHOT_LENGTH = 120_000;
@@ -29,6 +30,7 @@ type BrowserAction = {
   deltaY?: number;
   width?: number;
   height?: number;
+  downloadPath?: string;
 };
 
 type BrowserResult = {
@@ -41,6 +43,8 @@ type BrowserResult = {
   screenshot?: string;
   snapshot?: string;
   viewport: { width: number; height: number };
+  downloadPath?: string;
+  downloadFilename?: string;
 };
 
 let browserPromise: Promise<Browser> | undefined;
@@ -255,6 +259,17 @@ export async function performBrowserAction(ownerId: string, chatId: string, acti
     const width = Math.max(320, Math.min(Number(action.width) || DEFAULT_VIEWPORT.width, 2560));
     const height = Math.max(240, Math.min(Number(action.height) || DEFAULT_VIEWPORT.height, 1600));
     await page.setViewportSize({ width, height });
+  } else if (action.action === "download") {
+    if (!action.selector) throw new Error("A selector is required for download");
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
+      page.locator(action.selector).first().click({ timeout: 15_000 }),
+    ]);
+    const directory = action.downloadPath || process.cwd();
+    const filename = await download.suggestedFilename();
+    const destination = path.join(directory, filename);
+    await download.saveAs(destination);
+    return { ...(await resultFor(state, tabId)), downloadPath: destination, downloadFilename: filename };
   }
 
   const result = await resultFor(state, tabId);
@@ -263,6 +278,9 @@ export async function performBrowserAction(ownerId: string, chatId: string, acti
   }
   if (action.action === "snapshot") {
     result.snapshot = (await page.locator("body").ariaSnapshot().catch(() => page.locator("body").innerText().catch(() => ""))).slice(0, MAX_SNAPSHOT_LENGTH);
+  }
+  if (action.action === "extract_text") {
+    result.snapshot = (await page.locator("body").innerText().catch(() => "")).slice(0, MAX_SNAPSHOT_LENGTH);
   }
   return result;
 }

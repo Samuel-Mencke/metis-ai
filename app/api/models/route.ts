@@ -42,7 +42,22 @@ export type ModelInfo = {
   capabilities?: Record<string, boolean>;
   parameters?: ModelParameter[];
   defaultParams?: ModelParamSelection[];
+  contextWindow?: number;
 };
+
+function contextWindowOf(value: unknown) {
+  if (!value || typeof value !== "object") return undefined;
+  const item = value as Record<string, unknown>;
+  const candidate = [
+    item.contextWindow,
+    item.context_window,
+    item.maxInputTokens,
+    item.max_input_tokens,
+    item.inputTokenLimit,
+    item.input_token_limit,
+  ].find((entry) => typeof entry === "number" && Number.isFinite(entry) && entry > 0);
+  return typeof candidate === "number" ? candidate : undefined;
+}
 
 export async function GET(req: Request) {
   if (!(await isAuthenticated(req))) {
@@ -82,6 +97,7 @@ export async function GET(req: Request) {
         return {
           id: m.id,
           displayName: m.displayName || m.id,
+          ...(contextWindowOf(m) ? { contextWindow: contextWindowOf(m) } : {}),
           providerId: "cursor",
           providerName: "Cursor",
           source: "cursor",
@@ -116,6 +132,7 @@ export async function GET(req: Request) {
         connectionLabel: model.connectionLabel,
         source: model.source,
         tags: "tags" in model && Array.isArray(model.tags) ? model.tags : undefined,
+        ...(contextWindowOf(model) ? { contextWindow: contextWindowOf(model) } : {}),
         capabilities: model.capabilities as Record<string, boolean> | undefined,
         parameters: model.parameters?.map((parameter) => ({
           id: parameter.id,

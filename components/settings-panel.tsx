@@ -227,6 +227,7 @@ export type ModelParamSelection = {
 export type ModelInfo = {
   id: string;
   displayName: string;
+  contextWindow?: number;
   description?: string;
   providerId?: string;
   providerName?: string;

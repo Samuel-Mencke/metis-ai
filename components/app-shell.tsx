@@ -111,6 +111,7 @@ import {
 } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { modelAttrSummary } from "@/lib/model-label";
 import { clientConfig } from "@/lib/client-config";
@@ -736,6 +737,83 @@ function MessageSources({ sources }: { sources: SourceLink[] }) {
 
 function modelDisplayName(model: ModelInfo) {
   return model.displayName;
+}
+
+function formatTokenCount(value: number) {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k`;
+  return String(Math.round(value));
+}
+
+function ContextUsageCircle({
+  used,
+  total,
+  estimated,
+  className,
+}: {
+  used: number;
+  total: number;
+  estimated?: boolean;
+  className?: string;
+}) {
+  const [tooltipOpen, setTooltipOpen] = useState(false);
+  const percentage = Math.min(100, Math.max(0, (used / Math.max(1, total)) * 100));
+  const radius = 8;
+  const circumference = 2 * Math.PI * radius;
+  const color = percentage >= 90 ? "text-red-400" : percentage >= 75 ? "text-amber-400" : "text-emerald-400";
+  return (
+    <TooltipProvider>
+      <Tooltip open={tooltipOpen} onOpenChange={setTooltipOpen}>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className={cn("group/context relative inline-flex size-7 shrink-0 items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring", className)}
+            aria-label={`Context: ${formatTokenCount(used)} of ${formatTokenCount(total)} tokens used`}
+            onClick={() => setTooltipOpen((open) => !open)}
+          >
+            <svg viewBox="0 0 24 24" className="size-6 -rotate-90" aria-hidden="true">
+              <circle cx="12" cy="12" r={radius} fill="none" stroke="currentColor" strokeWidth="2.5" className="text-muted/60" />
+              <circle
+                cx="12"
+                cy="12"
+                r={radius}
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeDasharray={circumference}
+                strokeDashoffset={circumference * (1 - percentage / 100)}
+                className={cn("transition-[stroke-dashoffset,color] duration-500", color)}
+              />
+            </svg>
+          </button>
+        </TooltipTrigger>
+        <TooltipContent
+          side="bottom"
+          align="end"
+          className="w-64 border border-white/10 bg-zinc-900 p-3 text-zinc-100 shadow-xl dark:bg-zinc-900 dark:text-zinc-100 [&>svg]:bg-zinc-900 [&>svg]:fill-zinc-900"
+        >
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <span className="font-medium">Context usage</span>
+              <span className={cn("font-medium", color)}>{percentage.toFixed(1)}%</span>
+            </div>
+            <div className="h-1.5 overflow-hidden rounded-full bg-white/15">
+              <div className={cn("h-full rounded-full transition-[width,background-color] duration-500", color.replace("text-", "bg-"))} style={{ width: `${percentage}%` }} />
+            </div>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-zinc-300">
+              <span>Used</span><span className="text-right text-zinc-100">{formatTokenCount(used)} tokens</span>
+              <span>Maximum</span><span className="text-right text-zinc-100">{formatTokenCount(total)} tokens</span>
+              <span>Remaining</span><span className="text-right text-zinc-100">{formatTokenCount(Math.max(0, total - used))} tokens</span>
+            </div>
+            <p className="text-[10px] leading-snug text-zinc-400">
+              {estimated ? "The current value is estimated; actual usage will be shown after the next model run." : "Measured from the input tokens of the last model run."}
+            </p>
+          </div>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
 }
 
 type ChatSnapshot = {
@@ -4131,6 +4209,11 @@ export default function AppShell() {
     );
   }
 
+  function toggleWorkspace() {
+    setActiveWorkspaceId((current) => current ?? workspaces[0]?.id ?? null);
+    setWorkspaceOpen((open) => !open);
+  }
+
   async function cancelSubagent() {
     const chatId = activeChatIdRef.current;
     if (!chatId || cancellingSubagent) return;
@@ -4877,6 +4960,16 @@ export default function AppShell() {
       providerId: selectedKey.providerKey,
       providerName: selectedProvider?.label,
     } satisfies ModelInfo);
+  const latestUsage = [...messages]
+    .reverse()
+    .find((message) => message.role === "assistant" && message.runMetadata?.inputTokens)
+    ?.runMetadata;
+  const estimatedContextTokens = Math.ceil(
+    messages.reduce((total, message) => total + message.content.length, 0) / 4,
+  );
+  const contextUsed = latestUsage?.inputTokens ?? estimatedContextTokens;
+  const contextTotal = selectedModel.contextWindow || 128_000;
+  const contextEstimated = !latestUsage?.inputTokens;
   const selectedAttrs = modelAttrSummary(selectedModel, modelParams);
   const providerQueryMatch = normalizedModelSearch.match(/^([a-z0-9_-]+):(.*)$/);
   const providerQuery = providerQueryMatch &&
@@ -5684,6 +5777,12 @@ export default function AppShell() {
               onModelParamsChange={applyModelParams}
               onInsertPrompt={(text) => setInput(text)}
             />
+            <ContextUsageCircle
+              className="ml-auto"
+              used={contextUsed}
+              total={contextTotal}
+              estimated={contextEstimated}
+            />
           </div>
         )}
       </div>
@@ -5694,7 +5793,7 @@ export default function AppShell() {
     <div className="flex h-full min-w-0 flex-col overflow-hidden">
       <div
         className={cn(
-          "relative shrink-0 items-center justify-center px-3 pb-2 pt-8",
+          "relative z-10 shrink-0 items-center justify-center px-3 pb-2 pt-8",
           mobile ? "flex md:hidden" : "hidden md:flex",
         )}
         aria-label="Metis AI"
@@ -5704,47 +5803,49 @@ export default function AppShell() {
           src="/hand-left.png"
           alt=""
           aria-hidden="true"
-          className="absolute left-0 h-9 w-auto max-w-[5rem] object-contain"
+          className="absolute left-0 z-10 h-9 w-auto max-w-[5rem] object-contain"
         />
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src="/hand-right.png"
           alt=""
           aria-hidden="true"
-          className="absolute right-0 h-9 w-auto max-w-[5rem] object-contain"
+          className="absolute right-0 z-10 h-9 w-auto max-w-[5rem] object-contain"
         />
       </div>
-      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pt-3">
-        <div className="space-y-0.5 pb-3">
-          <button
-            type="button"
-            className={cn(
-              "flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors",
-              isDraft
-                ? "text-primary"
-                : "text-muted-foreground hover:bg-white/[0.03] hover:text-foreground",
-            )}
-            onClick={() => openDraft()}
-          >
-            <Plus className="size-3.5 shrink-0 opacity-60" />
-            <span className="min-w-0 truncate">New chat</span>
-          </button>
-          <button
-            type="button"
-            className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] text-muted-foreground transition-colors hover:bg-white/[0.03] hover:text-foreground"
-            onClick={() => {
-              setDesktopSidebarOpen(false);
-              setMobileNavOpen(false);
-              setCommandPaletteOpen(true);
-            }}
-          >
-            <Search className="size-3.5 shrink-0 opacity-60" />
-            <span className="min-w-0 flex-1 truncate">Search chats</span>
-            <kbd className="hidden text-[10px] text-muted-foreground/70 lg:inline">⌘K</kbd>
-          </button>
-          <p className="px-2.5 pb-1 pt-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
-            Chats
-          </p>
+      <div className="relative z-0 shrink-0 px-2 pb-1 pt-3">
+        <button
+          type="button"
+          className={cn(
+            "flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors",
+            isDraft
+              ? "text-primary"
+              : "text-muted-foreground hover:bg-white/[0.03] hover:text-foreground",
+          )}
+          onClick={() => openDraft()}
+        >
+          <Plus className="size-3.5 shrink-0 opacity-60" />
+          <span className="min-w-0 truncate">New chat</span>
+        </button>
+        <button
+          type="button"
+          className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] text-muted-foreground transition-colors hover:bg-white/[0.03] hover:text-foreground"
+          onClick={() => {
+            setDesktopSidebarOpen(false);
+            setMobileNavOpen(false);
+            setCommandPaletteOpen(true);
+          }}
+        >
+          <Search className="size-3.5 shrink-0 opacity-60" />
+          <span className="min-w-0 flex-1 truncate">Search chats</span>
+          <kbd className="hidden text-[10px] text-muted-foreground/70 lg:inline">⌘K</kbd>
+        </button>
+        <p className="px-2.5 pb-1 pt-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
+          Chats
+        </p>
+      </div>
+      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2">
+        <div className="space-y-0.5 pb-3 pt-1">
           {!chatsLoaded ? (
             <div className="space-y-1 px-1.5 py-1" aria-label="Loading chats" role="status">
               {[0, 1, 2, 3, 4].map((item) => (
@@ -5969,8 +6070,7 @@ export default function AppShell() {
           setSettingsOpen(true);
         }}
         onOpenWorkspace={() => {
-          setActiveWorkspaceId((current) => current ?? workspaces[0]?.id ?? null);
-          setWorkspaceOpen(true);
+          toggleWorkspace();
         }}
         onOpenModel={() => setModelMenuOpen(true)}
         onToggleSidebar={() => setDesktopSidebarOpen((open) => !open)}
@@ -6044,12 +6144,9 @@ export default function AppShell() {
             variant="ghost"
             size="icon"
             className="size-8"
-            aria-label="Open workspace and browser"
-            title="Open workspace and browser"
-            onClick={() => {
-              setWorkspaceTab("browser");
-              setWorkspaceOpen(true);
-            }}
+            aria-label={workspaceOpen ? "Close workspace" : "Open workspace"}
+            title={workspaceOpen ? "Close workspace" : "Open workspace"}
+            onClick={toggleWorkspace}
           >
             <Globe2 className="size-4" />
           </Button>
@@ -6650,34 +6747,40 @@ export default function AppShell() {
           {browserFullscreen && workspaceTab === "browser" ? null : (
             <WorkspaceResizeHandle width={workspaceWidth} onWidthChange={setWorkspaceWidth} />
           )}
-          <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/30 px-3 py-2">
-            <div className="min-w-0">
-              <h1 className="flex items-center gap-1.5 text-[13px] font-medium">
-                {workspaceTab === "browser" ? <Globe2 className="size-4 shrink-0 text-cyan-400" /> : workspaceTab === "monitor" ? <Activity className="size-4 shrink-0 text-violet-400" /> : workspaceTab === "terminal" ? <Terminal className="size-4 shrink-0 text-orange-400" /> : workspaceTab === "files" ? <FileCode2 className="size-4 shrink-0 text-emerald-400" /> : activeWorkspace ? <WorkspaceIcon type={activeWorkspace.type} className="size-4 shrink-0" /> : null}
-                <span className="truncate">{workspaceTab === "browser" ? "Browser" : workspaceTab === "monitor" ? "Monitor" : workspaceTab === "terminal" ? "Terminal" : workspaceTab === "files" ? "Files" : activeWorkspace?.name || "Workspace"}</span>
-              </h1>
-            </div>
-            <Button type="button" variant="ghost" size="icon-xs" aria-label="Close side panel" onClick={() => { setBrowserFullscreen(false); setWorkspaceOpen(false); }}>
-              <X className="size-3.5" />
-            </Button>
-          </div>
-          <div className="flex shrink-0 gap-0.5 overflow-x-auto border-b border-border/30 px-2 py-1">
+          <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-border/30 px-2 py-1.5">
             {(["canvas", "plan", "files", "terminal", "browser", "monitor"] as const).map((tab) => (
               <Button
                 key={tab}
                 type="button"
-                size="xs"
+                size="sm"
                 variant={workspaceTab === tab ? "secondary" : "ghost"}
                 onClick={() => {
+                  if (workspaceTab === tab) {
+                    setBrowserFullscreen(false);
+                    setWorkspaceOpen(false);
+                    return;
+                  }
                   if (tab === "plan" || tab === "canvas") {
                     const workspace = workspaces.find((item) => item.type === tab);
                     setActiveWorkspaceId(workspace?.id ?? null);
                   }
                   setWorkspaceTab(tab);
                 }}
-                className="h-6 shrink-0 rounded-md px-2 text-[11px] capitalize"
+                className={cn(
+                  "h-8 min-w-8 shrink-0 rounded-lg transition-[max-width,background-color,padding] duration-300 ease-out",
+                  workspaceTab === tab ? "max-w-40 gap-1.5 px-2" : "w-8 max-w-8 gap-0 overflow-visible px-0",
+                )}
+                aria-label={tab === "plan" ? "Plans" : tab === "canvas" ? "Canvas" : tab[0].toUpperCase() + tab.slice(1)}
               >
-                {tab === "plan" ? "Plans" : tab === "files" ? "Files" : tab === "terminal" ? "Terminal" : tab === "monitor" ? "Monitor" : tab}
+                {tab === "canvas" ? <PanelRight className="size-4 shrink-0" /> : tab === "plan" ? <ClipboardList className="size-4 shrink-0" /> : tab === "files" ? <FileCode2 className="size-4 shrink-0" /> : tab === "terminal" ? <Terminal className="size-4 shrink-0" /> : tab === "browser" ? <Globe2 className="size-4 shrink-0" /> : <Activity className="size-4 shrink-0" />}
+                <span className={cn(
+                  "overflow-hidden whitespace-nowrap text-xs transition-[max-width,opacity,transform] duration-300",
+                  workspaceTab === tab
+                    ? "max-w-[10rem] translate-x-0 opacity-100"
+                    : "max-w-0 -translate-x-1 opacity-0",
+                )}>
+                  {tab === "canvas" ? (activeWorkspace?.type === "canvas" ? activeWorkspace.name : "Canvas") : tab === "plan" ? (activeWorkspace?.type === "plan" ? activeWorkspace.name : "Plans") : tab[0].toUpperCase() + tab.slice(1)}
+                </span>
               </Button>
             ))}
           </div>

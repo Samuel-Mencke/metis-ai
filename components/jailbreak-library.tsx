@@ -216,7 +216,7 @@ export default function JailbreakLibrary() {
           </h3>
           <div className="flex flex-wrap gap-1.5">
             <FilterChip active={model === "all"} onClick={() => setModel("all")}>
-              Alle Modelle
+              All models
             </FilterChip>
             {models.map((m) => (
               <FilterChip key={m} active={model === m} onClick={() => setModel(m)}>
@@ -229,9 +229,9 @@ export default function JailbreakLibrary() {
             Typ
           </h3>
           <div className="flex flex-wrap gap-1.5">
-            <FilterChip active={kind === "all"} onClick={() => setKind("all")}>Alle</FilterChip>
+            <FilterChip active={kind === "all"} onClick={() => setKind("all")}>All</FilterChip>
             <FilterChip active={kind === "technique"} onClick={() => setKind("technique")}>
-              Techniken
+              Techniques
             </FilterChip>
             <FilterChip active={kind === "model-specific"} onClick={() => setKind("model-specific")}>
               Modell-spezifisch
@@ -243,7 +243,7 @@ export default function JailbreakLibrary() {
           </h3>
           <div className="flex flex-col gap-0.5">
             <CatItem active={cat === "all"} count={data.prompts.length} onClick={() => setCat("all")}>
-              Alle Kategorien
+              All categories
             </CatItem>
             {categories.map((c) => (
               <CatItem key={c.id} active={cat === c.id} count={c.count} onClick={() => setCat(c.id)}>
@@ -317,7 +317,7 @@ export default function JailbreakLibrary() {
                         variant={copiedId === p.id ? "secondary" : "default"}
                       >
                         <Copy className="size-3.5" />
-                        {copiedId === p.id ? "Kopiert" : "Kopieren"}
+                        {copiedId === p.id ? "Copied" : "Copy"}
                       </Button>
                       <Button size="sm" variant="outline" className="flex-1" onClick={() => setActive(p)}>
                         <Filter className="size-3.5" /> Open
@@ -328,14 +328,14 @@ export default function JailbreakLibrary() {
               </div>
               {overflow > 0 && (
                 <div className="py-8 text-center text-sm text-muted-foreground">
-                  … {overflow} weitere. Bitte Filter verfeinern.
+                  … {overflow} more. Refine your filters.
                 </div>
               )}
             </>
           )}
 
           <footer className="py-8 text-center text-xs text-muted-foreground">
-            Quelle:{" "}
+            Source:{" "}
             <a
               href="https://github.com/AUTHENSOR/ai-seclists"
               target="_blank"
@@ -372,7 +372,7 @@ export default function JailbreakLibrary() {
               variant={copiedId === active?.id ? "secondary" : "default"}
             >
               <Copy className="size-4" />
-              {copiedId === active?.id ? "Kopiert" : "In Zwischenablage kopieren"}
+              {copiedId === active?.id ? "Copied" : "Copy to clipboard"}
             </Button>
             <Button variant="outline" onClick={() => setActive(null)}>Close</Button>
           </div>

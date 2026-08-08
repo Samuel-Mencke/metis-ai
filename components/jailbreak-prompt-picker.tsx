@@ -200,8 +200,8 @@ export function JailbreakPromptPicker({ modelDisplayName, onPick, className }: P
                   setOpen(false);
                 }
               }}
-              placeholder="Jailbreak-Prompt suchen…"
-              aria-label="Jailbreak-Prompt suchen"
+              placeholder="Search jailbreak prompts…"
+              aria-label="Search jailbreak prompts"
               className="h-10 border-0 bg-popover px-0 text-sm shadow-none focus-visible:ring-0 dark:bg-popover"
             />
             <Button
@@ -223,7 +223,7 @@ export function JailbreakPromptPicker({ modelDisplayName, onPick, className }: P
           {/* Filters */}
           <div className="flex items-center gap-1 overflow-x-auto border-b border-border/60 px-2 py-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             <FilterChip active={model === "all"} onClick={() => setModel("all")}>
-              Alle
+              All
             </FilterChip>
             {models.map((m) => (
               <FilterChip key={m} active={model === m} onClick={() => setModel(m)}>
@@ -232,7 +232,7 @@ export function JailbreakPromptPicker({ modelDisplayName, onPick, className }: P
             ))}
             <span className="mx-0.5 h-3.5 w-px shrink-0 bg-border/60" />
             <FilterChip active={cat === "all"} onClick={() => setCat("all")}>
-              Alle Kat.
+              All categories
             </FilterChip>
             {categories.map((c) => (
               <FilterChip key={c.id} active={cat === c.id} onClick={() => setCat(c.id)}>
@@ -285,8 +285,8 @@ export function JailbreakPromptPicker({ modelDisplayName, onPick, className }: P
                           void copyPrompt(p);
                         }}
                         className="rounded p-1 text-muted-foreground hover:text-foreground"
-                        aria-label="Kopieren"
-                        title="Kopieren"
+                        aria-label="Copy"
+                        title="Copy"
                       >
                         <Copy className="size-3" />
                         {copiedId === p.id ? "✓" : null}
@@ -297,7 +297,7 @@ export function JailbreakPromptPicker({ modelDisplayName, onPick, className }: P
                 ))}
                 {filtered.length > 200 ? (
                   <p className="px-2 py-2 text-center text-[10px] text-muted-foreground">
-                    … {filtered.length - 200} weitere.
+                    … {filtered.length - 200} more.
                   </p>
                 ) : null}
               </>

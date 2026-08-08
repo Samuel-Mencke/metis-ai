@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { Check, Pencil, Plus, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,6 +37,8 @@ export function MemoriesPanel({
 }: Props) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingValue, setEditingValue] = useState("");
 
   async function addMemory() {
     const content = draft.trim();
@@ -72,6 +74,28 @@ export function MemoriesPanel({
       toast.success("Memory deleted");
     } catch {
       toast.error("Failed to delete memory");
+    }
+  }
+
+  async function saveMemory(id: string) {
+    const content = editingValue.trim();
+    if (!content || busy) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/memories/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+      });
+      if (!res.ok) throw new Error("Failed to update memory");
+      setEditingId(null);
+      setEditingValue("");
+      onChanged();
+      toast.success("Memory updated");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to update memory");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -121,7 +145,21 @@ export function MemoriesPanel({
                   className="group flex items-start gap-2 rounded-lg border border-border/60 bg-card/40 p-3"
                 >
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm whitespace-pre-wrap">{m.content}</p>
+                    {editingId === m.id ? (
+                      <Input
+                        value={editingValue}
+                        onChange={(e) => setEditingValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") void saveMemory(m.id);
+                          if (e.key === "Escape") setEditingId(null);
+                        }}
+                        autoFocus
+                        className="h-8 text-sm"
+                        aria-label="Edit memory"
+                      />
+                    ) : (
+                      <p className="text-sm whitespace-pre-wrap">{m.content}</p>
+                    )}
                     {m.tags && m.tags.length > 0 ? (
                       <p className="mt-1 text-xs text-muted-foreground">
                         {m.tags.join(" · ")}
@@ -137,6 +175,29 @@ export function MemoriesPanel({
                   >
                     <Trash2 className="size-3.5" />
                   </Button>
+                  {editingId === m.id ? (
+                    <>
+                      <Button variant="ghost" size="icon-sm" onClick={() => void saveMemory(m.id)} disabled={busy || !editingValue.trim()} aria-label="Save memory">
+                        <Check className="size-3.5" />
+                      </Button>
+                      <Button variant="ghost" size="icon-sm" onClick={() => setEditingId(null)} aria-label="Cancel editing memory">
+                        <X className="size-3.5" />
+                      </Button>
+                    </>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="opacity-60 group-hover:opacity-100"
+                      onClick={() => {
+                        setEditingId(m.id);
+                        setEditingValue(m.content);
+                      }}
+                      aria-label="Edit memory"
+                    >
+                      <Pencil className="size-3.5" />
+                    </Button>
+                  )}
                 </li>
               ))
             )}

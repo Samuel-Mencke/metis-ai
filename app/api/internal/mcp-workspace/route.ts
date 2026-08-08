@@ -22,10 +22,38 @@ export async function POST(req: Request) {
 
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
   const type = body.type === "plan" || body.type === "canvas" ? body.type : null;
-  if (!type) return Response.json({ error: "type must be plan or canvas" }, { status: 400 });
 
   const chat = getChat(chatId, userId);
   if (!chat) return Response.json({ error: "Chat not found" }, { status: 404 });
+
+  const existingId = typeof body.id === "string" ? body.id.trim() : "";
+  if (body.action === "list") {
+    return Response.json({
+      workspaces: type ? (chat.workspaces || []).filter((item) => item.type === type) : (chat.workspaces || []),
+    });
+  }
+  if (body.action === "delete") {
+    if (!existingId) return Response.json({ error: "id is required" }, { status: 400 });
+    const existing = (chat.workspaces || []).find((item) => item.id === existingId && (!type || item.type === type));
+    if (!existing) return Response.json({ error: "Workspace not found" }, { status: 404 });
+    updateChat(chatId, { workspaces: (chat.workspaces || []).filter((item) => item.id !== existingId) }, userId);
+    return Response.json({ ok: true, id: existingId });
+  }
+  if (!type) return Response.json({ error: "type must be plan or canvas" }, { status: 400 });
+  if (existingId && (body.action === "edit" || body.action === "update")) {
+    const existing = (chat.workspaces || []).find((item) => item.id === existingId && item.type === type);
+    if (!existing) return Response.json({ error: "Workspace not found" }, { status: 404 });
+    const updated: WorkspaceItem = {
+      ...existing,
+      ...(typeof body.title === "string" ? { name: body.title.trim().slice(0, 200) || existing.name } : {}),
+      ...(typeof body.content === "string" ? { content: body.content.slice(0, 100_000) } : {}),
+      updatedAt: new Date().toISOString(),
+    };
+    updateChat(chatId, {
+      workspaces: (chat.workspaces || []).map((item) => item.id === existingId ? updated : item),
+    }, userId);
+    return Response.json({ ...updated, workspaceLink: `workspace://${type}/${updated.id}` });
+  }
 
   const defaultName = type === "plan" ? "Plan" : "Canvas";
   const requestedName = typeof body.title === "string" ? body.title.trim().slice(0, 200) : "";
