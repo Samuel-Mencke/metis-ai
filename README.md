@@ -1,8 +1,19 @@
 <div align="center">
 
-# Metis AI
-
-### A private, extensible workspace for AI agents
+<table>
+  <tr>
+    <td align="left" width="25%">
+      <img src="./public/hand-left.png" alt="Left hand" width="180">
+    </td>
+    <td align="center" width="50%">
+      <h1>Metis AI</h1>
+      <h3>A private, extensible workspace for AI agents</h3>
+    </td>
+    <td align="right" width="25%">
+      <img src="./public/hand-right.png" alt="Right hand" width="180">
+    </td>
+  </tr>
+</table>
 
 Conversations, tools, terminals, browser sessions, memories, workspaces and
 MCP servers — brought together in one self-hosted application.
