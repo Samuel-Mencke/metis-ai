@@ -177,6 +177,15 @@ function selectedQuestionValues(answer: string): string[] {
   }
 }
 
+function formatToolPayload(value?: string) {
+  if (!value) return "(none)";
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
+  }
+}
+
 type ToolPart = {
   id: string;
   name: string;
@@ -648,7 +657,7 @@ function mergeWorkspaceItems(current: WorkspaceItem[], workspace: WorkspaceItem)
 function WorkspaceIcon({ type, className }: { type: WorkspaceItem["type"]; className?: string }) {
   return type === "plan"
     ? <ClipboardList className={className} />
-    : <PanelRight className={className} />;
+    : <Palette className={className} />;
 }
 
 function ErrorMessageCard({ message }: { message: string }) {
@@ -761,6 +770,7 @@ function ContextUsageCircle({
   const radius = 8;
   const circumference = 2 * Math.PI * radius;
   const color = percentage >= 90 ? "text-red-400" : percentage >= 75 ? "text-amber-400" : "text-emerald-400";
+  const barColor = percentage >= 90 ? "bg-red-400" : percentage >= 75 ? "bg-amber-400" : "bg-emerald-400";
   return (
     <TooltipProvider>
       <Tooltip open={tooltipOpen} onOpenChange={setTooltipOpen}>
@@ -791,7 +801,9 @@ function ContextUsageCircle({
         <TooltipContent
           side="bottom"
           align="end"
-          className="w-64 border border-white/10 bg-zinc-900 p-3 text-zinc-100 shadow-xl dark:bg-zinc-900 dark:text-zinc-100 [&>svg]:bg-zinc-900 [&>svg]:fill-zinc-900"
+          sideOffset={8}
+          arrowClassName="!bg-popover !fill-popover"
+          className="w-64 rounded-xl border border-border/60 bg-popover p-3 text-popover-foreground shadow-xl"
         >
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-3">
@@ -799,7 +811,7 @@ function ContextUsageCircle({
               <span className={cn("font-medium", color)}>{percentage.toFixed(1)}%</span>
             </div>
             <div className="h-1.5 overflow-hidden rounded-full bg-white/15">
-              <div className={cn("h-full rounded-full transition-[width,background-color] duration-500", color.replace("text-", "bg-"))} style={{ width: `${percentage}%` }} />
+              <div className={cn("h-full rounded-full transition-[width,background-color] duration-500", barColor)} style={{ width: `${percentage}%` }} />
             </div>
             <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-zinc-300">
               <span>Used</span><span className="text-right text-zinc-100">{formatTokenCount(used)} tokens</span>
@@ -1390,7 +1402,7 @@ export default function AppShell() {
   const [activeSubagent, setActiveSubagent] = useState<ActiveSubagent | null>(null);
   const [cancellingSubagent, setCancellingSubagent] = useState(false);
   const [revertTarget, setRevertTarget] = useState<Msg | null>(null);
-  const [manualCleanupTools, setManualCleanupTools] = useState<string[]>([]);
+  const [manualCleanupTools, setManualCleanupTools] = useState<ToolPart[]>([]);
   const [reverting, setReverting] = useState(false);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -1486,6 +1498,8 @@ export default function AppShell() {
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [renameChatId, setRenameChatId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Pick<ChatIndexEntry, "id" | "title"> | null>(null);
+  const [deletingChat, setDeletingChat] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
@@ -1713,6 +1727,9 @@ export default function AppShell() {
           node &&
           messagesScrollRef.current?.contains(node),
       );
+      if (hasSelection && swipeRef.current) {
+        swipeRef.current.ignored = true;
+      }
       if (!hasSelection) setSelectionAction(null);
     };
 
@@ -1948,8 +1965,11 @@ export default function AppShell() {
       return;
     }
     const target = event.target as HTMLElement;
+    const selection = window.getSelection();
+    const hasSelectedText = Boolean(selection && !selection.isCollapsed && selection.toString().trim());
     const ignored = Boolean(
-      target.closest("input, textarea, button, a, select, [contenteditable='true'], [data-swipe-ignore]"),
+      hasSelectedText ||
+        target.closest("input, textarea, button, a, select, [contenteditable='true'], [data-swipe-ignore]"),
     );
     const touch = event.touches[0];
     swipeRef.current = { x: touch.clientX, y: touch.clientY, ignored };
@@ -1959,6 +1979,8 @@ export default function AppShell() {
     const start = swipeRef.current;
     swipeRef.current = null;
     if (!start || start.ignored || typeof window === "undefined" || window.innerWidth >= 768) return;
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed && selection.toString().trim()) return;
     const touch = event.changedTouches[0];
     const deltaX = touch.clientX - start.x;
     const deltaY = touch.clientY - start.y;
@@ -3738,15 +3760,21 @@ export default function AppShell() {
   }
 
   async function removeChat(id: string) {
-    const res = await fetch(`/api/chats/${id}`, { method: "DELETE" });
-    if (!res.ok) {
-      toast.error("Delete failed");
-      return;
+    setDeletingChat(true);
+    try {
+      const res = await fetch(`/api/chats/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        toast.error("Delete failed");
+        return;
+      }
+      chatCacheRef.current.delete(id);
+      clearUnread(id);
+      if (activeChatId === id) openDraft();
+      setDeleteTarget(null);
+      await loadChats();
+    } finally {
+      setDeletingChat(false);
     }
-    chatCacheRef.current.delete(id);
-    clearUnread(id);
-    if (activeChatId === id) openDraft();
-    await loadChats();
   }
 
   async function updateChatFlags(
@@ -3804,7 +3832,7 @@ export default function AppShell() {
       const data = (await res.json().catch(() => ({}))) as {
         chat?: Chat;
         conflicts?: Array<{ path?: string }>;
-        nonReversible?: { count?: number; names?: string[] };
+        nonReversible?: { count?: number; names?: string[]; tools?: ToolPart[] };
         warnings?: string[];
         error?: string;
       };
@@ -3864,6 +3892,12 @@ export default function AppShell() {
       const conflicts = data.conflicts ?? [];
       const nonReversibleCount = data.nonReversible?.count ?? 0;
       const nonReversibleNames = data.nonReversible?.names ?? [];
+      const nonReversibleTools = data.nonReversible?.tools
+        ?? nonReversibleNames.map((name, index) => ({
+          id: `${name}-${index}`,
+          name,
+          status: "unknown",
+        }));
       const warningCount = data.warnings?.length ?? 0;
       if (conflicts.length || nonReversibleCount || warningCount) {
         const names = conflicts
@@ -3883,7 +3917,7 @@ export default function AppShell() {
             ? {
                 action: {
                   label: "Details",
-                  onClick: () => setManualCleanupTools(nonReversibleNames),
+                  onClick: () => setManualCleanupTools(nonReversibleTools),
                 },
               }
             : undefined,
@@ -5242,7 +5276,7 @@ export default function AppShell() {
       file: FileIcon,
       canvas: Palette,
       plan: ClipboardList,
-      browser: Globe2,
+      browser: PanelRight,
       memory: Brain,
       chat: MessageSquare,
       terminal: Terminal,
@@ -5627,7 +5661,7 @@ export default function AppShell() {
             <span>Loading models…</span>
           </div>
         ) : (
-          <div className="group/model flex items-center gap-0.5">
+          <div className="group/model flex flex-1 items-center gap-0.5">
             <DropdownMenu open={modelMenuOpen} onOpenChange={setModelMenuOpen}>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -5778,7 +5812,7 @@ export default function AppShell() {
               onInsertPrompt={(text) => setInput(text)}
             />
             <ContextUsageCircle
-              className="ml-auto"
+              className="ml-auto mr-1.5"
               used={contextUsed}
               total={contextTotal}
               estimated={contextEstimated}
@@ -5946,7 +5980,7 @@ export default function AppShell() {
                   </DropdownMenuItem>
                   <DropdownMenuItem
                     variant="destructive"
-                    onClick={() => void removeChat(c.id)}
+                    onClick={() => setDeleteTarget({ id: c.id, title: c.title })}
                   >
                     <Trash2 className="size-3.5" />
                     Delete
@@ -6148,7 +6182,7 @@ export default function AppShell() {
             title={workspaceOpen ? "Close workspace" : "Open workspace"}
             onClick={toggleWorkspace}
           >
-            <Globe2 className="size-4" />
+            <PanelRight className="size-4" />
           </Button>
         </header>
 
@@ -6747,42 +6781,58 @@ export default function AppShell() {
           {browserFullscreen && workspaceTab === "browser" ? null : (
             <WorkspaceResizeHandle width={workspaceWidth} onWidthChange={setWorkspaceWidth} />
           )}
-          <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-border/30 px-2 py-1.5">
-            {(["canvas", "plan", "files", "terminal", "browser", "monitor"] as const).map((tab) => (
-              <Button
-                key={tab}
-                type="button"
-                size="sm"
-                variant={workspaceTab === tab ? "secondary" : "ghost"}
-                onClick={() => {
-                  if (workspaceTab === tab) {
-                    setBrowserFullscreen(false);
-                    setWorkspaceOpen(false);
-                    return;
-                  }
-                  if (tab === "plan" || tab === "canvas") {
-                    const workspace = workspaces.find((item) => item.type === tab);
-                    setActiveWorkspaceId(workspace?.id ?? null);
-                  }
-                  setWorkspaceTab(tab);
-                }}
-                className={cn(
-                  "h-8 min-w-8 shrink-0 rounded-lg transition-[max-width,background-color,padding] duration-300 ease-out",
-                  workspaceTab === tab ? "max-w-40 gap-1.5 px-2" : "w-8 max-w-8 gap-0 overflow-visible px-0",
-                )}
-                aria-label={tab === "plan" ? "Plans" : tab === "canvas" ? "Canvas" : tab[0].toUpperCase() + tab.slice(1)}
-              >
-                {tab === "canvas" ? <PanelRight className="size-4 shrink-0" /> : tab === "plan" ? <ClipboardList className="size-4 shrink-0" /> : tab === "files" ? <FileCode2 className="size-4 shrink-0" /> : tab === "terminal" ? <Terminal className="size-4 shrink-0" /> : tab === "browser" ? <Globe2 className="size-4 shrink-0" /> : <Activity className="size-4 shrink-0" />}
-                <span className={cn(
-                  "overflow-hidden whitespace-nowrap text-xs transition-[max-width,opacity,transform] duration-300",
-                  workspaceTab === tab
-                    ? "max-w-[10rem] translate-x-0 opacity-100"
-                    : "max-w-0 -translate-x-1 opacity-0",
-                )}>
-                  {tab === "canvas" ? (activeWorkspace?.type === "canvas" ? activeWorkspace.name : "Canvas") : tab === "plan" ? (activeWorkspace?.type === "plan" ? activeWorkspace.name : "Plans") : tab[0].toUpperCase() + tab.slice(1)}
-                </span>
-              </Button>
-            ))}
+          <div className="flex shrink-0 items-center gap-1 border-b border-border/30 px-2 py-1.5">
+            <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto">
+              {(["canvas", "plan", "files", "terminal", "browser", "monitor"] as const).map((tab) => (
+                <Button
+                  key={tab}
+                  type="button"
+                  size="sm"
+                  variant={workspaceTab === tab ? "secondary" : "ghost"}
+                  onClick={() => {
+                    if (workspaceTab === tab) {
+                      setBrowserFullscreen(false);
+                      setWorkspaceOpen(false);
+                      return;
+                    }
+                    if (tab === "plan" || tab === "canvas") {
+                      const workspace = workspaces.find((item) => item.type === tab);
+                      setActiveWorkspaceId(workspace?.id ?? null);
+                    }
+                    setWorkspaceTab(tab);
+                  }}
+                  className={cn(
+                    "h-8 min-w-8 shrink-0 rounded-lg transition-[max-width,background-color,padding] duration-300 ease-out",
+                    workspaceTab === tab ? "max-w-40 gap-1.5 px-2" : "w-8 max-w-8 gap-0 overflow-visible px-0",
+                  )}
+                  aria-label={tab === "plan" ? "Plans" : tab === "canvas" ? "Canvas" : tab[0].toUpperCase() + tab.slice(1)}
+                >
+                  {tab === "canvas" ? <Palette className="size-4 shrink-0" /> : tab === "plan" ? <ClipboardList className="size-4 shrink-0" /> : tab === "files" ? <FileCode2 className="size-4 shrink-0" /> : tab === "terminal" ? <Terminal className="size-4 shrink-0" /> : tab === "browser" ? <Globe2 className="size-4 shrink-0" /> : <Activity className="size-4 shrink-0" />}
+                  <span className={cn(
+                    "overflow-hidden whitespace-nowrap text-xs transition-[max-width,opacity,transform] duration-300",
+                    workspaceTab === tab
+                      ? "max-w-[10rem] translate-x-0 opacity-100"
+                      : "max-w-0 -translate-x-1 opacity-0",
+                  )}>
+                    {tab === "canvas" ? (activeWorkspace?.type === "canvas" ? activeWorkspace.name : "Canvas") : tab === "plan" ? (activeWorkspace?.type === "plan" ? activeWorkspace.name : "Plans") : tab[0].toUpperCase() + tab.slice(1)}
+                  </span>
+                </Button>
+              ))}
+            </div>
+            <Button
+              type="button"
+              size="icon-sm"
+              variant="ghost"
+              className="size-8 shrink-0"
+              aria-label="Close workspace"
+              title="Close workspace"
+              onClick={() => {
+                setBrowserFullscreen(false);
+                setWorkspaceOpen(false);
+              }}
+            >
+              <X className="size-4" />
+            </Button>
           </div>
           <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden p-2.5">
             {workspaceTab === "browser" ? (
@@ -7350,17 +7400,52 @@ export default function AppShell() {
         open={manualCleanupTools.length > 0}
         onOpenChange={(open) => !open && setManualCleanupTools([])}
       >
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>Tool calls needing manual cleanup</DialogTitle>
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
-            These external actions could not be reverted automatically:
+            These external actions could not be reverted automatically. Review the
+            request sent by the agent and the response returned by each tool.
           </p>
-          <ul className="flex max-h-64 flex-col gap-2 overflow-y-auto rounded-lg border border-border/60 bg-muted/20 p-3 text-sm">
-            {manualCleanupTools.map((toolName, index) => (
-              <li key={`${toolName}-${index}`} className="break-words font-mono text-xs">
-                {toolName}
+          <ul className="flex max-h-[65vh] flex-col gap-3 overflow-y-auto rounded-lg border border-border/60 bg-muted/20 p-3 text-sm">
+            {manualCleanupTools.map((tool, index) => (
+              <li key={`${tool.id}-${index}`} className="min-w-0 rounded-md border border-border/60 bg-background/50 p-3">
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                  <span className="break-words font-medium text-foreground">{tool.name}</span>
+                  <span className="text-xs text-muted-foreground">({tool.status})</span>
+                  {tool.kind ? <span className="text-xs text-muted-foreground">· {tool.kind}</span> : null}
+                </div>
+                <div className="mt-2 grid gap-2">
+                  <div>
+                    <p className="mb-1 text-xs font-medium text-muted-foreground">Agent request</p>
+                    <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/30 p-2 font-mono text-[11px] leading-4 text-foreground/85">
+                      {formatToolPayload(tool.input)}
+                    </pre>
+                  </div>
+                  <div>
+                    <p className="mb-1 text-xs font-medium text-muted-foreground">Tool response</p>
+                    <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/30 p-2 font-mono text-[11px] leading-4 text-foreground/85">
+                      {formatToolPayload(tool.result)}
+                    </pre>
+                  </div>
+                </div>
+                {tool.detail || tool.path || tool.subagent || tool.todos ? (
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
+                      Additional details
+                    </summary>
+                    <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/30 p-2 font-mono text-[11px] leading-4 text-foreground/85">
+                      {JSON.stringify({
+                        id: tool.id,
+                        detail: tool.detail,
+                        path: tool.path,
+                        todos: tool.todos,
+                        subagent: tool.subagent,
+                      }, null, 2)}
+                    </pre>
+                  </details>
+                ) : null}
               </li>
             ))}
           </ul>
@@ -7425,6 +7510,42 @@ export default function AppShell() {
               Cancel
             </Button>
             <Button onClick={() => void submitRename()}>Save</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => {
+          if (!open && !deletingChat) setDeleteTarget(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Delete chat?</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Are you sure you want to delete{" "}
+            <span className="font-medium text-foreground">{deleteTarget?.title || "this chat"}</span>?
+            This action cannot be undone.
+          </p>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              disabled={deletingChat}
+              onClick={() => setDeleteTarget(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deletingChat || !deleteTarget}
+              onClick={() => {
+                if (deleteTarget) void removeChat(deleteTarget.id);
+              }}
+            >
+              {deletingChat ? "Deleting…" : "Delete"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

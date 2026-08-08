@@ -1,6 +1,6 @@
 "use client";
 
-import { ExternalLink, PanelRight } from "lucide-react";
+import { ExternalLink, Palette } from "lucide-react";
 import { Markdown } from "@/components/markdown";
 
 export type CanvasWorkspaceCardProps = {
@@ -20,7 +20,7 @@ export function CanvasWorkspaceCard({
     <section className="my-2.5 w-full rounded-lg border border-border/50 bg-muted/20 p-2.5">
       <div className="flex items-start gap-2">
         <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-          <PanelRight className="size-3.5" />
+          <Palette className="size-3.5" />
         </span>
         <div className="min-w-0 flex-1">
           <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">

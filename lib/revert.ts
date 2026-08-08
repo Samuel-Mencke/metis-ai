@@ -106,6 +106,7 @@ export function revertMessages(
 ) {
   const revertedFiles: RevertFileResult[] = [];
   const nonReversibleNames: string[] = [];
+  const nonReversibleTools: ToolPart[] = [];
   let canvasUpdated = false;
 
   for (let i = messages.length - 1; i >= startIndex; i -= 1) {
@@ -118,6 +119,7 @@ export function revertMessages(
         revertedFiles.push(revertEditTool(tool, agentCwd));
       } else {
         nonReversibleNames.push(tool.name);
+        nonReversibleTools.push(tool);
       }
     }
   }
@@ -125,6 +127,7 @@ export function revertMessages(
   return {
     revertedFiles,
     nonReversibleNames,
+    nonReversibleTools,
     canvasUpdated,
   };
 }

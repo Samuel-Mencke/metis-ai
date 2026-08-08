@@ -13,7 +13,7 @@ import {
   ListTodo,
   LoaderCircle,
   ExternalLink,
-  PanelRight,
+  Palette,
   Terminal,
 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -240,7 +240,7 @@ export function ToolCallChip({
     shell: { label: "Shell", icon: Terminal, color: "text-orange-400", border: "border-orange-400/30", bg: "bg-orange-400/10" },
     subagent: { label: "Subagent", icon: Bot, color: "text-purple-400", border: "border-purple-400/30", bg: "bg-purple-400/10" },
     mcp: { label: "MCP", icon: Cable, color: "text-cyan-400", border: "border-cyan-400/30", bg: "bg-cyan-400/10" },
-    canvas: { label: "Canvas", icon: PanelRight, color: "text-pink-400", border: "border-pink-400/30", bg: "bg-pink-400/10" },
+    canvas: { label: "Canvas", icon: Palette, color: "text-pink-400", border: "border-pink-400/30", bg: "bg-pink-400/10" },
     todo: { label: "Tasks", icon: ListTodo, color: "text-blue-400", border: "border-blue-400/30", bg: "bg-blue-400/10" },
     browser: { label: "Browser", icon: Globe2, color: "text-cyan-400", border: "border-cyan-400/30", bg: "bg-cyan-400/10" },
     memory: { label: "Memory", icon: Brain, color: "text-violet-400", border: "border-violet-400/30", bg: "bg-violet-400/10" },

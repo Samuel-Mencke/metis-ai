@@ -54,6 +54,7 @@ export async function POST(req: Request, { params }: Params) {
     nonReversible: {
       count: result.nonReversibleNames.length,
       names: result.nonReversibleNames,
+      tools: result.nonReversibleTools,
     },
     warnings: [
       ...result.revertedFiles
