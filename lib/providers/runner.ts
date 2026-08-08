@@ -704,6 +704,9 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
   if (!connection || !connection.enabled || connection.providerKey !== parsed.providerKey) {
     throw new Error(`No enabled ${definition.name} connection is configured.`);
   }
+  if (!definition.authTypes.includes(connection.authType)) {
+    throw new Error(`${definition.name} no longer supports ${connection.authType} authentication.`);
+  }
   const credential = getProviderConnectionSecret(connection.id, job.userId);
   if (!credential) throw new Error("Provider connection not found.");
   if (

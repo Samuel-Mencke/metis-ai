@@ -39,9 +39,6 @@ const API_KEY_URLS: Record<string, string> = {
   google: "https://aistudio.google.com/app/apikey",
   xai: "https://console.x.ai/",
   openrouter: "https://openrouter.ai/keys",
-  codex: "https://platform.openai.com/api-keys",
-  "claude-code": "https://console.anthropic.com/settings/keys",
-  antigravity: "https://aistudio.google.com/app/apikey",
 };
 
 export function ProviderSetupDialog({
@@ -68,6 +65,7 @@ export function ProviderSetupDialog({
 
   const selected = providers.find((provider) => provider.key === selectedKey);
   const supportsOAuth = selected?.authTypes.includes("oauth") ?? false;
+  const supportsApiKey = selected?.authTypes.includes("api_key") ?? false;
   const apiKeyUrl = selected ? API_KEY_URLS[selected.key] : undefined;
 
   useEffect(() => {
@@ -233,7 +231,7 @@ export function ProviderSetupDialog({
         ) : (
           <div className="space-y-4">
             <div className="flex items-center gap-2 text-[11px] text-muted-foreground" aria-label="Provider setup progress">
-              {["Provider", "API key", "Test", "Chat"].map((label, index) => {
+              {["Provider", supportsApiKey ? "API key" : "Sign in", "Test", "Chat"].map((label, index) => {
                 const number = index + 1;
                 return (
                   <div key={label} className="flex min-w-0 items-center gap-1.5">
@@ -281,23 +279,27 @@ export function ProviderSetupDialog({
             {step === 2 && selected ? (
               <div className="space-y-3 rounded-xl border border-border/60 bg-muted/20 p-4">
                 <p className="flex items-center gap-2 text-sm font-medium">
-                  <KeyRound className="size-4" /> Connect {selected.name}
+                  {supportsApiKey ? <KeyRound className="size-4" /> : <ShieldCheck className="size-4" />} Connect {selected.name}
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  Paste the API key from {selected.name}. You can go back and choose another provider at any time.
+                  {supportsApiKey
+                    ? `Paste the API key from ${selected.name}. You can go back and choose another provider at any time.`
+                    : `Sign in with OAuth to connect ${selected.name}.`}
                 </p>
-                <Input
-                  type="password"
-                  value={secret}
-                  onChange={(event) => setSecret(event.target.value)}
-                  placeholder="Paste your API key"
-                  autoComplete="off"
-                  disabled={busy}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") void connectApiKey();
-                  }}
-                />
-                {apiKeyUrl ? (
+                {supportsApiKey ? (
+                  <Input
+                    type="password"
+                    value={secret}
+                    onChange={(event) => setSecret(event.target.value)}
+                    placeholder="Paste your API key"
+                    autoComplete="off"
+                    disabled={busy}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") void connectApiKey();
+                    }}
+                  />
+                ) : null}
+                {supportsApiKey && apiKeyUrl ? (
                   <Button
                     type="button"
                     variant="secondary"
@@ -317,10 +319,12 @@ export function ProviderSetupDialog({
                       <ShieldCheck className="size-4" /> Use OAuth
                     </Button>
                   ) : null}
-                  <Button type="button" onClick={() => void connectApiKey()} disabled={busy || !secret.trim()}>
-                    {busy ? <LoaderCircle className="size-4 animate-spin" /> : <KeyRound className="size-4" />}
-                    Save & continue
-                  </Button>
+                  {supportsApiKey ? (
+                    <Button type="button" onClick={() => void connectApiKey()} disabled={busy || !secret.trim()}>
+                      {busy ? <LoaderCircle className="size-4 animate-spin" /> : <KeyRound className="size-4" />}
+                      Save & continue
+                    </Button>
+                  ) : null}
                 </div>
                 {oauthFlow ? (
                   <div className="space-y-2 rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs">

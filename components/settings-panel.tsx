@@ -210,9 +210,6 @@ const API_KEY_URLS: Record<string, string> = {
   google: "https://aistudio.google.com/app/apikey",
   xai: "https://console.x.ai/",
   openrouter: "https://openrouter.ai/keys",
-  codex: "https://platform.openai.com/api-keys",
-  "claude-code": "https://console.anthropic.com/settings/keys",
-  antigravity: "https://aistudio.google.com/app/apikey",
 };
 
 export type ModelParamValue = {

@@ -46,3 +46,10 @@ test("registry includes native and generic provider paths", () => {
     assert.equal(keys.has(key), true, `missing provider ${key}`);
   }
 });
+
+test("agent providers use OAuth exclusively", () => {
+  for (const key of ["codex", "claude-code", "antigravity"]) {
+    const provider = listProviderDefinitions().find((item) => item.key === key);
+    assert.deepEqual(provider?.authTypes, ["oauth"], `${key} should only allow OAuth`);
+  }
+});

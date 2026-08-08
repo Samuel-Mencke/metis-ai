@@ -45,6 +45,56 @@ function classifyTool(name: string): ToolPart["kind"] {
   return "other";
 }
 
+type ProvidedAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  kind: "image" | "file";
+  storedName: string;
+  size: number;
+};
+
+function extractProvidedAttachment(value: unknown): ProvidedAttachment | null {
+  if (typeof value === "string") {
+    try {
+      return extractProvidedAttachment(JSON.parse(value));
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (record.attachment) return extractProvidedAttachment(record.attachment);
+  if (
+    typeof record.id === "string" &&
+    typeof record.name === "string" &&
+    typeof record.mimeType === "string" &&
+    (record.kind === "image" || record.kind === "file") &&
+    typeof record.storedName === "string" &&
+    typeof record.size === "number"
+  ) {
+    return {
+      id: record.id,
+      name: record.name,
+      mimeType: record.mimeType,
+      kind: record.kind,
+      storedName: record.storedName,
+      size: record.size,
+    };
+  }
+  if (Array.isArray(record.content)) {
+    for (const item of record.content) {
+      const attachment = extractProvidedAttachment(item);
+      if (attachment) return attachment;
+      if (item && typeof item === "object" && "text" in item) {
+        const textAttachment = extractProvidedAttachment((item as { text?: unknown }).text);
+        if (textAttachment) return textAttachment;
+      }
+    }
+  }
+  return null;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -392,6 +442,7 @@ export async function runQueuedJob(job: AgentJob) {
   let agent: Awaited<ReturnType<typeof Agent.create>> | undefined;
   let text = "";
   const tools: ToolPart[] = [];
+  const providedAttachments: ProvidedAttachment[] = [];
   const createdWorkspaces: WorkspaceItem[] = [];
   const createdChats: Array<{ id: string; title: string }> = [];
   const mcpContext = { chatId: job.chatId, userId: job.userId, jobId: job.id };
@@ -433,6 +484,7 @@ export async function runQueuedJob(job: AgentJob) {
       role: "assistant",
       content: text,
       ...(tools.length ? { tools: [...tools] } : {}),
+      ...(providedAttachments.length ? { attachments: [...providedAttachments] } : {}),
     });
   };
   const persistWorkspace = (type: WorkspaceItem["type"], content: string, name = type === "plan" ? "Plan" : "Canvas") => {
@@ -629,6 +681,13 @@ export async function runQueuedJob(job: AgentJob) {
         const toolResult = typeof toolEvent.result === "string"
           ? toolEvent.result
           : toolEvent.result ? JSON.stringify(toolEvent.result) : "";
+        const providedAttachment =
+          toolName === "provide_file" && isFinishedToolStatus(toolStatus)
+            ? extractProvidedAttachment(toolEvent.result)
+            : null;
+        if (providedAttachment && !providedAttachments.some((item) => item.id === providedAttachment.id)) {
+          providedAttachments.push(providedAttachment);
+        }
         const parsedWorkspace =
           extractWorkspace(toolResult) ||
           (toolEvent.args !== undefined ? extractWorkspace(JSON.stringify(toolEvent.args)) : null) ||
@@ -667,6 +726,7 @@ export async function runQueuedJob(job: AgentJob) {
           ...(nextTool.input ? { input: nextTool.input } : {}),
           ...(nextTool.result ? { result: nextTool.result } : {}),
           ...(nextTool.subagent ? { subagent: nextTool.subagent } : {}),
+          ...(providedAttachment ? { attachment: providedAttachment } : {}),
         });
         } else if (event.type === "assistant") {
         if (receivedTextDelta) continue;
@@ -822,6 +882,7 @@ export async function runQueuedJob(job: AgentJob) {
         ? { suggestions: extractedSuggestions.suggestions }
         : {}),
       ...(tools.length ? { tools } : {}),
+      ...(providedAttachments.length ? { attachments: providedAttachments } : {}),
       ...(result.status === "finished"
         ? {
             runMetadata: {

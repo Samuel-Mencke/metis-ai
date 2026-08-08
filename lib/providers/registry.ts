@@ -151,7 +151,7 @@ export const PROVIDERS: ProviderDefinition[] = [
     name: "OpenAI Codex",
     description: "Codex agent through the official Codex SDK and CLI runtime.",
     kind: "codex-agent",
-    authTypes: ["oauth", "api_key", "account"],
+    authTypes: ["oauth"],
     capabilities: agentCapabilities,
     models: models(
       {
@@ -180,28 +180,28 @@ export const PROVIDERS: ProviderDefinition[] = [
         tags: ["coding", "agent"],
       },
     ),
-    setupHint: "Use OAuth for ChatGPT/Codex usage, or API keys for the API-billed path.",
+    setupHint: "Use OAuth for ChatGPT/Codex usage.",
   },
   {
     key: "claude-code",
     name: "Claude Code",
     description: "Claude Code agent through Anthropic's official Agent SDK.",
     kind: "claude-agent",
-    authTypes: ["oauth", "api_key"],
+    authTypes: ["oauth"],
     capabilities: agentCapabilities,
     models: models({
       id: "claude-sonnet-4-6",
       displayName: "Claude Sonnet Agent",
       tags: ["coding", "agent"],
     }),
-    setupHint: "Use an Anthropic API key for supported production use. OAuth is experimental personal use.",
+    setupHint: "Use OAuth to connect your Claude Code account.",
   },
   {
     key: "antigravity",
     name: "Google Antigravity",
     description: "Antigravity agent through the official agy CLI.",
     kind: "antigravity-agent",
-    authTypes: ["oauth", "api_key", "vertex_adc"],
+    authTypes: ["oauth"],
     capabilities: agentCapabilities,
     models: models(
       ...[
@@ -219,7 +219,7 @@ export const PROVIDERS: ProviderDefinition[] = [
         defaultParams: [{ id: "effort", value: effort as string }],
       })),
     ),
-    setupHint: "OAuth runs the official agy CLI remote login with no API key. API key and Vertex/ADC remain available as alternatives.",
+    setupHint: "OAuth runs the official agy CLI remote login.",
   },
 ];
 

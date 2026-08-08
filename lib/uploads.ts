@@ -48,7 +48,7 @@ export function isImageMime(mime: string): boolean {
   return IMAGE_MIME.has(mime.toLowerCase().split(";")[0]!.trim());
 }
 
-function isTextAttachment(attachment: StoredAttachment): boolean {
+export function isTextAttachment(attachment: Pick<StoredAttachment, "mimeType" | "name">): boolean {
   const mime = attachment.mimeType.toLowerCase();
   if (mime.startsWith("text/") || mime === "application/json" || mime.endsWith("+json")) return true;
   return /\.(c|cc|cpp|css|csv|html?|java|js|jsx|json|md|mjs|py|rs|sql|toml|ts|tsx|txt|yaml|yml)$/i.test(

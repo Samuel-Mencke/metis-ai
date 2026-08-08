@@ -287,6 +287,53 @@ function isTextAttachment(mimeType: string, name: string): boolean {
   );
 }
 
+function isOfficeAttachment(mimeType: string, name: string): boolean {
+  return (
+    /wordprocessingml|spreadsheetml|presentationml|msword|ms-excel|ms-powerpoint/i.test(mimeType) ||
+    /\.(docx?|xlsx?|pptx?)$/i.test(name)
+  );
+}
+
+function mimeTypeFromFileName(name: string) {
+  const extension = name.split("?")[0].split("#")[0].split(".").pop()?.toLowerCase();
+  return ({
+    gif: "image/gif",
+    jpeg: "image/jpeg",
+    jpg: "image/jpeg",
+    mp3: "audio/mpeg",
+    mp4: "video/mp4",
+    pdf: "application/pdf",
+    png: "image/png",
+    svg: "image/svg+xml",
+    wav: "audio/wav",
+    webm: "video/webm",
+    json: "application/json",
+    md: "text/markdown",
+    txt: "text/plain",
+    csv: "text/csv",
+    html: "text/html",
+    js: "text/javascript",
+    ts: "text/typescript",
+    py: "text/x-python",
+    doc: "application/msword",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xls: "application/vnd.ms-excel",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ppt: "application/vnd.ms-powerpoint",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  } as Record<string, string>)[extension || ""] || "application/octet-stream";
+}
+
+function detectedFileLinks(content: string) {
+  const links = new Set<string>();
+  const pattern = /(?:https?:\/\/[^\s<>()]+)?\/api\/(?:uploads\/[^)\s<>()]+|share\/attachment\?[^)\s<>()]+)/gi;
+  for (const match of content.matchAll(pattern)) {
+    const value = match[0].replace(/[.,;:!?]+$/, "");
+    if (value) links.add(value);
+  }
+  return [...links];
+}
+
 function AttachmentIcon({ mimeType, className }: { mimeType: string; className?: string }) {
   if (mimeType.startsWith("image/")) return <ImageIcon className={className} />;
   if (mimeType.startsWith("video/")) return <Video className={className} />;
@@ -1258,17 +1305,20 @@ function AttachmentViewer({
   const [text, setText] = useState<string | null>(null);
   const [textError, setTextError] = useState<string | null>(null);
   const attachment = active?.attachment;
-  const url =
+  const fileUrl =
     attachment?.storedName && active?.chatId
       ? `/api/uploads/${active.chatId}/${encodeURIComponent(attachment.storedName)}`
       : attachment?.previewUrl;
   const textFile = Boolean(attachment && isTextAttachment(attachment.mimeType, attachment.name));
+  const officeFile = Boolean(attachment && isOfficeAttachment(attachment.mimeType, attachment.name));
+  const officePreviewAvailable = officeFile && Boolean(attachment?.storedName && active?.chatId);
+  const url = officePreviewAvailable && fileUrl ? `${fileUrl}/preview` : fileUrl;
 
   useEffect(() => {
     let cancelled = false;
     setText(null);
     setTextError(null);
-    if (!attachment || !url || !textFile) return;
+    if (!attachment || !url || (!textFile && !officePreviewAvailable)) return;
     fetch(url)
       .then((response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1283,7 +1333,7 @@ function AttachmentViewer({
     return () => {
       cancelled = true;
     };
-  }, [attachment, textFile, url]);
+  }, [attachment, officePreviewAvailable, textFile, url]);
 
   return (
     <Dialog open={Boolean(active)} onOpenChange={onOpenChange}>
@@ -1291,9 +1341,20 @@ function AttachmentViewer({
         <DialogHeader>
           <DialogTitle className="truncate pr-8">{attachment?.name || "Attachment"}</DialogTitle>
           {attachment ? (
-            <p className="text-left text-xs text-muted-foreground">
-              {attachment.mimeType}{attachment.size ? ` · ${(attachment.size / 1024 / 1024).toFixed(2)} MB` : ""}
-            </p>
+            <div className="flex items-center justify-between gap-3 text-left text-xs text-muted-foreground">
+              <span>
+                {attachment.mimeType}{attachment.size ? ` · ${(attachment.size / 1024 / 1024).toFixed(2)} MB` : ""}
+              </span>
+              {fileUrl ? (
+                <a
+                  href={fileUrl}
+                  download={attachment.name}
+                  className="shrink-0 rounded-md border border-border/60 px-2 py-1 text-foreground hover:bg-muted"
+                >
+                  Download
+                </a>
+              ) : null}
+            </div>
           ) : null}
         </DialogHeader>
         <div className="min-h-0 flex-1 max-h-[calc(100dvh-7rem)] overflow-auto sm:max-h-[78vh]">
@@ -1308,7 +1369,7 @@ function AttachmentViewer({
             <audio src={url} controls className="w-full" />
           ) : attachment.mimeType === "application/pdf" ? (
             <iframe src={url} title={attachment.name} className="h-[70vh] w-full rounded-lg border" />
-          ) : textFile ? (
+          ) : textFile || officePreviewAvailable ? (
             textError ? (
               <p className="text-sm text-destructive">Could not load text file: {textError}</p>
             ) : text === null ? (
@@ -1334,6 +1395,102 @@ function AttachmentViewer({
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function FileShareEmbed({
+  href,
+  onOpen,
+}: {
+  href: string;
+  onOpen: (attachment: MsgAttachment) => void;
+}) {
+  const rawName = href.includes("?")
+    ? new URL(href, window.location.origin).searchParams.get("name") || "Shared file"
+    : href.split("/").pop() || "Shared file";
+  let name = rawName;
+  try {
+    name = decodeURIComponent(rawName);
+  } catch {
+    // Keep the raw URL segment when it is not valid encoded text.
+  }
+  const mimeType = mimeTypeFromFileName(name);
+  const attachment: MsgAttachment = {
+    id: `shared-${href}`,
+    name,
+    mimeType,
+    kind: mimeType.startsWith("image/") ? "image" : "file",
+    previewUrl: href,
+  };
+  const textFile = isTextAttachment(mimeType, name);
+  const officeFile = isOfficeAttachment(mimeType, name);
+  const previewUrl = officeFile && href.startsWith("/api/uploads/")
+    ? `${href}/preview`
+    : href;
+  const [text, setText] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!textFile && !officeFile) return;
+    let cancelled = false;
+    fetch(previewUrl)
+      .then((response) => response.ok ? response.text() : "")
+      .then((value) => {
+        if (!cancelled) setText(value);
+      })
+      .catch(() => {
+        if (!cancelled) setText("");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [officeFile, previewUrl, textFile]);
+
+  return (
+    <div className="mt-3 overflow-hidden rounded-xl border border-border/60 bg-card/50">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => onOpen(attachment)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onOpen(attachment);
+          }
+        }}
+        className="block w-full text-left"
+        title={`Open ${name}`}
+      >
+        {mimeType.startsWith("image/") ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={href} alt={name} className="max-h-72 w-full object-contain bg-black/10" />
+        ) : mimeType.startsWith("video/") ? (
+          <video src={href} controls className="max-h-72 w-full bg-black/10" />
+        ) : mimeType.startsWith("audio/") ? (
+          <audio src={href} controls className="w-full p-3" />
+        ) : mimeType === "application/pdf" ? (
+          <iframe src={href} title={name} className="h-72 w-full border-0" />
+        ) : textFile || officeFile ? (
+          <pre className="max-h-48 overflow-hidden whitespace-pre-wrap break-words bg-muted/30 p-3 text-xs text-muted-foreground">
+            {text === null ? "Loading preview…" : text.slice(0, 4_000) || "Preview unavailable."}
+          </pre>
+        ) : (
+          <div className="flex items-center gap-2 p-3 text-sm">
+            <AttachmentIcon mimeType={mimeType} className="size-5 text-muted-foreground" />
+            <span className="truncate">{name}</span>
+          </div>
+        )}
+      </div>
+      <div className="flex items-center justify-between gap-3 border-t border-border/50 px-3 py-2">
+        <span className="truncate text-xs text-muted-foreground">{name}</span>
+        <a
+          href={href}
+          download={name}
+          className="shrink-0 rounded-md border border-border/60 px-2 py-1 text-[11px] hover:bg-muted"
+        >
+          Download
+        </a>
+      </div>
+    </div>
   );
 }
 
@@ -4038,6 +4195,7 @@ export default function AppShell() {
       setReferenceText(target.referenceText ?? "");
       setRestoredAttachments(target.attachments ?? []);
       setRevertTarget(null);
+      window.setTimeout(() => textareaRef.current?.focus(), 0);
     }
   }
 
@@ -4141,6 +4299,15 @@ export default function AppShell() {
     });
   }
 
+  function clearPendingFiles() {
+    setPendingFiles((prev) => {
+      for (const pending of prev) {
+        if (pending.previewUrl) URL.revokeObjectURL(pending.previewUrl);
+      }
+      return [];
+    });
+  }
+
   function onComposerPaste(e: ClipboardEvent<HTMLDivElement>) {
     const items = e.clipboardData?.items;
     if (!items) return;
@@ -4232,7 +4399,7 @@ export default function AppShell() {
     setInput("");
     setReferenceText("");
     setReferences([]);
-    setPendingFiles([]);
+    clearPendingFiles();
     setRestoredAttachments([]);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
@@ -4416,6 +4583,7 @@ export default function AppShell() {
     if (!isOverride) {
       setInput("");
       draftInputRef.current = "";
+      window.setTimeout(() => textareaRef.current?.focus(), 0);
       void fetch("/api/preferences", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -4423,7 +4591,7 @@ export default function AppShell() {
       });
       setReferenceText("");
       setReferences([]);
-      setPendingFiles([]);
+      clearPendingFiles();
       setRestoredAttachments([]);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
@@ -4744,6 +4912,20 @@ export default function AppShell() {
               Array.isArray(payload.todos)
                 ? payload.todos as ToolPart["todos"]
                 : undefined;
+            const attachmentPayload =
+              payload.attachment && typeof payload.attachment === "object"
+                ? payload.attachment as Partial<MsgAttachment>
+                : undefined;
+            const providedAttachment =
+              attachmentPayload &&
+              typeof attachmentPayload.id === "string" &&
+              typeof attachmentPayload.name === "string" &&
+              typeof attachmentPayload.mimeType === "string" &&
+              (attachmentPayload.kind === "image" || attachmentPayload.kind === "file") &&
+              typeof attachmentPayload.storedName === "string" &&
+              typeof attachmentPayload.size === "number"
+                ? attachmentPayload as MsgAttachment
+                : undefined;
             if (activeChatIdRef.current === chatId) {
               setLiveStatus(
                 status === "running"
@@ -4781,7 +4963,18 @@ export default function AppShell() {
                 } else {
                   parts.push(next);
                 }
-                return { ...x, ...withSyncedFlat(parts) };
+                return {
+                  ...x,
+                  ...withSyncedFlat(parts),
+                  ...(providedAttachment
+                    ? {
+                        attachments: [
+                          ...(x.attachments || []).filter((item) => item.id !== providedAttachment.id),
+                          providedAttachment,
+                        ],
+                      }
+                    : {}),
+                };
               }),
             );
             setActiveSubagent((current) =>
@@ -6462,12 +6655,60 @@ export default function AppShell() {
                       <ErrorMessageCard message={m.errorMessage || m.content} />
                     ) : (
                       <div className="text-[15px] leading-relaxed text-foreground/95">
+                        {m.attachments && m.attachments.length > 0 ? (
+                          <div className="mb-3 flex max-w-full flex-wrap gap-2">
+                            {m.attachments.map((att) => {
+                              const href = att.storedName && activeChatId
+                                ? `/api/uploads/${activeChatId}/${encodeURIComponent(att.storedName)}`
+                                : att.previewUrl;
+                              return (
+                                <div key={att.id} className="flex max-w-full items-center gap-2 rounded-xl border border-border/50 bg-card/60 p-2">
+                                  <button
+                                    type="button"
+                                    title={`Preview ${att.name}`}
+                                    onClick={() => setActiveAttachment({ attachment: att, chatId: activeChatId ?? undefined })}
+                                    className="flex min-w-0 items-center gap-2 text-left hover:text-primary"
+                                  >
+                                    {att.kind === "image" && href ? (
+                                      // eslint-disable-next-line @next/next/no-img-element
+                                      <img src={href} alt={att.name} className="size-10 shrink-0 rounded-lg object-cover" />
+                                    ) : (
+                                      <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-secondary/80">
+                                        <AttachmentIcon mimeType={att.mimeType} className="size-5 text-muted-foreground" />
+                                      </span>
+                                    )}
+                                    <span className="min-w-0">
+                                      <span className="block max-w-56 truncate text-xs font-medium">{att.name}</span>
+                                      <span className="block text-[11px] text-muted-foreground">{formatMetricBytes(att.size)}</span>
+                                    </span>
+                                  </button>
+                                  {href ? (
+                                    <a
+                                      href={href}
+                                      download={att.name}
+                                      className="rounded-md border border-border/60 px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+                                    >
+                                      Download
+                                    </a>
+                                  ) : null}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : null}
                         {(() => {
                           const messageParts = m.parts && m.parts.length > 0
                           ? m.parts
                           : partsFromFlat(m);
                           const planTools = messageParts.filter(
                             (part): part is ToolMsgPart => part.type === "tool" && part.kind === "plan",
+                          );
+                          const fileLinks = detectedFileLinks(m.content).filter(
+                            (href) => !m.attachments?.some(
+                              (attachment) =>
+                                attachment.storedName &&
+                                href.includes(encodeURIComponent(attachment.storedName)),
+                            ),
                           );
                           return (
                             <>
@@ -6555,6 +6796,13 @@ export default function AppShell() {
                             </div>
                           );
                         })}
+                        {fileLinks.map((href) => (
+                          <FileShareEmbed
+                            key={`file-share-${href}`}
+                            href={href}
+                            onOpen={(attachment) => setActiveAttachment({ attachment, chatId: activeChatId ?? undefined })}
+                          />
+                        ))}
                         {planTools.map((tool) => (
                           <PlanToolCallCard
                             key={`plan-ready-${tool.id}`}
