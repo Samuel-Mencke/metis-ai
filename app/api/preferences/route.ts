@@ -4,6 +4,7 @@ import {
   saveGlobalModelSettings,
   type GlobalModelSettings,
 } from "@/lib/db-store";
+import { normalizeVoiceSettings } from "@/lib/shared-context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,6 +33,8 @@ export async function PATCH(req: Request) {
     browserFps?: unknown;
     browserViewportWidth?: unknown;
     browserViewportHeight?: unknown;
+    voiceInput?: unknown;
+    featureFlags?: unknown;
   };
   const userId = (await getAuthenticatedUserId(req)) ?? undefined;
   const current = getGlobalModelSettings(userId);
@@ -108,6 +111,17 @@ export async function PATCH(req: Request) {
     typeof body.browserViewportHeight === "number" && Number.isFinite(body.browserViewportHeight)
       ? Math.max(240, Math.min(1600, Math.round(body.browserViewportHeight)))
       : undefined;
+  const voiceInput =
+    body.voiceInput && typeof body.voiceInput === "object" && !Array.isArray(body.voiceInput)
+      ? normalizeVoiceSettings(body.voiceInput as GlobalModelSettings["voiceInput"])
+      : undefined;
+  const featureFlags =
+    body.featureFlags && typeof body.featureFlags === "object" && !Array.isArray(body.featureFlags)
+      ? Object.fromEntries(
+          Object.entries(body.featureFlags)
+            .filter(([key, value]) => ["plans", "notes", "recovery", "askUserTimeout", "voiceInput"].includes(key) && typeof value === "boolean"),
+        )
+      : undefined;
   return Response.json({
     settings: saveGlobalModelSettings(
       {
@@ -124,6 +138,8 @@ export async function PATCH(req: Request) {
         ...(browserFps !== undefined ? { browserFps } : {}),
         ...(browserViewportWidth !== undefined ? { browserViewportWidth } : {}),
         ...(browserViewportHeight !== undefined ? { browserViewportHeight } : {}),
+        ...(voiceInput !== undefined ? { voiceInput } : {}),
+        ...(featureFlags !== undefined ? { featureFlags } : {}),
       },
       userId,
     ),

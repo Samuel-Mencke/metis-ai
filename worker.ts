@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { appendRunEvent, claimNextJob, getJob, recoverStaleJobs, updateJob } from "@/lib/db-jobs";
 import { appendMessage, getChat, updateChat, upsertMessage } from "@/lib/db-store";
+import { expirePendingQuestions } from "@/lib/db-questions";
 
 const pollMs = Number(process.env.AI_CHAT_WORKER_POLL_MS || 500);
 const configuredConcurrency = Number(process.env.AI_CHAT_WORKER_CONCURRENCY || 4);
@@ -102,7 +103,25 @@ async function main() {
   recoverStaleJobs();
   console.log(`[ai-chat-worker] started (concurrency: ${concurrency})`);
   const active = new Set<Promise<void>>();
+  let lastQuestionExpiry = 0;
   while (!stopping) {
+    if (Date.now() - lastQuestionExpiry > 5_000) {
+      lastQuestionExpiry = Date.now();
+      for (const expired of expirePendingQuestions()) {
+        if (!expired) continue;
+        if (expired.jobId) updateJob(expired.jobId, { status: "interrupted", error: "The user question expired." });
+        updateChat(expired.chatId, {
+          runStatus: "interrupted",
+          pendingQuestion: null,
+          runUpdatedAt: new Date().toISOString(),
+          badge: "red",
+        });
+        if (expired.jobId) appendRunEvent(expired.jobId, expired.chatId, undefined, "status", {
+          status: "expired",
+          questionId: expired.questionId,
+        });
+      }
+    }
     while (!stopping && active.size < concurrency) {
       const job = claimNextJob();
       if (!job) break;

@@ -1,5 +1,6 @@
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { requestJobCancel } from "@/lib/db-jobs";
+import { cancelQuestion } from "@/lib/db-questions";
 import { getChat, updateChat, upsertMessage } from "@/lib/db-store";
 
 export const runtime = "nodejs";
@@ -12,7 +13,11 @@ export async function POST(req: Request) {
   const chatId = body.chatId?.trim();
   if (!chatId) return Response.json({ error: "chatId is required" }, { status: 400 });
   const userId = await getAuthenticatedUserId(req) ?? undefined;
-  if (!getChat(chatId, userId)) return Response.json({ error: "Not found" }, { status: 404 });
+  const initialChat = getChat(chatId, userId);
+  if (!initialChat) return Response.json({ error: "Not found" }, { status: 404 });
+  if (initialChat.pendingQuestion?.questionId) {
+    cancelQuestion(initialChat.pendingQuestion.questionId, userId);
+  }
 
   const cancelled = requestJobCancel(chatId, userId);
   if (!cancelled) {
@@ -20,6 +25,7 @@ export async function POST(req: Request) {
     if (
       chat?.runStatus !== "running" &&
       chat?.runStatus !== "waiting_input" &&
+      chat?.runStatus !== "waiting_for_user" &&
       chat?.runStatus !== "cancelled"
     ) {
       return Response.json({ error: "No active run" }, { status: 404 });
@@ -40,6 +46,7 @@ export async function POST(req: Request) {
   updateChat(chatId, {
     runStatus: "cancelled",
     runUpdatedAt: new Date().toISOString(),
+    pendingQuestion: null,
   }, userId);
   return Response.json({ ok: true, status: "cancel-requested" });
 }

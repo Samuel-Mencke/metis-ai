@@ -81,6 +81,123 @@ export type WorkspaceItem = {
   content: string;
   createdAt: string;
   updatedAt: string;
+  version?: number;
+  scope?: "chat" | "global";
+  idempotencyKey?: string;
+};
+
+export type NoteScope = "global" | "chat" | "workspace";
+export type NoteAuthor = "user" | "agent";
+
+export type NotePosition = {
+  x: number;
+  y: number;
+};
+
+export type NoteSize = {
+  width: number;
+  height: number;
+};
+
+export type SharedNote = {
+  id: string;
+  ownerId?: string;
+  chatId?: string;
+  workspaceId?: string;
+  scope: NoteScope;
+  title: string;
+  content: string;
+  color: string;
+  position: NotePosition;
+  size: NoteSize;
+  author: NoteAuthor;
+  createdAt: string;
+  updatedAt: string;
+  archived: boolean;
+  version: number;
+};
+
+export type NoteActivity = {
+  id: string;
+  noteId: string;
+  actor: NoteAuthor;
+  action: "created" | "updated" | "archived" | "restored" | "deleted";
+  createdAt: string;
+  summary?: string;
+};
+
+export type SnapshotAvailability = "available" | "restored" | "needs_attention" | "not_available";
+
+export type SessionSnapshot = {
+  id: string;
+  chatId: string;
+  ownerId?: string;
+  schemaVersion: number;
+  createdAt: string;
+  updatedAt: string;
+  checkpoint: "important" | "periodic" | "shutdown" | "recovery";
+  activeWorkspaceId?: string | null;
+  workspaceTab?: ChatSessionState["workspaceTab"];
+  workspaceOpen?: boolean;
+  draft?: string;
+  filters?: Record<string, string | boolean | number | null>;
+  runStatus: ChatRunStatus;
+  resumeMarker?: {
+    jobId?: string;
+    runId?: string;
+    safe: boolean;
+    reason?: string;
+  };
+  browser?: {
+    tabs: BrowserTab[];
+    activeTabId?: string;
+    reachable: boolean;
+  };
+  terminals?: Array<{
+    id: string;
+    sessionId?: string;
+    cwd: string;
+    processId?: number;
+    lastOutput?: string;
+    exitCode?: number | null;
+    running?: boolean;
+    reachable: boolean;
+  }>;
+  notesView?: {
+    x: number;
+    y: number;
+    zoom: number;
+    selectedNoteId?: string | null;
+  };
+  availability: SnapshotAvailability;
+  migration?: {
+    fromVersion?: number;
+    warnings?: string[];
+  };
+};
+
+export type VoiceInputSettings = {
+  enabled: boolean;
+  maxDurationSeconds: number;
+  language?: string;
+  autoInsertDraft: boolean;
+  deleteAudioAfterTranscription: boolean;
+};
+
+export type VoiceJobStatus = "queued" | "uploading" | "transcribing" | "completed" | "failed" | "cancelled";
+
+export type VoiceTranscriptionJob = {
+  id: string;
+  ownerId?: string;
+  chatId?: string;
+  status: VoiceJobStatus;
+  mimeType: string;
+  durationSeconds: number;
+  sizeBytes: number;
+  transcript?: string;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type BrowserTab = {
@@ -98,6 +215,11 @@ export type BrowserContext = {
 
 export type PendingChatQuestion = {
   questionId: string;
+  runId?: string;
+  jobId?: string;
+  version?: number;
+  expiresAt?: string;
+  status?: "waiting_for_user" | "answered" | "cancelled" | "expired";
   questions: Array<{
     id: string;
     question: string;
@@ -109,9 +231,13 @@ export type PendingChatQuestion = {
 export type ChatRunStatus =
   | "idle"
   | "running"
+  | "paused"
+  | "waiting_for_user"
   | "waiting_input"
   | "completed"
   | "cancelled"
+  | "failed"
+  | "interrupted"
   | "error";
 
 export type ChatBadge = "blue" | "red";
@@ -140,10 +266,12 @@ export type ChatSessionState = {
   terminalSessionId?: string;
   terminalTabs?: TerminalTab[];
   activeTerminalTabId?: string;
-  workspaceTab?: "canvas" | "plan" | "terminal" | "files" | "browser";
+  workspaceTab?: "canvas" | "plan" | "terminal" | "files" | "browser" | "monitor";
   activeWorkspaceId?: string | null;
   workspaceOpen?: boolean;
   workspaceWidth?: number;
+  notesView?: SessionSnapshot["notesView"];
+  filters?: Record<string, string | boolean | number | null>;
 };
 
 export type TerminalTab = {
@@ -170,6 +298,7 @@ export type Chat = {
   sessionState?: ChatSessionState;
   runStatus?: ChatRunStatus;
   runUpdatedAt?: string;
+  queueMessage?: string;
   pendingQuestion?: PendingChatQuestion;
   badge?: ChatBadge;
   share?: ChatShare;
@@ -189,6 +318,7 @@ export type ChatIndexEntry = {
   modelId?: string;
   runStatus?: ChatRunStatus;
   runUpdatedAt?: string;
+  queueMessage?: string;
   pendingQuestion?: PendingChatQuestion;
   badge?: ChatBadge;
   pinned?: boolean;
@@ -223,6 +353,14 @@ export type GlobalModelSettings = {
   browserFps?: number;
   browserViewportWidth?: number;
   browserViewportHeight?: number;
+  voiceInput?: VoiceInputSettings;
+  featureFlags?: {
+    plans?: boolean;
+    notes?: boolean;
+    recovery?: boolean;
+    askUserTimeout?: boolean;
+    voiceInput?: boolean;
+  };
 };
 
 function ensureDirs() {

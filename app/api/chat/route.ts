@@ -78,7 +78,11 @@ export async function POST(req: Request) {
       { status: 409 },
     );
   }
-  if (chat.pendingQuestion || chat.runStatus === "waiting_input") {
+  if (
+    chat.pendingQuestion ||
+    chat.runStatus === "waiting_input" ||
+    chat.runStatus === "waiting_for_user"
+  ) {
     return Response.json(
       { error: "Please answer the agent's question before starting another run." },
       { status: 409 },
@@ -146,8 +150,18 @@ export async function POST(req: Request) {
   }
   updateChat(
     chatId,
-    { runStatus: "running", runUpdatedAt: new Date().toISOString(), badge: null },
+    {
+      runStatus: "running",
+      runUpdatedAt: new Date().toISOString(),
+      badge: null,
+      ...(job.queueMessage ? { queueMessage: job.queueMessage } : { queueMessage: null }),
+    },
     ownerId,
   );
-  return Response.json({ jobId: job.id, runId: job.id, status: job.status }, { status: 202 });
+  return Response.json({
+    jobId: job.id,
+    runId: job.id,
+    status: job.status,
+    queueMessage: job.queueMessage,
+  }, { status: 202 });
 }

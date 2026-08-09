@@ -1,7 +1,7 @@
-import { appendRunEvent } from "@/lib/db-jobs";
+import { appendRunEvent, updateJob } from "@/lib/db-jobs";
 import {
   createPendingQuestion,
-  deletePendingQuestion,
+  getPendingQuestion,
 } from "@/lib/db-questions";
 import { getChat, updateChat } from "@/lib/db-store";
 import { bearerTokenMatches } from "@/lib/security";
@@ -41,15 +41,38 @@ export async function POST(req: Request) {
     .filter((item) => item.question.trim());
   if (!questions.length) return Response.json({ error: "At least one question is required" }, { status: 400 });
 
-  const pending = createPendingQuestion(questions, chatId, userId);
-  updateChat(chatId, { runStatus: "waiting_input", pendingQuestion: { questionId: pending.questionId, questions: pending.questions } }, userId);
+  const pending = createPendingQuestion(questions, chatId, userId, { jobId, runId: jobId });
+  updateJob(jobId, { status: "waiting_input", runId: jobId });
+  updateChat(chatId, {
+    runStatus: "waiting_for_user",
+    pendingQuestion: {
+      questionId: pending.questionId,
+      jobId,
+      runId: jobId,
+      version: pending.version,
+      expiresAt: pending.expiresAt,
+      status: "waiting_for_user",
+      questions: pending.questions,
+    },
+  }, userId);
   appendRunEvent(jobId, chatId, userId, "question", {
     questionId: pending.questionId,
+    jobId,
+    runId: jobId,
+    version: pending.version,
+    expiresAt: pending.expiresAt,
     questions: pending.questions,
   });
 
   const answers = await pending.promise;
-  deletePendingQuestion(pending.questionId);
+  const resolved = getPendingQuestion(pending.questionId, userId);
+  if (!resolved || resolved.status !== "answered") {
+    updateJob(jobId, { status: resolved?.status === "cancelled" ? "cancelled" : "interrupted", error: resolved?.status === "expired" ? "The question expired before it was answered." : "The question was cancelled." });
+    updateChat(chatId, { runStatus: resolved?.status === "cancelled" ? "cancelled" : "interrupted", pendingQuestion: null }, userId);
+    appendRunEvent(jobId, chatId, userId, "status", { status: resolved?.status || "interrupted", questionId: pending.questionId });
+    throw new Error(resolved?.status === "expired" ? "The user question expired." : "The user question was cancelled.");
+  }
+  updateJob(jobId, { status: "running" });
   updateChat(chatId, { runStatus: "running", pendingQuestion: null }, userId);
   return Response.json({ questionId: pending.questionId, answers });
 }

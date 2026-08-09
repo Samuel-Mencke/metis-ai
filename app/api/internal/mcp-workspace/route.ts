@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getChat, updateChat, type WorkspaceItem } from "@/lib/db-store";
 import { bearerTokenMatches } from "@/lib/security";
+import { getIdempotentResponse, saveIdempotentResponse } from "@/lib/shared-context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,15 +22,27 @@ export async function POST(req: Request) {
 
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
   const type = body.type === "plan" || body.type === "canvas" ? body.type : null;
+  const idempotencyKey =
+    (typeof body.idempotencyKey === "string" ? body.idempotencyKey : req.headers.get("idempotency-key") || "").trim().slice(0, 200);
 
   const chat = getChat(chatId, userId);
   if (!chat) return Response.json({ error: "Chat not found" }, { status: 404 });
 
   const existingId = typeof body.id === "string" ? body.id.trim() : "";
+  if (idempotencyKey && body.action !== "list" && body.action !== "get" && body.action !== "open") {
+    const existing = getIdempotentResponse<Record<string, unknown>>("workspace", idempotencyKey, userId, chatId);
+    if (existing) return Response.json(existing);
+  }
   if (body.action === "list") {
     return Response.json({
       workspaces: type ? (chat.workspaces || []).filter((item) => item.type === type) : (chat.workspaces || []),
     });
+  }
+  if (body.action === "get" || body.action === "open") {
+    if (!existingId) return Response.json({ error: "id is required" }, { status: 400 });
+    const existing = (chat.workspaces || []).find((item) => item.id === existingId && (!type || item.type === type));
+    if (!existing) return Response.json({ error: "Workspace not found" }, { status: 404 });
+    return Response.json({ ...existing, workspaceLink: `workspace://${existing.type}/${existing.id}` });
   }
   if (body.action === "delete") {
     if (!existingId) return Response.json({ error: "id is required" }, { status: 400 });
@@ -42,16 +55,26 @@ export async function POST(req: Request) {
   if (existingId && (body.action === "edit" || body.action === "update")) {
     const existing = (chat.workspaces || []).find((item) => item.id === existingId && item.type === type);
     if (!existing) return Response.json({ error: "Workspace not found" }, { status: 404 });
+    const expectedVersion = typeof body.expectedVersion === "number" ? Math.floor(body.expectedVersion) : undefined;
+    if (expectedVersion !== undefined && expectedVersion !== (existing.version || 1)) {
+      return Response.json({ error: "Workspace changed by another client", workspace: existing }, { status: 409 });
+    }
     const updated: WorkspaceItem = {
       ...existing,
       ...(typeof body.title === "string" ? { name: body.title.trim().slice(0, 200) || existing.name } : {}),
       ...(typeof body.content === "string" ? { content: body.content.slice(0, 100_000) } : {}),
+      version: (existing.version || 1) + 1,
       updatedAt: new Date().toISOString(),
     };
-    updateChat(chatId, {
+    const saved = updateChat(chatId, {
       workspaces: (chat.workspaces || []).map((item) => item.id === existingId ? updated : item),
     }, userId);
-    return Response.json({ ...updated, workspaceLink: `workspace://${type}/${updated.id}` });
+    if (!saved?.workspaces?.some((item) => item.id === updated.id && item.version === updated.version)) {
+      return Response.json({ error: "Workspace could not be persisted" }, { status: 503 });
+    }
+    const response = { ...updated, workspaceLink: `workspace://${type}/${updated.id}` };
+    if (idempotencyKey) saveIdempotentResponse("workspace", idempotencyKey, response, userId, chatId);
+    return Response.json(response);
   }
 
   const defaultName = type === "plan" ? "Plan" : "Canvas";
@@ -78,14 +101,22 @@ export async function POST(req: Request) {
     content,
     createdAt: timestamp,
     updatedAt: timestamp,
+    version: 1,
+    scope: "chat",
+    ...(idempotencyKey ? { idempotencyKey } : {}),
   };
-  updateChat(
+  const saved = updateChat(
     chatId,
     { workspaces: [...(chat.workspaces || []), workspace].slice(-20) },
     userId,
   );
-  return Response.json({
+  if (!saved?.workspaces?.some((item) => item.id === workspace.id)) {
+    return Response.json({ error: "Workspace could not be persisted" }, { status: 503 });
+  }
+  const response = {
     ...workspace,
     workspaceLink: `workspace://${type}/${workspace.id}`,
-  });
+  };
+  if (idempotencyKey) saveIdempotentResponse("workspace", idempotencyKey, response, userId, chatId);
+  return Response.json(response);
 }

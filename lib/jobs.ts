@@ -8,8 +8,10 @@ export type JobStatus =
   | "queued"
   | "running"
   | "waiting_input"
+  | "waiting_for_user"
   | "completed"
   | "cancelled"
+  | "interrupted"
   | "error";
 
 export type AgentJob = {
@@ -31,6 +33,10 @@ export type AgentJob = {
   modelId?: string;
   modelParams?: Array<{ id: string; value: string }>;
   attachments?: StoredAttachment[];
+  resumePrompt?: string;
+  resumeRequestedAt?: string;
+  runId?: string;
+  queueMessage?: string;
   status: JobStatus;
   attempts: number;
   createdAt: string;

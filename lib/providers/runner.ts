@@ -733,13 +733,30 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
     event,
     data,
   );
-  const checkpoint = () => {
+  let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
+  let checkpointDirty = false;
+  const checkpointNow = () => {
     upsertMessage(job.chatId, {
       id: assistantMessageId,
       role: "assistant",
       content: text,
       ...(tools.length ? { tools: [...tools] } : {}),
     });
+    checkpointDirty = false;
+  };
+  const checkpoint = (immediate = false) => {
+    checkpointDirty = true;
+    if (immediate) {
+      if (checkpointTimer) clearTimeout(checkpointTimer);
+      checkpointTimer = undefined;
+      checkpointNow();
+      return;
+    }
+    if (checkpointTimer) return;
+    checkpointTimer = setTimeout(() => {
+      checkpointTimer = undefined;
+      if (checkpointDirty) checkpointNow();
+    }, 500);
   };
   const onText = (value: string) => {
     if (!value) return;
@@ -749,7 +766,7 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
   };
   const onTool = (tool: ToolPart) => {
     tools.push(tool);
-    checkpoint();
+    checkpoint(true);
     emit("tool", {
       callId: tool.id,
       name: tool.name,
@@ -763,7 +780,11 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
   appendMessage(job.chatId, { id: assistantMessageId, role: "assistant", content: "" });
   emit("assistantId", { messageId: assistantMessageId });
   emit("status", { status: "running", provider: definition.key });
-  updateChat(job.chatId, { runStatus: "running", runUpdatedAt: new Date().toISOString() }, job.userId);
+  updateChat(job.chatId, {
+    runStatus: "running",
+    runUpdatedAt: new Date().toISOString(),
+    queueMessage: null,
+  }, job.userId);
 
   try {
     const result = await runProvider({
@@ -778,7 +799,11 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
     });
     const cancelled = controller.signal.aborted || getJob(job.id)?.status === "cancelled";
     if (cancelled) {
-      updateChat(job.chatId, { runStatus: "cancelled", runUpdatedAt: new Date().toISOString() }, job.userId);
+      updateChat(job.chatId, {
+        runStatus: "cancelled",
+        runUpdatedAt: new Date().toISOString(),
+        queueMessage: null,
+      }, job.userId);
       updateJob(job.id, { status: "cancelled" });
       emit("done", { status: "cancelled", provider: definition.key });
       return true;
@@ -789,6 +814,7 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       ...(result.agentId ? { agentId: result.agentId } : {}),
       runStatus: "completed",
       runUpdatedAt: new Date().toISOString(),
+      queueMessage: null,
     }, job.userId) || chat;
     upsertMessage(job.chatId, {
       id: assistantMessageId,
@@ -833,11 +859,17 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
         errorMessage: message,
         ...(tools.length ? { tools } : {}),
       });
-      updateChat(job.chatId, { runStatus: "error", runUpdatedAt: new Date().toISOString() }, job.userId);
+      updateChat(job.chatId, {
+        runStatus: "error",
+        runUpdatedAt: new Date().toISOString(),
+        queueMessage: null,
+      }, job.userId);
       updateJob(job.id, { status: "error", error: message });
       emit("error", { message });
     }
   } finally {
+    if (checkpointTimer) clearTimeout(checkpointTimer);
+    if (checkpointDirty) checkpointNow();
     clearInterval(cancellationWatcher);
   }
   return true;

@@ -61,6 +61,7 @@ import {
   Share2,
   Settings,
   Square,
+  StickyNote,
   Terminal,
   Trash2,
   Undo2,
@@ -74,6 +75,8 @@ import { Markdown, StreamingMarkdown } from "@/components/markdown";
 import { RichComposerInput } from "@/components/rich-composer-input";
 import { RemoteFileEditor } from "@/components/remote-file-editor";
 import { RemoteTerminal } from "@/components/remote-terminal";
+import { NotesVoid } from "@/components/notes-void";
+import { VoiceInput } from "@/components/voice-input";
 import { RichUserText } from "@/components/rich-user-text";
 import { ProviderSetupDialog } from "@/components/provider-setup-dialog";
 import { CommandPalette } from "@/components/command-palette";
@@ -165,6 +168,11 @@ type AgentQuestion = {
 
 type PendingQuestion = {
   questionId: string;
+  runId?: string;
+  jobId?: string;
+  version?: number;
+  expiresAt?: string;
+  status?: "waiting_for_user" | "answered" | "cancelled" | "expired";
   questions: AgentQuestion[];
 };
 
@@ -463,8 +471,9 @@ type ChatIndexEntry = {
   createdAt: string;
   agentId?: string;
   modelId?: string;
-  runStatus?: "idle" | "running" | "waiting_input" | "completed" | "error";
+  runStatus?: "idle" | "running" | "paused" | "waiting_for_user" | "waiting_input" | "completed" | "cancelled" | "failed" | "interrupted" | "error";
   runUpdatedAt?: string;
+  queueMessage?: string;
   pendingQuestion?: PendingQuestion;
   badge?: "blue" | "red";
   pinned?: boolean;
@@ -542,6 +551,18 @@ function normalizeWorkDirectory(value?: string): string {
   return cwd && cwd !== "workspace" ? cwd : clientConfig.defaultCwd;
 }
 
+function normalizeWorkspaceTab(value: unknown): NonNullable<ChatSessionState["workspaceTab"]> {
+  return value === "plan" ||
+    value === "terminal" ||
+    value === "files" ||
+    value === "browser" ||
+    value === "monitor"
+    ? value
+    : value === "canvas"
+      ? "canvas"
+      : "canvas";
+}
+
 function normalizeTerminalTabs(session: ChatSessionState): TerminalTab[] {
   const tabs = (session.terminalTabs || [])
     .filter((tab) => tab && typeof tab.id === "string" && typeof tab.cwd === "string")
@@ -605,8 +626,8 @@ type ConfiguredModelProvider = {
   enabled: boolean;
 };
 
-const CHAT_MESSAGE_LOAD_LIMIT = 2;
-const CHAT_MESSAGE_PRELOAD_MAX = 10;
+const CHAT_MESSAGE_LOAD_LIMIT = 20;
+const CHAT_MESSAGE_PRELOAD_MAX = 60;
 const MODEL_STORAGE_KEY = `${clientConfig.storagePrefix}_model`;
 const PARAMS_STORAGE_KEY = `${clientConfig.storagePrefix}_model_params`;
 const SIDEBAR_WIDTH_STORAGE_KEY = `${clientConfig.storagePrefix}_sidebar_width`;
@@ -904,7 +925,8 @@ type ChatSnapshot = {
   workspaces: WorkspaceItem[];
   browserContext: BrowserContext;
   sessionState: ChatSessionState;
-  runStatus?: "idle" | "running" | "waiting_input" | "completed" | "error";
+  runStatus?: "idle" | "running" | "paused" | "waiting_for_user" | "waiting_input" | "completed" | "cancelled" | "failed" | "interrupted" | "error";
+  queueMessage?: string;
   pendingQuestion?: PendingQuestion;
   messageOffset: number;
   hasEarlierMessages: boolean;
@@ -1537,6 +1559,7 @@ export default function AppShell() {
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [workspaceMounted, setWorkspaceMounted] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState<"canvas" | "plan" | "terminal" | "files" | "browser" | "monitor">("canvas");
+  const [notesOpen, setNotesOpen] = useState(false);
   const [browserFullscreen, setBrowserFullscreen] = useState(false);
   const [remoteTerminalCwd, setRemoteTerminalCwd] = useState(clientConfig.defaultCwd);
   const [remoteFileCwd, setRemoteFileCwd] = useState(clientConfig.defaultCwd);
@@ -1556,6 +1579,8 @@ export default function AppShell() {
   const [browserRealtime, setBrowserRealtime] = useState(true);
   const [browserFps, setBrowserFps] = useState(10);
   const [browserDefaultViewport, setBrowserDefaultViewport] = useState({ width: 1280, height: 800 });
+  const [voiceInputEnabled, setVoiceInputEnabled] = useState(true);
+  const [voiceMaxDurationSeconds, setVoiceMaxDurationSeconds] = useState(300);
   const [monitorData, setMonitorData] = useState<MonitorPayload>({ current: null, history: [] });
   const browserSocketRef = useRef<WebSocket | null>(null);
   const browserStreamObjectUrlRef = useRef<string | null>(null);
@@ -1609,6 +1634,8 @@ export default function AppShell() {
   const [showScrollDown, setShowScrollDown] = useState(false);
   const [liveStatus, setLiveStatus] = useState("");
   const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null);
+  const [recoveryStatus, setRecoveryStatus] = useState<"restored" | "needs_attention" | "not_available" | null>(null);
+  const [recoveryJobId, setRecoveryJobId] = useState<string | null>(null);
   const [questionAnswers, setQuestionAnswers] = useState<string[]>([]);
   const [questionCustom, setQuestionCustom] = useState<string[]>([]);
   const [questionCustomActive, setQuestionCustomActive] = useState<boolean[]>([]);
@@ -2026,6 +2053,94 @@ export default function AppShell() {
     input,
   ]);
 
+  useEffect(() => {
+    if (!activeChatId) return;
+    const timer = window.setTimeout(() => {
+      const activeChat = chats.find((chat) => chat.id === activeChatId);
+      void fetch("/api/recovery", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chatId: activeChatId,
+          checkpoint: "periodic",
+          runStatus: activeChat?.runStatus || "idle",
+          sessionState: {
+            input,
+            workspaceTab,
+            activeWorkspaceId,
+            workspaceOpen,
+            workspaceWidth,
+            terminalTabs,
+            activeTerminalTabId,
+          },
+          browser: {
+            tabs: browserTabs,
+            activeTabId: activeBrowserTabId,
+            reachable: true,
+          },
+          terminals: terminalTabs.map((tab) => ({
+            id: tab.id,
+            sessionId: tab.sessionId,
+            cwd: tab.cwd,
+            reachable: Boolean(tab.sessionId),
+          })),
+          notesView: {
+            x: 0,
+            y: 0,
+            zoom: 1,
+            selectedNoteId: null,
+          },
+          resumeMarker: activeChat?.runStatus === "running"
+            ? { safe: false, reason: "Run was active at the last checkpoint." }
+            : { safe: true },
+        }),
+      }).catch(() => undefined);
+    }, 1_000);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeChatId,
+    activeWorkspaceId,
+    activeBrowserTabId,
+    browserTabs,
+    chats,
+    input,
+    terminalTabs,
+    activeTerminalTabId,
+    workspaceOpen,
+    workspaceTab,
+    workspaceWidth,
+  ]);
+
+  useEffect(() => {
+    if (!activeChatId) {
+      setRecoveryStatus(null);
+      setRecoveryJobId(null);
+      return;
+    }
+    let disposed = false;
+    void fetch(`/api/recovery?chatId=${encodeURIComponent(activeChatId)}`, { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body: { snapshot?: { availability?: "available" | "restored" | "needs_attention" | "not_available"; runStatus?: string; resumeMarker?: { jobId?: string; safe?: boolean } } | null } | null) => {
+        if (disposed) return;
+        const snapshot = body?.snapshot;
+        if (!snapshot) {
+          setRecoveryStatus("not_available");
+          setRecoveryJobId(null);
+          return;
+        }
+        const needsAttention = snapshot.availability === "needs_attention" ||
+          (snapshot.runStatus === "running" && snapshot.resumeMarker?.safe === false);
+        setRecoveryStatus(needsAttention ? "needs_attention" : "restored");
+        setRecoveryJobId(snapshot.resumeMarker?.jobId || null);
+      })
+      .catch(() => {
+        if (!disposed) setRecoveryStatus("not_available");
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [activeChatId]);
+
   const persistActiveSnapshot = useCallback(() => {
     const id = activeChatIdRef.current;
     if (!id) return;
@@ -2118,7 +2233,7 @@ export default function AppShell() {
         chats.some(
           (chat) =>
             chat.id === activeChatId &&
-            (chat.runStatus === "running" || chat.runStatus === "waiting_input"),
+            (chat.runStatus === "running" || chat.runStatus === "waiting_input" || chat.runStatus === "waiting_for_user"),
         )),
   );
   const hasCurrentAttention =
@@ -2690,6 +2805,10 @@ export default function AppShell() {
           browserFps?: number;
           browserViewportWidth?: number;
           browserViewportHeight?: number;
+          voiceInput?: {
+            enabled?: boolean;
+            maxDurationSeconds?: number;
+          };
         };
       } | null) => {
         if (cancelled || !data?.settings) return;
@@ -2727,6 +2846,12 @@ export default function AppShell() {
         }
         if (typeof settings.browserFps === "number") {
           setBrowserFps(Math.max(1, Math.min(30, Math.round(settings.browserFps))));
+        }
+        if (typeof settings.voiceInput?.enabled === "boolean") {
+          setVoiceInputEnabled(settings.voiceInput.enabled);
+        }
+        if (typeof settings.voiceInput?.maxDurationSeconds === "number") {
+          setVoiceMaxDurationSeconds(Math.max(1, Math.min(3600, Math.round(settings.voiceInput.maxDurationSeconds))));
         }
         const defaultWidth = typeof settings.browserViewportWidth === "number"
           ? Math.max(320, Math.min(2560, Math.round(settings.browserViewportWidth)))
@@ -2848,6 +2973,23 @@ export default function AppShell() {
     });
   }
 
+  function updateVoiceInputSettings(next: { enabled?: boolean; maxDurationSeconds?: number }) {
+    if (next.enabled !== undefined) setVoiceInputEnabled(next.enabled);
+    if (next.maxDurationSeconds !== undefined) {
+      setVoiceMaxDurationSeconds(Math.max(1, Math.min(3600, Math.round(next.maxDurationSeconds))));
+    }
+    void fetch("/api/preferences", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        voiceInput: {
+          enabled: next.enabled ?? voiceInputEnabled,
+          maxDurationSeconds: next.maxDurationSeconds ?? voiceMaxDurationSeconds,
+        },
+      }),
+    });
+  }
+
   const applySnapshot = useCallback((id: string, snap: ChatSnapshot) => {
     if (!acceptServerSnapshot(id, snap.updatedAt)) return;
     const browser = normalizeBrowserContext(snap.browserContext, id);
@@ -2873,7 +3015,7 @@ export default function AppShell() {
         ? session.activeWorkspaceId
         : snap.workspaces?.[0]?.id ?? null,
     );
-    setWorkspaceTab(session.workspaceTab || "canvas");
+    setWorkspaceTab(normalizeWorkspaceTab(session.workspaceTab));
     setWorkspaceOpen(Boolean(session.workspaceOpen));
     setWorkspaceWidth(
       typeof session.workspaceWidth === "number"
@@ -2907,10 +3049,12 @@ export default function AppShell() {
     setBrowserUrl(activeTab?.url || "");
     setBrowserInput(activeTab?.url || "");
     setLiveStatus("");
+    if (snap.queueMessage) setLiveStatus(snap.queueMessage);
     setBusy(
       Boolean(
         runtimeRef.current.has(id) ||
           snap.runStatus === "running" ||
+          snap.runStatus === "waiting_for_user" ||
           snap.runStatus === "waiting_input" ||
           snap.pendingQuestion,
       ),
@@ -2926,6 +3070,7 @@ export default function AppShell() {
 
   const openDraft = useCallback(
     (opts?: { skipNav?: boolean }) => {
+      setNotesOpen(false);
       chatLoadAbortRef.current?.abort();
       chatLoadAbortRef.current = null;
       chatLoadRequestRef.current += 1;
@@ -2982,6 +3127,7 @@ export default function AppShell() {
 
   const loadChat = useCallback(
     async (id: string, opts?: { skipNav?: boolean; forceReload?: boolean }) => {
+      setNotesOpen(false);
       chatLoadAbortRef.current?.abort();
       const controller = new AbortController();
       chatLoadAbortRef.current = controller;
@@ -3050,6 +3196,7 @@ export default function AppShell() {
               browserContext: normalizeBrowserContext(data.chat.browserContext, id),
               sessionState: data.chat.sessionState || cached.sessionState,
               runStatus: data.chat.runStatus,
+              queueMessage: data.chat.queueMessage,
               pendingQuestion: data.chat.pendingQuestion,
               messageOffset: cached.messageOffset,
               hasEarlierMessages: Boolean(data.hasEarlierMessages),
@@ -3083,7 +3230,7 @@ export default function AppShell() {
                 ? session.activeWorkspaceId
                 : next.workspaces[0]?.id ?? null,
             );
-            setWorkspaceTab(session.workspaceTab || "canvas");
+            setWorkspaceTab(normalizeWorkspaceTab(session.workspaceTab));
             setWorkspaceOpen(Boolean(session.workspaceOpen));
             setWorkspaceWidth(
               typeof session.workspaceWidth === "number"
@@ -3103,6 +3250,7 @@ export default function AppShell() {
             setBusy(
               next.runStatus === "running" ||
                 next.runStatus === "waiting_input" ||
+                next.runStatus === "waiting_for_user" ||
                 Boolean(next.pendingQuestion),
             );
           } catch {
@@ -3146,6 +3294,7 @@ export default function AppShell() {
         browserContext: normalizeBrowserContext(data.chat.browserContext, data.chat.id),
         sessionState: data.chat.sessionState || {},
         runStatus: data.chat.runStatus,
+        queueMessage: data.chat.queueMessage,
         pendingQuestion: data.chat.pendingQuestion,
         messageOffset: data.messageOffset ?? 0,
         hasEarlierMessages: Boolean(data.hasEarlierMessages),
@@ -3411,6 +3560,7 @@ export default function AppShell() {
         );
         const waitingForInput =
           data.chat.runStatus === "waiting_input" ||
+          data.chat.runStatus === "waiting_for_user" ||
           Boolean(data.chat.pendingQuestion);
         setPendingQuestion(data.chat.pendingQuestion ?? null);
         if (
@@ -3428,6 +3578,7 @@ export default function AppShell() {
             data.chat.runStatus === "running" ||
             waitingForInput,
         );
+        setLiveStatus(data.chat.queueMessage || "");
         if (data.chat.pendingQuestion?.questionId &&
             notifiedQuestionRef.current !== data.chat.pendingQuestion.questionId) {
           notifiedQuestionRef.current = data.chat.pendingQuestion.questionId;
@@ -3440,7 +3591,7 @@ export default function AppShell() {
               : `${questions.length} questions need your input.`,
           );
         }
-        if (!["running", "waiting_input"].includes(data.chat.runStatus || "")) {
+        if (!["running", "waiting_input", "waiting_for_user"].includes(data.chat.runStatus || "")) {
           await loadChats();
         }
       } catch {
@@ -3449,7 +3600,7 @@ export default function AppShell() {
     };
     const interval = window.setInterval(() => {
       void refreshBackgroundRun();
-    }, 3000);
+    }, 5000);
     return () => window.clearInterval(interval);
   }, [acceptServerSnapshot, activeChatId, authed, loadChats, loadingChatId, modelParamsByModel, pendingQuestion]);
 
@@ -3468,7 +3619,7 @@ export default function AppShell() {
 
   useEffect(() => {
     if (!authed) return;
-    const interval = window.setInterval(() => void loadChats(), 3000);
+    const interval = window.setInterval(() => void loadChats(), 10000);
     return () => window.clearInterval(interval);
   }, [authed, loadChats]);
 
@@ -4365,6 +4516,7 @@ export default function AppShell() {
         body: JSON.stringify({
           questionId: pendingQuestion.questionId,
           answers,
+          version: pendingQuestion.version,
         }),
       });
       if (!res.ok) {
@@ -4381,6 +4533,44 @@ export default function AppShell() {
       toast.error(error instanceof Error ? error.message : "Answer failed");
     } finally {
       setAnsweringQuestion(false);
+    }
+  }
+
+  async function cancelPendingQuestion() {
+    if (!activeChatId || answeringQuestion) return;
+    setAnsweringQuestion(true);
+    try {
+      const response = await fetch("/api/chat/skip", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chatId: activeChatId }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || "Could not cancel the question.");
+      setPendingQuestion(null);
+      setBusy(false);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not cancel the question.");
+    } finally {
+      setAnsweringQuestion(false);
+    }
+  }
+
+  async function resumeInterruptedRun() {
+    if (!activeChatId || !recoveryJobId) return;
+    try {
+      const response = await fetch("/api/chat/resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chatId: activeChatId, jobId: recoveryJobId }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || "Could not resume the interrupted run.");
+      setRecoveryStatus("restored");
+      setBusy(true);
+      toast.success("Run queued for manual resume");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not resume the interrupted run.");
     }
   }
 
@@ -4706,8 +4896,11 @@ export default function AppShell() {
 
       if (res.status !== 202) onAccepted?.();
       if (res.status === 202) {
-        const queued = (await res.json().catch(() => ({}))) as { jobId?: string };
+        const queued = (await res.json().catch(() => ({}))) as { jobId?: string; queueMessage?: string };
         onAccepted?.();
+        if (queued.queueMessage && activeChatIdRef.current === chatId) {
+          setLiveStatus(queued.queueMessage);
+        }
         if (!queued.jobId) throw new Error("The server did not return a job id");
         res = await fetch(
           `/api/runs?chatId=${encodeURIComponent(chatId)}&jobId=${encodeURIComponent(queued.jobId)}&events=1&stream=1`,
@@ -5044,6 +5237,11 @@ export default function AppShell() {
               if (activeChatIdRef.current === chatId) {
                 setPendingQuestion({
                   questionId: payload.questionId,
+                  runId: typeof payload.runId === "string" ? payload.runId : undefined,
+                  jobId: typeof payload.jobId === "string" ? payload.jobId : undefined,
+                  version: typeof payload.version === "number" ? payload.version : undefined,
+                  expiresAt: typeof payload.expiresAt === "string" ? payload.expiresAt : undefined,
+                  status: "waiting_for_user",
                   questions,
                 });
                 if (!isSameQuestion) {
@@ -5880,6 +6078,16 @@ export default function AppShell() {
           >
             <Plus className="size-4" />
           </Button>
+          <VoiceInput
+            chatId={activeChatId}
+            enabled={voiceInputEnabled}
+            maxDurationSeconds={voiceMaxDurationSeconds}
+            onTranscript={(transcript) => {
+              const next = input.trim() ? `${input.trim()} ${transcript}` : transcript;
+              handleComposerInputChange(next, next.length);
+              window.requestAnimationFrame(() => textareaRef.current?.focus());
+            }}
+          />
           <RichComposerInput
             ref={textareaRef}
             value={input}
@@ -6153,6 +6361,23 @@ export default function AppShell() {
           <span className="min-w-0 flex-1 truncate">Search chats</span>
           <kbd className="hidden text-[10px] text-muted-foreground/70 lg:inline">⌘K</kbd>
         </button>
+        <button
+          type="button"
+          className={cn(
+            "flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors",
+            notesOpen
+              ? "text-primary"
+              : "text-muted-foreground hover:bg-white/[0.03] hover:text-foreground",
+          )}
+          onClick={() => {
+            setNotesOpen(true);
+            setWorkspaceOpen(false);
+            setMobileNavOpen(false);
+          }}
+        >
+          <StickyNote className="size-3.5 shrink-0 opacity-60" />
+          <span className="min-w-0 truncate">Shared notes</span>
+        </button>
         <p className="px-2.5 pb-1 pt-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
           Chats
         </p>
@@ -6192,7 +6417,8 @@ export default function AppShell() {
                 <span className="flex min-w-0 items-center gap-2">
                   {runningChatIds.includes(c.id) ||
                   c.runStatus === "running" ||
-                  c.runStatus === "waiting_input" ? (
+                  c.runStatus === "waiting_input" ||
+                  c.runStatus === "waiting_for_user" ? (
                     <LoaderCircle
                       className="size-3.5 shrink-0 animate-spin text-muted-foreground"
                       aria-label="Generating response"
@@ -6419,7 +6645,7 @@ export default function AppShell() {
         </SheetContent>
       </Sheet>
 
-      <div className="relative flex min-w-0 flex-1 flex-col">
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Thin top bar */}
         <header className="relative z-20 flex h-12 shrink-0 items-center gap-2 border-b border-border/30 bg-background/90 px-3 backdrop-blur-xl md:px-4">
           <Button
@@ -6442,7 +6668,11 @@ export default function AppShell() {
           >
             <PanelLeft className="size-4" />
           </Button>
-          {!isDraft && !isEmpty ? (
+          {notesOpen ? (
+            <p className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-center text-sm font-medium text-foreground md:text-left">
+              Shared Notes
+            </p>
+          ) : !isDraft && !isEmpty ? (
             <p
               className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-center text-sm text-muted-foreground md:text-left"
               title={chatTitle}
@@ -6452,7 +6682,7 @@ export default function AppShell() {
           ) : (
             <div className="flex-1" />
           )}
-          {!isDraft && !isEmpty ? (
+          {!notesOpen && !isDraft && !isEmpty ? (
             <Button
               type="button"
               variant="ghost"
@@ -6466,17 +6696,19 @@ export default function AppShell() {
               <Share2 className="size-4" />
             </Button>
           ) : null}
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="size-8"
-            aria-label={workspaceOpen ? "Close workspace" : "Open workspace"}
-            title={workspaceOpen ? "Close workspace" : "Open workspace"}
-            onClick={toggleWorkspace}
-          >
-            <PanelRight className="size-4" />
-          </Button>
+          {!notesOpen ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              aria-label={workspaceOpen ? "Close workspace" : "Open workspace"}
+              title={workspaceOpen ? "Close workspace" : "Open workspace"}
+              onClick={toggleWorkspace}
+            >
+              <PanelRight className="size-4" />
+            </Button>
+          ) : null}
         </header>
 
         {/* Messages / empty */}
@@ -6484,7 +6716,11 @@ export default function AppShell() {
           key={paneKey}
           className="flex min-h-0 flex-1 flex-col animate-in fade-in duration-200"
         >
-        {loadingChatId ? (
+        {notesOpen ? (
+          <div className="h-full min-h-0 flex-1 p-3 sm:p-5">
+            <NotesVoid />
+          </div>
+        ) : loadingChatId ? (
           <ChatLoadingSkeleton />
         ) : isEmpty ? (
           <div
@@ -6520,6 +6756,29 @@ export default function AppShell() {
                 className="mx-auto w-full max-w-2xl space-y-6 px-4 pt-6 sm:px-6"
                 style={{ paddingBottom: Math.max(144, composerHeight + 80) }}
               >
+                {recoveryStatus ? (
+                  <div className={cn(
+                    "flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-xs",
+                    recoveryStatus === "needs_attention"
+                      ? "border-amber-400/30 bg-amber-400/10 text-amber-200"
+                      : recoveryStatus === "not_available"
+                        ? "border-border/60 bg-muted/20 text-muted-foreground"
+                        : "border-emerald-400/20 bg-emerald-400/5 text-emerald-300",
+                  )}>
+                    <span>
+                      {recoveryStatus === "needs_attention"
+                        ? "The last run needs attention after a restart."
+                        : recoveryStatus === "not_available"
+                          ? "No recoverable session snapshot is available."
+                          : "Session context restored."}
+                    </span>
+                    {recoveryStatus === "needs_attention" && recoveryJobId && !busy ? (
+                      <Button type="button" size="xs" variant="outline" onClick={() => void resumeInterruptedRun()}>
+                        Resume
+                      </Button>
+                    ) : null}
+                  </div>
+                ) : null}
                 {hasEarlierMessages || loadingEarlierMessages ? (
                   <div className="text-center text-xs text-muted-foreground">
                     {loadingEarlierMessages ? "Loading more messages…" : "Scroll up for older messages"}
@@ -6542,6 +6801,7 @@ export default function AppShell() {
                         "animate-[pulse_1.4s_ease-in-out_2]",
                       ],
                     )}
+                    style={{ contentVisibility: "auto", containIntrinsicSize: "240px" }}
                   >
                     {m.role === "user" ? (
                       <div className="flex flex-col items-end gap-1">
@@ -6911,11 +7171,26 @@ export default function AppShell() {
                 {pendingQuestion ? (
                   <section className="space-y-4 rounded-2xl border border-primary/30 bg-primary/[0.06] p-4 shadow-sm">
                     <div>
-                      <p className="text-sm font-medium text-foreground">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm font-medium text-foreground">
                         Agent needs your input
-                      </p>
+                        </p>
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="ghost"
+                          className="h-7 text-muted-foreground"
+                          disabled={answeringQuestion}
+                          onClick={() => void cancelPendingQuestion()}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
                       <p className="mt-1 text-xs text-muted-foreground">
                         Answer every question to continue.
+                        {pendingQuestion.expiresAt
+                          ? ` Expires ${formatCompletedAt(pendingQuestion.expiresAt)}.`
+                          : ""}
                       </p>
                     </div>
                     {pendingQuestion.questions.map((question, index) => {
@@ -7114,10 +7389,10 @@ export default function AppShell() {
         </div>
       </div>
 
-      {workspaceMounted && browserFullscreen && workspaceTab === "browser" ? (
+      {!notesOpen && workspaceMounted && browserFullscreen && workspaceTab === "browser" ? (
         <div className="fixed inset-0 z-40 bg-background/55 backdrop-blur-[2px]" aria-hidden="true" />
       ) : null}
-      {workspaceMounted ? (
+      {!notesOpen && workspaceMounted ? (
         <aside
           className={cn(
             "relative flex min-h-0 w-full shrink-0 flex-col overflow-hidden border-l border-border/30 bg-background/95 max-md:absolute max-md:inset-0 max-md:z-30 max-md:!w-full",
@@ -7775,6 +8050,9 @@ export default function AppShell() {
         onNotificationsEnabledChange={setNotificationsEnabled}
         soundCuesEnabled={soundCuesEnabled}
         onSoundCuesEnabledChange={setSoundCuesEnabled}
+        voiceInputEnabled={voiceInputEnabled}
+        voiceMaxDurationSeconds={voiceMaxDurationSeconds}
+        onVoiceInputSettingsChange={updateVoiceInputSettings}
         browserRealtime={browserRealtime}
         browserFps={browserFps}
         browserViewportWidth={browserDefaultViewport.width}
@@ -7800,6 +8078,7 @@ export default function AppShell() {
         }}
         onTestFinishSound={playFinishSound}
         onMemoriesChanged={() => void loadMemories()}
+        onMemoryDeleted={(id) => setMemories((current) => current.filter((memory) => memory.id !== id))}
         onChatsChanged={() => void loadChats()}
         onModelsChanged={() => void loadModels()}
         onLogout={() => void logout()}

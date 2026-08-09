@@ -257,6 +257,9 @@ type Props = {
   onNotificationsEnabledChange: (enabled: boolean) => void;
   soundCuesEnabled: boolean;
   onSoundCuesEnabledChange: (enabled: boolean) => void;
+  voiceInputEnabled: boolean;
+  voiceMaxDurationSeconds: number;
+  onVoiceInputSettingsChange: (settings: { enabled?: boolean; maxDurationSeconds?: number }) => void;
   browserRealtime: boolean;
   browserFps: number;
   browserViewportWidth: number;
@@ -284,6 +287,7 @@ type Props = {
   onFinishSoundChange: (sound: FinishSound | null) => void;
   onTestFinishSound: () => void;
   onMemoriesChanged: () => void;
+  onMemoryDeleted: (id: string) => void;
   onChatsChanged: () => void;
   onModelsChanged?: () => void;
   onLogout: () => void;
@@ -297,6 +301,9 @@ export function SettingsPanel({
   onNotificationsEnabledChange,
   soundCuesEnabled,
   onSoundCuesEnabledChange,
+  voiceInputEnabled,
+  voiceMaxDurationSeconds,
+  onVoiceInputSettingsChange,
   browserRealtime,
   browserFps,
   browserViewportWidth,
@@ -319,12 +326,16 @@ export function SettingsPanel({
   onFinishSoundChange,
   onTestFinishSound,
   onMemoriesChanged,
+  onMemoryDeleted,
   onChatsChanged,
   onModelsChanged,
   onLogout,
 }: Props) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [deletingMemoryIds, setDeletingMemoryIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [settingsTab, setSettingsTab] = useState("general");
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [mcpLoaded, setMcpLoaded] = useState(false);
@@ -491,13 +502,21 @@ export function SettingsPanel({
   }
 
   async function removeMemory(id: string) {
+    if (deletingMemoryIds.has(id)) return;
+    setDeletingMemoryIds((current) => new Set(current).add(id));
     try {
       const res = await fetch(`/api/memories/${id}`, { method: "DELETE" });
       if (!res.ok) throw new Error("Failed to delete");
-      onMemoriesChanged();
+      onMemoryDeleted(id);
       toast.success("Memory deleted");
     } catch {
       toast.error("Failed to delete memory");
+    } finally {
+      setDeletingMemoryIds((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
     }
   }
 
@@ -1015,6 +1034,37 @@ export function SettingsPanel({
                     ? `Custom sound: ${finishSound.name}`
                     : "No custom sound uploaded. The default chime will be used."}
                 </p>
+                <div className="border-t border-border/60 pt-4">
+                  <h3 className="text-sm font-medium">Voice input</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Record audio into an editable draft. The transcription API key stays on the server.
+                  </p>
+                  <div className="mt-3 flex items-center justify-between gap-4">
+                    <p className="text-xs text-muted-foreground">Microphone button</p>
+                    <Button
+                      type="button"
+                      variant={voiceInputEnabled ? "default" : "outline"}
+                      aria-pressed={voiceInputEnabled}
+                      onClick={() => onVoiceInputSettingsChange({ enabled: !voiceInputEnabled })}
+                    >
+                      {voiceInputEnabled ? "On" : "Off"}
+                    </Button>
+                  </div>
+                  <label className="mt-3 grid max-w-xs gap-1 text-xs text-muted-foreground">
+                    Maximum recording length (seconds)
+                    <Input
+                      type="number"
+                      min={1}
+                      max={3600}
+                      value={voiceMaxDurationSeconds}
+                      disabled={!voiceInputEnabled}
+                      onChange={(event) => onVoiceInputSettingsChange({
+                        maxDurationSeconds: Math.max(1, Math.min(3600, Number(event.target.value) || 300)),
+                      })}
+                      aria-label="Maximum voice recording length"
+                    />
+                  </label>
+                </div>
                 <div className="border-t border-border/60 pt-4">
                   <h3 className="text-sm font-medium">Browser stream</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
@@ -1650,6 +1700,7 @@ export function SettingsPanel({
                           size="icon-sm"
                           className="opacity-100 sm:opacity-60 sm:group-hover:opacity-100"
                           onClick={() => void removeMemory(m.id)}
+                          disabled={deletingMemoryIds.has(m.id)}
                           aria-label="Delete memory"
                         >
                           <Trash2 className="size-3.5" />

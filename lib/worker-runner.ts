@@ -23,6 +23,7 @@ import {
 } from "@/lib/provider-connections";
 import { parseModelKey } from "@/lib/providers/types";
 import { runAlternativeProviderJob } from "@/lib/providers/runner";
+import { createSnapshot } from "@/lib/shared-context";
 
 const AGENT_INIT_TIMEOUT_MS = 90_000;
 const AGENT_INACTIVITY_TIMEOUT_MS = 5 * 60_000;
@@ -416,28 +417,28 @@ export async function runQueuedJob(job: AgentJob) {
   appendMessage(job.chatId, { id: assistantMessageId, role: "assistant", content: "" });
   const emit = (event: string, data: unknown) => {
     const result = appendRunEvent(job.id, job.chatId, job.userId, event, data);
-    const current = getChat(job.chatId, job.userId);
     const needsAttention = event === "question" || event === "workspace" || event === "canvas";
-    const hasAssistantResponse = Boolean(
-      current?.messages.some(
-        (message) => message.role === "assistant" && message.content.trim(),
-      ),
-    );
-    updateChat(
-      job.chatId,
-      {
-        badge: needsAttention || current?.badge === "red"
-          ? "red"
-          : event === "done" && hasAssistantResponse
-            ? "blue"
-            : null,
-      },
-      job.userId,
-    );
+    if (needsAttention) {
+      updateChat(job.chatId, { badge: "red" }, job.userId);
+    } else if (event === "done") {
+      updateChat(job.chatId, { badge: "blue" }, job.userId);
+    }
     return result;
   };
   emit("assistantId", { messageId: assistantMessageId });
-  updateChat(job.chatId, { runStatus: "running", runUpdatedAt: new Date().toISOString() });
+  updateChat(job.chatId, {
+    runStatus: "running",
+    runUpdatedAt: new Date().toISOString(),
+    queueMessage: null,
+  });
+  createSnapshot({
+    chatId: job.chatId,
+    ...(job.userId ? { ownerId: job.userId } : {}),
+    checkpoint: "important",
+    runStatus: "running",
+    resumeMarker: { jobId: job.id, runId: job.runId || job.id, safe: false, reason: "Agent run was active at checkpoint." },
+    availability: "available",
+  });
   emit("status", { status: "running" });
   let agent: Awaited<ReturnType<typeof Agent.create>> | undefined;
   let text = "";
@@ -478,7 +479,9 @@ export async function runQueuedJob(job: AgentJob) {
   const heartbeat = setInterval(() => {
     touchJob(job.id);
   }, 30_000);
-  const checkpoint = () => {
+  let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
+  let checkpointDirty = false;
+  const checkpointNow = () => {
     upsertMessage(job.chatId, {
       id: assistantMessageId,
       role: "assistant",
@@ -486,6 +489,21 @@ export async function runQueuedJob(job: AgentJob) {
       ...(tools.length ? { tools: [...tools] } : {}),
       ...(providedAttachments.length ? { attachments: [...providedAttachments] } : {}),
     });
+    checkpointDirty = false;
+  };
+  const checkpoint = (immediate = false) => {
+    checkpointDirty = true;
+    if (immediate) {
+      if (checkpointTimer) clearTimeout(checkpointTimer);
+      checkpointTimer = undefined;
+      checkpointNow();
+      return;
+    }
+    if (checkpointTimer) return;
+    checkpointTimer = setTimeout(() => {
+      checkpointTimer = undefined;
+      if (checkpointDirty) checkpointNow();
+    }, 500);
   };
   const persistWorkspace = (type: WorkspaceItem["type"], content: string, name = type === "plan" ? "Plan" : "Canvas") => {
     const current = getChat(job.chatId, job.userId);
@@ -551,6 +569,8 @@ export async function runQueuedJob(job: AgentJob) {
           mcpServers: getMcpServers(mcpContext),
           ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
         }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be created within 90 seconds.");
+    updateJob(job.id, { agentId: agent.agentId, runId: job.id });
+    updateChat(job.chatId, { agentId: agent.agentId }, job.userId);
     const prompt = [
       `Memories:\n${listMemories(job.userId).map((memory) => `- ${memory.content}`).join("\n") || "(none yet)"}`,
       `Existing workspaces:\n${chat.workspaces?.map((item) => `[${item.type}] ${item.name} (link: workspace://${item.type}/${item.id})\n${item.content}`).join("\n\n") || "(none)"}`,
@@ -565,7 +585,9 @@ export async function runQueuedJob(job: AgentJob) {
       "When useful, offer up to five concise follow-up questions at the end using exactly this UI-only format. Use `display text => prompt to insert` when the visible label should differ from the inserted prompt:\n```suggestions\nExplain this in more detail => Explain the database synchronization in more detail, with a concrete example.\nShow me an example\n```\nDo not mention or explain this format outside the block.",
       subagentModelInstruction,
       `Your private AI workspace is:\n${agentCwd}\nUse this directory as the working directory for project files and commands. Do not use another user's workspace.`,
-      `User message:\n${job.message || "(see attachments)"}`,
+      job.resumePrompt
+        ? `Resume the paused agent run. Do not repeat earlier tool calls or user-facing work. Continue only from the saved pause point using this answer/context:\n${job.resumePrompt}`
+        : `User message:\n${job.message || "(see attachments)"}`,
       buildAttachmentPrompt(job.chatId, job.attachments, job.userId),
       job.references?.length
         ? `Selected references:\n${job.references.map((reference) => [
@@ -677,7 +699,7 @@ export async function runQueuedJob(job: AgentJob) {
         } else {
           tools.push(nextTool);
         }
-        checkpoint();
+        checkpoint(true);
         const toolResult = typeof toolEvent.result === "string"
           ? toolEvent.result
           : toolEvent.result ? JSON.stringify(toolEvent.result) : "";
@@ -737,7 +759,7 @@ export async function runQueuedJob(job: AgentJob) {
             text += block.text;
           }
         }
-        checkpoint();
+        checkpoint(true);
         emit("text", { text });
         }
       }
@@ -774,6 +796,7 @@ export async function runQueuedJob(job: AgentJob) {
       updateChat(job.chatId, {
         runStatus: "cancelled",
         runUpdatedAt: new Date().toISOString(),
+        queueMessage: null,
       }, job.userId);
       updateJob(job.id, { status: "cancelled" });
       emit("done", { status: "cancelled", agentId: agent.agentId });
@@ -795,7 +818,7 @@ export async function runQueuedJob(job: AgentJob) {
         ...(tool.result ? { result: tool.result } : {}),
       });
     }
-    checkpoint();
+    checkpoint(true);
     const resultError = result.status === "error"
       ? result.error?.message || "Agent run failed."
       : undefined;
@@ -902,17 +925,27 @@ export async function runQueuedJob(job: AgentJob) {
       agentId: agent.agentId,
       runStatus: resultError ? "error" : "completed",
       runUpdatedAt: new Date().toISOString(),
+      queueMessage: null,
     }, job.userId);
     updateJob(job.id, {
       status: resultError ? "error" : "completed",
       agentId: agent.agentId,
       ...(resultError ? { error: resultError } : {}),
     });
+    createSnapshot({
+      chatId: job.chatId,
+      ...(job.userId ? { ownerId: job.userId } : {}),
+      checkpoint: "important",
+      runStatus: resultError ? "failed" : "completed",
+      resumeMarker: { jobId: job.id, runId: job.runId || job.id, safe: true },
+      availability: "available",
+    });
     if (resultError) emit("error", { message: resultError });
     else emit("done", { status: result.status, agentId: agent.agentId });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Agent run failed.";
-    if (getJob(job.id)?.status !== "cancelled") {
+    const finalJob = getJob(job.id);
+    if (finalJob?.status !== "cancelled" && finalJob?.status !== "interrupted") {
       upsertMessage(job.chatId, {
         id: assistantMessageId,
         role: "assistant",
@@ -920,11 +953,27 @@ export async function runQueuedJob(job: AgentJob) {
         errorMessage: message,
         ...(tools.length ? { tools } : {}),
       });
-      updateChat(job.chatId, { runStatus: "error", runUpdatedAt: new Date().toISOString() });
+      updateChat(job.chatId, {
+        runStatus: "error",
+        runUpdatedAt: new Date().toISOString(),
+        queueMessage: null,
+      });
       updateJob(job.id, { status: "error", error: message });
+      createSnapshot({
+        chatId: job.chatId,
+        ...(job.userId ? { ownerId: job.userId } : {}),
+        checkpoint: "recovery",
+        runStatus: "failed",
+        resumeMarker: { jobId: job.id, runId: job.runId || job.id, safe: true, reason: message },
+        availability: "needs_attention",
+      });
       emit("error", { message });
+    } else if (finalJob?.status === "interrupted") {
+      emit("status", { status: "interrupted", message });
     }
   } finally {
+    if (checkpointTimer) clearTimeout(checkpointTimer);
+    if (checkpointDirty) checkpointNow();
     clearInterval(heartbeat);
     if (agent) await agent[Symbol.asyncDispose]().catch(() => undefined);
   }

@@ -156,6 +156,9 @@ export function getDatabase(): DatabaseSync {
   database = new DatabaseSync(databasePath);
   database.exec(`
     PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
+    PRAGMA temp_store = MEMORY;
+    PRAGMA cache_size = -32768;
     PRAGMA busy_timeout = 10000;
     PRAGMA foreign_keys = ON;
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -261,6 +264,7 @@ export function getDatabase(): DatabaseSync {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS run_events_chat_id ON run_events(chat_id, id);
+    CREATE INDEX IF NOT EXISTS run_events_chat_job_id ON run_events(chat_id, job_id, id);
     CREATE TABLE IF NOT EXISTS pending_questions (
       question_id TEXT PRIMARY KEY,
       chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
@@ -268,11 +272,76 @@ export function getDatabase(): DatabaseSync {
       data TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS idempotency_keys (
+      scope TEXT NOT NULL,
+      key TEXT NOT NULL,
+      owner_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+      chat_id TEXT REFERENCES chats(id) ON DELETE CASCADE,
+      response TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (scope, key)
+    );
+    CREATE INDEX IF NOT EXISTS idempotency_keys_owner
+      ON idempotency_keys(owner_id, chat_id, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS notes (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+      chat_id TEXT REFERENCES chats(id) ON DELETE CASCADE,
+      workspace_id TEXT,
+      scope TEXT NOT NULL CHECK (scope IN ('global', 'chat', 'workspace')),
+      data TEXT NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1,
+      archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS notes_scope
+      ON notes(owner_id, scope, chat_id, workspace_id, archived, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS note_activities (
+      id TEXT PRIMARY KEY,
+      note_id TEXT NOT NULL,
+      owner_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+      chat_id TEXT REFERENCES chats(id) ON DELETE CASCADE,
+      data TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS note_activities_note
+      ON note_activities(note_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS session_snapshots (
+      id TEXT PRIMARY KEY,
+      chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+      owner_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+      schema_version INTEGER NOT NULL,
+      checkpoint TEXT NOT NULL,
+      data TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS session_snapshots_chat
+      ON session_snapshots(chat_id, owner_id, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS voice_jobs (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+      chat_id TEXT REFERENCES chats(id) ON DELETE CASCADE,
+      status TEXT NOT NULL,
+      data TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS voice_jobs_owner
+      ON voice_jobs(owner_id, chat_id, updated_at DESC);
   `);
   for (const statement of [
     "ALTER TABLE memories ADD COLUMN owner_id TEXT REFERENCES users(id) ON DELETE CASCADE",
     "ALTER TABLE settings ADD COLUMN owner_id TEXT REFERENCES users(id) ON DELETE CASCADE",
     "ALTER TABLE provider_oauth_flows ADD COLUMN user_code TEXT",
+    "ALTER TABLE pending_questions ADD COLUMN run_id TEXT",
+    "ALTER TABLE pending_questions ADD COLUMN job_id TEXT",
+    "ALTER TABLE pending_questions ADD COLUMN version INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE pending_questions ADD COLUMN expires_at TEXT",
+    "ALTER TABLE pending_questions ADD COLUMN status TEXT NOT NULL DEFAULT 'waiting_for_user'",
+    "ALTER TABLE pending_questions ADD COLUMN heartbeat_at TEXT",
   ]) {
     try {
       database.exec(statement);
@@ -280,6 +349,9 @@ export function getDatabase(): DatabaseSync {
       // Columns already exist on databases created with the account-aware schema.
     }
   }
+  database.exec(
+    "CREATE INDEX IF NOT EXISTS pending_questions_status_expiry ON pending_questions(status, expires_at)",
+  );
   migrateLegacy(database);
   database.prepare(
     "INSERT OR IGNORE INTO meta (key, value) VALUES ('provider_connections_schema', '1')",
@@ -288,6 +360,9 @@ export function getDatabase(): DatabaseSync {
     `INSERT OR IGNORE INTO user_model_permissions (user_id, model_id, created_at)
      SELECT id, '*', ? FROM users`,
   ).run(new Date().toISOString());
+  database.prepare(
+    "INSERT OR IGNORE INTO meta (key, value) VALUES ('shared_context_schema', '2')",
+  ).run();
   return database;
 }
 

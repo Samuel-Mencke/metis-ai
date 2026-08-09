@@ -22,6 +22,8 @@ import type {
 import { chatUploadDir, resolveUploadPath } from "@/lib/uploads";
 
 const now = () => new Date().toISOString();
+const chatCache = new Map<string, { updatedAt: string; chat: Chat }>();
+let chatIndexCache: { key: string; expiresAt: number; chats: ChatIndexEntry[] } | null = null;
 
 function hashSharePassword(password: string, salt = randomBytes(16).toString("hex")) {
   return `${salt}:${pbkdf2Sync(password, salt, 120_000, 32, "sha256").toString("hex")}`;
@@ -100,10 +102,14 @@ export function listChatsForUser(
   options: { includeArchived?: boolean } = {},
 ): ChatIndexEntry[] {
   const db = getDatabase();
+  const cacheKey = `${ownerId || "*"}:${options.includeArchived ? "all" : "active"}`;
+  if (chatIndexCache?.key === cacheKey && chatIndexCache.expiresAt > Date.now()) {
+    return chatIndexCache.chats;
+  }
   const rows = ownerId
-    ? db.prepare("SELECT data FROM chats WHERE owner_id = ? ORDER BY updated_at DESC").all(ownerId)
-    : db.prepare("SELECT data FROM chats ORDER BY updated_at DESC").all();
-  return rows
+    ? db.prepare("SELECT data, updated_at as updatedAt FROM chats WHERE owner_id = ? ORDER BY updated_at DESC").all(ownerId)
+    : db.prepare("SELECT data, updated_at as updatedAt FROM chats ORDER BY updated_at DESC").all();
+  const result = rows
     .map((row) => rowChat(row))
     .filter((chat): chat is Chat => Boolean(chat))
     .filter((chat) => options.includeArchived || !chat.archived)
@@ -126,12 +132,15 @@ export function listChatsForUser(
       modelId: chat.modelId,
       runStatus: chat.runStatus,
       runUpdatedAt: chat.runUpdatedAt,
+      queueMessage: chat.queueMessage,
       pendingQuestion: chat.pendingQuestion,
       badge: chat.badge,
       pinned: chat.pinned,
       archived: chat.archived,
       ...(chat.share ? { share: publicShare(chat.share) } : {}),
     }));
+  chatIndexCache = { key: cacheKey, expiresAt: Date.now() + 1_000, chats: result };
+  return result;
 }
 
 export type ChatSearchResult = {
@@ -194,9 +203,15 @@ export function getChat(id: string, ownerId?: string): Chat | null {
   if (!id || id.includes("/") || id.includes("..")) return null;
   const db = getDatabase();
   const row = ownerId
-    ? db.prepare("SELECT data FROM chats WHERE id = ? AND owner_id = ?").get(id, ownerId)
-    : db.prepare("SELECT data FROM chats WHERE id = ?").get(id);
+    ? db.prepare("SELECT data, updated_at as updatedAt FROM chats WHERE id = ? AND owner_id = ?").get(id, ownerId)
+    : db.prepare("SELECT data, updated_at as updatedAt FROM chats WHERE id = ?").get(id);
+  const updatedAt = (row as { updatedAt?: string } | undefined)?.updatedAt;
+  const cached = chatCache.get(id);
+  if (cached && cached.updatedAt === updatedAt) {
+    return cached.chat.ownerId && ownerId && cached.chat.ownerId !== ownerId ? null : cached.chat;
+  }
   const chat = rowChat(row);
+  if (chat && updatedAt) chatCache.set(id, { updatedAt, chat });
   return chat && ownerId && chat.ownerId && chat.ownerId !== ownerId ? null : chat;
 }
 
@@ -216,6 +231,8 @@ function saveChatInternal(chat: Chat) {
       updated.createdAt,
       updated.updatedAt,
     );
+  chatCache.set(updated.id, { updatedAt: updated.updatedAt, chat: updated });
+  chatIndexCache = null;
   return updated;
 }
 
@@ -263,6 +280,7 @@ export function updateChat(
     sessionState?: ChatSessionState | null;
     runStatus?: ChatRunStatus;
     runUpdatedAt?: string | null;
+    queueMessage?: string | null;
     pendingQuestion?: PendingChatQuestion | null;
     badge?: ChatBadge | null;
   },
@@ -315,15 +333,40 @@ export function updateChat(
     if (patch.sessionState === null) delete next.sessionState;
     else if (patch.sessionState) next.sessionState = { ...(next.sessionState || {}), ...patch.sessionState };
     if (patch.runStatus) {
+      const previousStatus = next.runStatus || "idle";
+      if (!canTransitionRunStatus(previousStatus, patch.runStatus)) {
+        const error = new Error(`Invalid run state transition: ${previousStatus} -> ${patch.runStatus}`);
+        error.name = "InvalidRunStateTransition";
+        throw error;
+      }
       next.runStatus = patch.runStatus;
       next.runUpdatedAt = patch.runUpdatedAt || now();
     } else if (patch.runUpdatedAt === null) delete next.runUpdatedAt;
+    if (patch.queueMessage === null) delete next.queueMessage;
+    else if (patch.queueMessage !== undefined) next.queueMessage = patch.queueMessage.trim().slice(0, 200) || undefined;
     if (patch.pendingQuestion === null) delete next.pendingQuestion;
     else if (patch.pendingQuestion) next.pendingQuestion = patch.pendingQuestion;
     if (patch.badge === null) delete next.badge;
     else if (patch.badge) next.badge = patch.badge;
     return saveChatInternal(next);
   });
+}
+
+const RUN_STATUS_TRANSITIONS: Record<ChatRunStatus, readonly ChatRunStatus[]> = {
+  idle: ["idle", "running", "paused", "waiting_for_user", "waiting_input", "cancelled", "interrupted", "completed", "failed", "error"],
+  running: ["running", "paused", "waiting_for_user", "waiting_input", "completed", "cancelled", "interrupted", "failed", "error"],
+  paused: ["paused", "running", "cancelled", "interrupted", "failed", "error"],
+  waiting_for_user: ["waiting_for_user", "running", "cancelled", "interrupted", "failed", "error"],
+  waiting_input: ["waiting_input", "running", "cancelled", "interrupted", "failed", "error"],
+  completed: ["completed", "running", "cancelled"],
+  cancelled: ["cancelled", "running"],
+  failed: ["failed", "running", "cancelled"],
+  interrupted: ["interrupted", "running", "cancelled", "failed"],
+  error: ["error", "running", "cancelled"],
+};
+
+export function canTransitionRunStatus(from: ChatRunStatus, to: ChatRunStatus) {
+  return RUN_STATUS_TRANSITIONS[from]?.includes(to) ?? false;
 }
 
 export function deleteChat(id: string, ownerId?: string) {

@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useRef } from "react";
+import { memo, useRef, type PointerEventHandler } from "react";
 import { Markdown } from "@/components/markdown";
 import { cn } from "@/lib/utils";
 
@@ -67,6 +67,7 @@ type EditableMarkdownProps = {
   placeholder?: string;
   className?: string;
   "aria-label"?: string;
+  onPointerDown?: PointerEventHandler<HTMLDivElement>;
 };
 
 export function EditableMarkdown({
@@ -75,6 +76,7 @@ export function EditableMarkdown({
   placeholder,
   className,
   "aria-label": ariaLabel,
+  onPointerDown,
 }: EditableMarkdownProps) {
   const editorRef = useRef<HTMLDivElement>(null);
   const initialValueRef = useRef(value);
@@ -88,6 +90,7 @@ export function EditableMarkdown({
       aria-multiline="true"
       aria-label={ariaLabel}
       data-placeholder={placeholder}
+      onPointerDown={onPointerDown}
       className={cn(
         "editable-markdown min-h-0 w-full flex-1 overflow-y-auto rounded-md p-2 text-[13px] leading-5 outline-none",
         "[&_.markdown-body_p]:my-2 [&_.markdown-body_ul]:my-2 [&_.markdown-body_ol]:my-2",
