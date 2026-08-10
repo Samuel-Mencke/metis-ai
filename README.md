@@ -60,19 +60,19 @@ provider storage, native background services and an uninstall manifest, download
 the installer directly from GitHub:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/main/install/linux.sh | bash
+curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/linux.sh | bash
 ```
 
 On macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/main/install/macos.sh | bash
+curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/macos.sh | bash
 ```
 
 On Windows, run:
 
 ```powershell
-irm https://raw.githubusercontent.com/f1shyondrugs/metis-ai/main/install/windows.ps1 | iex
+irm https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/windows.ps1 | iex
 ```
 
 The installer asks for all machine-specific values instead of assuming a user,
