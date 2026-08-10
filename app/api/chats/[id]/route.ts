@@ -57,6 +57,7 @@ export async function PATCH(req: Request, { params }: Params) {
     sessionState?: ChatSessionState | null;
     pendingQuestion?: PendingChatQuestion | null;
     badge?: ChatBadge | null;
+    touchUpdatedAt?: boolean;
   };
   try {
     body = (await req.json()) as {
@@ -73,6 +74,7 @@ export async function PATCH(req: Request, { params }: Params) {
       sessionState?: ChatSessionState | null;
       pendingQuestion?: PendingChatQuestion | null;
       badge?: ChatBadge | null;
+      touchUpdatedAt?: boolean;
     };
   } catch {
     return Response.json({ error: "Invalid JSON body" }, { status: 400 });
@@ -80,7 +82,12 @@ export async function PATCH(req: Request, { params }: Params) {
 
   let chat;
   try {
-    chat = updateChat(id, body, ownerId);
+    chat = updateChat(id, {
+      ...body,
+      // PATCH is used for UI/session metadata. Only message writes should
+      // move a chat in the activity-sorted sidebar.
+      touchUpdatedAt: body.touchUpdatedAt === true,
+    }, ownerId);
   } catch (error) {
     if (error instanceof Error && error.name === "WorkspaceNameConflict") {
       return Response.json({ error: "A plan with this name already exists" }, { status: 409 });

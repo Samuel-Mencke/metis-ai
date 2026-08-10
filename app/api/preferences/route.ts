@@ -27,6 +27,7 @@ export async function PATCH(req: Request) {
     subagentModelEnabled?: unknown;
     subagentModelId?: unknown;
     draftInput?: unknown;
+    pinnedNoteIds?: unknown;
     favoriteModelKeys?: unknown;
     modelAliases?: unknown;
     browserRealtime?: unknown;
@@ -78,6 +79,12 @@ export async function PATCH(req: Request) {
     typeof body.subagentModelEnabled === "boolean" ? body.subagentModelEnabled : undefined;
   const draftInput =
     typeof body.draftInput === "string" ? body.draftInput.slice(0, 100_000) : undefined;
+  const pinnedNoteIds = Array.isArray(body.pinnedNoteIds)
+    ? body.pinnedNoteIds
+        .filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
+        .map((item) => item.trim().slice(0, 120))
+        .slice(0, 20)
+    : undefined;
   const favoriteModelKeys = Array.isArray(body.favoriteModelKeys)
     ? body.favoriteModelKeys
         .filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
@@ -132,6 +139,7 @@ export async function PATCH(req: Request) {
         ...(subagentModelId !== undefined ? { subagentModelId } : {}),
         ...(subagentModelEnabled !== undefined ? { subagentModelEnabled } : {}),
         ...(draftInput !== undefined ? { draftInput } : {}),
+        ...(pinnedNoteIds !== undefined ? { pinnedNoteIds } : {}),
         ...(favoriteModelKeys !== undefined ? { favoriteModelKeys } : {}),
         ...(modelAliases !== undefined ? { modelAliases } : {}),
         ...(browserRealtime !== undefined ? { browserRealtime } : {}),

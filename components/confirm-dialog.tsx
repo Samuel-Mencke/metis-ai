@@ -19,6 +19,8 @@ type ConfirmDialogProps = {
   confirmLabel?: string;
   onConfirm: () => void | Promise<void>;
   destructive?: boolean;
+  secondaryLabel?: string;
+  onSecondary?: () => void;
 };
 
 export function ConfirmDialog({
@@ -29,6 +31,8 @@ export function ConfirmDialog({
   confirmLabel = "Confirm",
   onConfirm,
   destructive = true,
+  secondaryLabel,
+  onSecondary,
 }: ConfirmDialogProps) {
   const [loading, setLoading] = useState(false);
 
@@ -53,6 +57,11 @@ export function ConfirmDialog({
           <Button variant="ghost" disabled={loading} onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
+          {secondaryLabel && onSecondary ? (
+            <Button variant="outline" disabled={loading} onClick={onSecondary}>
+              {secondaryLabel}
+            </Button>
+          ) : null}
           <Button variant={destructive ? "destructive" : "default"} disabled={loading} onClick={() => void confirm()}>
             {loading ? "Working…" : confirmLabel}
           </Button>

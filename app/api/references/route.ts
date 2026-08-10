@@ -160,5 +160,17 @@ export async function GET(req: Request) {
     }
   }
 
+  if (!kind || kind === "note") {
+    for (const note of listNotes({ ownerId, scope: "global" })) {
+      push({
+        kind: "note",
+        id: note.id,
+        label: note.title || note.content.slice(0, 80) || "Untitled note",
+        detail: "Global note",
+        content: note.content.slice(0, 6_000),
+      });
+    }
+  }
+
   return Response.json({ results: results.slice(0, 80), currentChatId });
 }

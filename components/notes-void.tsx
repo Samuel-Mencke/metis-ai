@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { LayoutGrid, Maximize2, Palette, Plus, RefreshCw, Search, Trash2, ZoomIn, ZoomOut } from "lucide-react";
+import { LayoutGrid, Maximize2, Palette, Pin, PinOff, Plus, RefreshCw, Search, Trash2, ZoomIn, ZoomOut } from "lucide-react";
 import type { SharedNote } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { EditableMarkdown } from "@/components/editable-markdown";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { NotePinDialog } from "@/components/note-pin-dialog";
 import { cn } from "@/lib/utils";
 
 type View = { x: number; y: number; zoom: number };
@@ -37,17 +38,25 @@ function requestKey() {
 export function NotesVoid({
   chatId,
   focusNoteId,
+  pinnedOnly = false,
+  compact = false,
 }: {
   chatId?: string | null;
   focusNoteId?: string | null;
+  pinnedOnly?: boolean;
+  compact?: boolean;
 }) {
   const [notes, setNotes] = useState<SharedNote[]>([]);
+  const [globalPinnedIds, setGlobalPinnedIds] = useState<string[]>([]);
+  const [configuredPinnedIds, setConfiguredPinnedIds] = useState<string[]>([]);
   const [search, setSearch] = useState("");
   const [view, setView] = useState<View>({ x: 0, y: 0, zoom: 1 });
   const [drag, setDrag] = useState<DragState>(null);
   const [frontNoteId, setFrontNoteId] = useState<string | null>(null);
   const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<SharedNote | null>(null);
+  const [pinTarget, setPinTarget] = useState<SharedNote | null>(null);
+  const [unpinTarget, setUnpinTarget] = useState<{ note: SharedNote; count: number } | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "saving" | "saved" | "offline" | "error">("loading");
   const [error, setError] = useState("");
   const surfaceRef = useRef<HTMLDivElement | null>(null);
@@ -64,12 +73,26 @@ export function NotesVoid({
     try {
       const params = new URLSearchParams();
       if (chatId) params.set("chatId", chatId);
-      else params.set("scope", "global");
       const response = await fetch(`/api/notes?${params}`, { cache: "no-store", signal: controller.signal });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || "Could not load notes.");
-      const next = Array.isArray(body.notes) ? body.notes as SharedNote[] : [];
+      let next = Array.isArray(body.notes) ? body.notes as SharedNote[] : [];
+      if (pinnedOnly && chatId) {
+        const pinResponse = await fetch(`/api/context/pins?chatId=${encodeURIComponent(chatId)}`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const pinBody = await pinResponse.json().catch(() => ({})) as { pinnedNoteIds?: string[] };
+        const pinnedIds = new Set(pinBody.pinnedNoteIds || []);
+        next = next.filter((note) => pinnedIds.has(note.id));
+      }
       setNotes(next);
+      if (!chatId) {
+        const pinResponse = await fetch("/api/context/pins", { cache: "no-store", signal: controller.signal });
+        const pinBody = await pinResponse.json().catch(() => ({})) as { globalNoteIds?: string[]; configuredNoteIds?: string[] };
+        setGlobalPinnedIds(pinBody.globalNoteIds || []);
+        setConfiguredPinnedIds(pinBody.configuredNoteIds || []);
+      }
       setStatus("saved");
       if (!hasInitializedViewRef.current && next.length) {
         const minX = Math.min(...next.map((note) => note.position.x));
@@ -82,7 +105,7 @@ export function NotesVoid({
       setError(cause instanceof Error ? cause.message : "Could not load notes.");
       setStatus("offline");
     }
-  }, [chatId]);
+  }, [chatId, pinnedOnly]);
 
   useEffect(() => {
     const timers = saveTimers.current;
@@ -227,6 +250,21 @@ export function NotesVoid({
     }
   };
 
+  const requestUnpin = useCallback(async (note: SharedNote) => {
+    try {
+      const response = await fetch(`/api/context/pins?noteId=${encodeURIComponent(note.id)}`, { cache: "no-store" });
+      const body = await response.json().catch(() => ({})) as { configuredChatIds?: string[]; globalNoteIds?: string[] };
+      const count = body.globalNoteIds?.includes(note.id)
+        ? Number(body.configuredChatIds?.length || 0)
+        : Number(body.configuredChatIds?.length || 0);
+      setUnpinTarget({ note, count });
+    } catch {
+      setUnpinTarget({ note, count: 0 });
+    }
+  }, []);
+
+  const isPinned = (note: SharedNote) => globalPinnedIds.includes(note.id) || configuredPinnedIds.includes(note.id);
+
   const changeColor = useCallback((noteId: string) => {
     const current = notes.find((item) => item.id === noteId);
     if (!current) return;
@@ -314,25 +352,12 @@ export function NotesVoid({
     surfaceRef.current?.setPointerCapture(event.pointerId);
   };
 
-  const zoomAt = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+  const zoomAt = useCallback((event: WheelEvent) => {
     const bounds = surfaceRef.current?.getBoundingClientRect();
     if (!bounds) return;
 
-    const hoveredNote = event.target instanceof Element && event.target.closest("[data-note-card]");
-    let anchorX = bounds.width / 2;
-    let anchorY = bounds.height / 2;
-
-    if (hoveredNote) {
-      anchorX = event.clientX - bounds.left;
-      anchorY = event.clientY - bounds.top;
-    } else if (visibleNotes.length) {
-      const left = Math.min(...visibleNotes.map((note) => note.position.x));
-      const right = Math.max(...visibleNotes.map((note) => note.position.x + note.size.width));
-      const top = Math.min(...visibleNotes.map((note) => note.position.y));
-      const bottom = Math.max(...visibleNotes.map((note) => note.position.y + note.size.height));
-      anchorX = ((left + right) / 2) * view.zoom + view.x;
-      anchorY = ((top + bottom) / 2) * view.zoom + view.y;
-    }
+    const anchorX = event.clientX - bounds.left;
+    const anchorY = event.clientY - bounds.top;
 
     setView((current) => {
       const nextZoom = Math.max(0.2, Math.min(3, current.zoom * (event.deltaY > 0 ? 0.9 : 1.1)));
@@ -344,11 +369,31 @@ export function NotesVoid({
         y: anchorY - contentY * nextZoom,
       };
     });
-  }, [view.zoom, view.x, view.y, visibleNotes]);
+  }, []);
+
+  useEffect(() => {
+    const surface = surfaceRef.current;
+    if (!surface) return;
+    const handleWheel = (event: WheelEvent) => {
+      const insideEditor = event.target instanceof Element && event.target.closest(".editable-markdown");
+      if (insideEditor && !event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      if (event.ctrlKey || event.metaKey) {
+        zoomAt(event);
+      } else {
+        setView((current) => ({ ...current, x: current.x - event.deltaX, y: current.y - event.deltaY }));
+      }
+    };
+    surface.addEventListener("wheel", handleWheel, { capture: true, passive: false });
+    return () => surface.removeEventListener("wheel", handleWheel, { capture: true });
+  }, [zoomAt]);
 
   return (
-    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border/40 bg-muted/10">
-      <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border/40 px-2 py-1.5">
+    <div className={cn(
+      "flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border/40 bg-muted/10",
+      compact && "absolute inset-0 z-10 rounded-none border-0 bg-transparent",
+    )}>
+      {!compact ? <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border/40 px-2 py-1.5">
         <div className="relative min-w-32 flex-1 sm:max-w-56">
           <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search notes" className="h-7 pl-7 text-xs" />
@@ -357,14 +402,14 @@ export function NotesVoid({
           {status === "loading" ? "Loading…" : status === "saving" ? "Saving…" : status === "offline" ? "Offline" : status === "error" ? "Error" : status === "saved" ? "Saved" : `${visibleNotes.length} notes`}
         </span>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          <Button type="button" size="xs" onClick={() => void create()}><Plus className="size-3.5" />New note</Button>
+          {!compact ? <Button type="button" size="xs" onClick={() => void create()}><Plus className="size-3.5" />New note</Button> : null}
           <Button type="button" size="xs" variant="ghost" title="Arrange notes in a tidy, consistent layout" aria-label="Arrange notes in a tidy, consistent layout" onClick={() => arrangeNotes()}><LayoutGrid className="size-3.5" />Arrange</Button>
           <Button type="button" size="icon-xs" variant="ghost" title="Fit all notes" aria-label="Fit all notes" onClick={() => fitAll()}><Maximize2 className="size-3.5" /></Button>
           <Button type="button" size="icon-xs" variant="ghost" title="Zoom out" aria-label="Zoom out" onClick={() => setView((current) => ({ ...current, zoom: Math.max(0.2, current.zoom - 0.1) }))}><ZoomOut className="size-3.5" /></Button>
           <Button type="button" size="icon-xs" variant="ghost" title="Zoom in" aria-label="Zoom in" onClick={() => setView((current) => ({ ...current, zoom: Math.min(3, current.zoom + 0.1) }))}><ZoomIn className="size-3.5" /></Button>
           <Button type="button" size="icon-xs" variant="ghost" title="Reload notes" aria-label="Reload notes" onClick={() => void load()}><RefreshCw className="size-3.5" /></Button>
         </div>
-      </div>
+      </div> : null}
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         onOpenChange={(open) => !open && setDeleteTarget(null)}
@@ -375,15 +420,52 @@ export function NotesVoid({
           if (deleteTarget) return remove(deleteTarget);
         }}
       />
-      {error ? <div className="flex shrink-0 items-center justify-between gap-2 border-b border-destructive/30 bg-destructive/10 px-2 py-1 text-[11px] text-destructive"><span className="truncate">{error}</span><Button type="button" size="xs" variant="ghost" onClick={() => void load()}>Retry</Button></div> : null}
+      <ConfirmDialog
+        open={Boolean(unpinTarget)}
+        onOpenChange={(open) => !open && setUnpinTarget(null)}
+        title="Unpin shared note?"
+        description={`Are you sure you want to unpin "${unpinTarget?.note.title || "Untitled note"}" for ${unpinTarget?.count || 0} chats?`}
+        confirmLabel="Unpin for all"
+        secondaryLabel="Configure"
+        onSecondary={() => {
+          if (unpinTarget) setPinTarget(unpinTarget.note);
+          setUnpinTarget(null);
+        }}
+        onConfirm={async () => {
+          if (!unpinTarget) return;
+          await fetch("/api/context/pins", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ noteId: unpinTarget.note.id, everywhere: false, chatIds: [] }),
+          });
+          setGlobalPinnedIds((current) => current.filter((id) => id !== unpinTarget.note.id));
+          setConfiguredPinnedIds((current) => current.filter((id) => id !== unpinTarget.note.id));
+          setUnpinTarget(null);
+        }}
+      />
+      <NotePinDialog
+        note={pinTarget}
+        open={Boolean(pinTarget)}
+        onOpenChange={(open) => !open && setPinTarget(null)}
+        onSaved={() => {
+          setPinTarget(null);
+          void load();
+        }}
+      />
+      {error && !compact ? <div className="flex shrink-0 items-center justify-between gap-2 border-b border-destructive/30 bg-destructive/10 px-2 py-1 text-[11px] text-destructive"><span className="truncate">{error}</span><Button type="button" size="xs" variant="ghost" onClick={() => void load()}>Retry</Button></div> : null}
       <div
         ref={surfaceRef}
-        className="relative min-h-0 flex-1 touch-none overflow-hidden"
+        className={cn(
+          "relative min-h-0 flex-1 touch-none overflow-hidden",
+          compact && "pointer-events-none",
+        )}
         style={{
-          backgroundColor: "var(--background)",
-          backgroundImage: "radial-gradient(circle at 1px 1px, color-mix(in oklch, var(--muted-foreground) 24%, transparent) 1px, transparent 1.2px)",
-          backgroundSize: `${24 * view.zoom}px ${24 * view.zoom}px`,
-          backgroundPosition: `${view.x}px ${view.y}px`,
+          backgroundColor: compact ? "transparent" : "var(--background)",
+          backgroundImage: compact
+            ? "none"
+            : "radial-gradient(circle at 1px 1px, color-mix(in oklch, var(--muted-foreground) 24%, transparent) 1px, transparent 1.2px)",
+          backgroundSize: compact ? undefined : `${24 * view.zoom}px ${24 * view.zoom}px`,
+          backgroundPosition: compact ? undefined : `${view.x}px ${view.y}px`,
         }}
         onPointerDown={(event) => {
           if (event.target !== event.currentTarget) return;
@@ -444,22 +526,13 @@ export function NotesVoid({
           document.body.style.removeProperty("user-select");
           document.body.style.removeProperty("cursor");
         }}
-        onWheel={(event) => {
-          if (event.target instanceof Element && event.target.closest(".editable-markdown")) return;
-          event.preventDefault();
-          if (event.altKey || event.ctrlKey || event.metaKey) {
-            zoomAt(event);
-          } else {
-            setView((current) => ({ ...current, x: current.x - event.deltaX, y: current.y - event.deltaY }));
-          }
-        }}
       >
         {[...visibleNotes].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)).map((note, index) => (
           <article
             key={note.id}
             data-note-card
             className={cn(
-              "sticky-note absolute flex flex-col overflow-hidden rounded-md border border-black/10 shadow-md transition-shadow",
+              "sticky-note pointer-events-auto absolute flex flex-col overflow-hidden rounded-md border border-black/10 shadow-md transition-shadow",
               note.id === frontNoteId && "ring-4 ring-primary ring-offset-2 ring-offset-background",
             )}
             style={{
@@ -544,6 +617,25 @@ export function NotesVoid({
                 size="icon-xs"
                 variant="ghost"
                 className="size-6 text-black/70 hover:bg-black/10"
+                aria-label={isPinned(note) ? "Unpin note from every chat" : "Pin note in every chat"}
+                title={isPinned(note) ? "Unpin from every chat" : "Pin in every chat"}
+                onPointerDown={(event) => {
+                  event.stopPropagation();
+                  setFrontNoteId(note.id);
+                }}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (isPinned(note)) void requestUnpin(note);
+                  else setPinTarget(note);
+                }}
+              >
+                {isPinned(note) ? <PinOff className="size-3" /> : <Pin className="size-3" />}
+              </Button>
+              <Button
+                type="button"
+                size="icon-xs"
+                variant="ghost"
+                className="size-6 text-black/70 hover:bg-black/10"
                 aria-label="Delete note"
                 onPointerDown={(event) => {
                   event.stopPropagation();
@@ -589,12 +681,12 @@ export function NotesVoid({
             ))}
           </article>
         ))}
-        {status === "loading" ? (
+        {!compact && status === "loading" ? (
           <div className="absolute inset-0 flex items-center justify-center gap-2 p-8 text-center text-xs text-muted-foreground">
             <RefreshCw className="size-4 animate-spin" aria-hidden="true" />
             Loading notes…
           </div>
-        ) : !visibleNotes.length ? (
+        ) : !compact && !visibleNotes.length ? (
           <div className="absolute inset-0 flex items-center justify-center p-8 text-center text-xs text-muted-foreground">
             No notes yet. Create one to share context with the agent.
           </div>

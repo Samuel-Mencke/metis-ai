@@ -351,11 +351,11 @@ export function getChatPage(
   }
 }
 
-function saveChatInternal(chat: Chat) {
+function saveChatInternal(chat: Chat, options?: { touchUpdatedAt?: boolean }) {
   // `updated_at` is also the cache revision used by getChat/getChatPage.
   // Every JSON mutation must advance it, including workspace/session changes
   // that do not necessarily change the chat title or message activity.
-  const updated = { ...chat, updatedAt: now() };
+  const updated = options?.touchUpdatedAt === false ? chat : { ...chat, updatedAt: now() };
   getDatabase()
     .prepare(
       `INSERT INTO chats (id, owner_id, data, created_at, updated_at)
@@ -425,6 +425,7 @@ export function updateChat(
     queueMessage?: string | null;
     pendingQuestion?: PendingChatQuestion | null;
     badge?: ChatBadge | null;
+    touchUpdatedAt?: boolean;
   },
   ownerId?: string,
 ) {
@@ -490,7 +491,7 @@ export function updateChat(
     else if (patch.pendingQuestion) next.pendingQuestion = patch.pendingQuestion;
     if (patch.badge === null) delete next.badge;
     else if (patch.badge) next.badge = patch.badge;
-    return saveChatInternal(next);
+    return saveChatInternal(next, { touchUpdatedAt: patch.touchUpdatedAt !== false });
   });
 }
 

@@ -2,6 +2,7 @@ import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { enqueueJob, getActiveJob } from "@/lib/db-jobs";
 import { appendMessage, getChat, titleFromMessage, updateChat } from "@/lib/db-store";
 import { isModelAllowed } from "@/lib/model-access";
+import { getPinnedNotes, resolveReferences, type ContextReference } from "@/lib/context";
 import {
   resolveUploadPath,
   saveAttachments,
@@ -25,6 +26,7 @@ type ChatBody = {
     detail?: unknown;
     path?: unknown;
     content?: unknown;
+    source?: unknown;
   }>;
   agentId?: string;
   modelId?: string;
@@ -43,7 +45,7 @@ export async function POST(req: Request) {
   const message = body.message?.trim() || "";
   const requestedModelId = body.modelId?.trim();
   const attachments = Array.isArray(body.attachments) ? body.attachments : [];
-  const references = Array.isArray(body.references)
+  let references = (Array.isArray(body.references)
     ? body.references
         .filter((reference) =>
           reference &&
@@ -56,11 +58,12 @@ export async function POST(req: Request) {
           kind: String(reference.kind).slice(0, 40),
           id: String(reference.id).slice(0, 300),
           label: String(reference.label).slice(0, 300),
+          ...(reference.source === "pinned" ? { source: "pinned" as const } : {}),
           ...(typeof reference.detail === "string" ? { detail: reference.detail.slice(0, 500) } : {}),
           ...(typeof reference.path === "string" ? { path: reference.path.slice(0, 4_000) } : {}),
           ...(typeof reference.content === "string" ? { content: reference.content.slice(0, 8_000) } : {}),
         }))
-    : [];
+    : []) as ContextReference[];
   const referenceText = typeof body.referenceText === "string"
     ? body.referenceText.trim().slice(0, 100_000)
     : "";
@@ -72,6 +75,15 @@ export async function POST(req: Request) {
   }
   const chat = getChat(chatId, ownerId);
   if (!chat) return Response.json({ error: "Chat not found" }, { status: 404 });
+  const resolvedExplicit = resolveReferences(ownerId, chatId, references);
+  const pinnedReferences = getPinnedNotes(ownerId, chatId);
+  const seenReferences = new Set<string>();
+  references = [...pinnedReferences, ...resolvedExplicit].filter((reference) => {
+    const key = `${reference.kind}:${reference.id}`;
+    if (seenReferences.has(key)) return false;
+    seenReferences.add(key);
+    return true;
+  });
   if (getActiveJob(chatId, ownerId)) {
     return Response.json(
       { error: "This chat already has an active run. Wait for it to finish or cancel it first." },

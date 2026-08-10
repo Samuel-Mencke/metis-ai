@@ -597,6 +597,7 @@ type ReferenceItem = {
   kind: ReferenceKind;
   id: string;
   label: string;
+  source?: "explicit" | "pinned";
   detail?: string;
   chatId?: string;
   isCurrentChat?: boolean;
@@ -6220,7 +6221,7 @@ export default function AppShell() {
           <div className="absolute bottom-full left-2 right-2 z-40 mb-2 max-h-72 overflow-y-auto rounded-xl border border-border/60 bg-popover p-1.5 text-sm shadow-xl animate-in fade-in-0 slide-in-from-bottom-2 duration-200">
             {!referenceMenu.kind && !referenceMenu.query ? (
               <div className="flex flex-col gap-0.5">
-                {(["file", "canvas", "plan", "browser", "terminal", "memory", "chat"] as ReferenceKind[]).map((kind) => (
+                {(["file", "canvas", "plan", "note", "browser", "terminal", "memory", "chat"] as ReferenceKind[]).map((kind) => (
                   <button
                     key={kind}
                     type="button"
@@ -6671,7 +6672,7 @@ export default function AppShell() {
           type="button"
           className={cn(
             "flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors",
-            isDraft
+            isDraft && !notesOpen
               ? "text-primary"
               : "text-muted-foreground hover:bg-white/[0.03] hover:text-foreground",
           )}
@@ -7100,11 +7101,12 @@ export default function AppShell() {
         {/* Messages / empty */}
         <div
           key={paneKey}
-          className="flex min-h-0 flex-1 flex-col animate-in fade-in duration-200"
+          className="relative flex min-h-0 flex-1 flex-col animate-in fade-in duration-200"
         >
+        {!notesOpen && activeChatId ? <NotesVoid chatId={activeChatId} pinnedOnly compact /> : null}
         {notesOpen ? (
           <div className="h-full min-h-0 flex-1 p-3 sm:p-5">
-            <NotesVoid chatId={activeChatId} focusNoteId={focusedNoteId} />
+            <NotesVoid chatId={notesOpen ? null : activeChatId} focusNoteId={focusedNoteId} />
           </div>
         ) : loadingChatId ? (
           <ChatLoadingSkeleton />
@@ -7194,7 +7196,9 @@ export default function AppShell() {
                                   className="inline-flex max-w-48 items-center gap-1 rounded-full border border-primary/20 bg-primary/[0.06] px-2 py-0.5 text-[11px] text-primary/80"
                                 >
                                   <Icon className="size-3 shrink-0" />
-                                  <span className="truncate">@{reference.label}</span>
+                                  <span className="truncate">
+                                    {reference.source === "pinned" ? "Pinned · " : ""}@{reference.label}
+                                  </span>
                                 </span>
                               );
                             })}

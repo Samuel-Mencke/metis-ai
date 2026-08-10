@@ -49,6 +49,7 @@ export type ChatMessage = {
     kind: string;
     id: string;
     label: string;
+    source?: "explicit" | "pinned";
     detail?: string;
     path?: string;
     content?: string;
@@ -278,6 +279,8 @@ export type ChatSessionState = {
   workspaceOpen?: boolean;
   workspaceWidth?: number;
   notesView?: SessionSnapshot["notesView"];
+  pinnedNoteIds?: string[];
+  unpinnedGlobalNoteIds?: string[];
   filters?: Record<string, string | boolean | number | null>;
 };
 
@@ -354,6 +357,7 @@ export type GlobalModelSettings = {
   subagentModelEnabled?: boolean;
   subagentModelId?: string;
   draftInput?: string;
+  pinnedNoteIds?: string[];
   favoriteModelKeys?: string[];
   modelAliases?: Record<string, string>;
   browserRealtime?: boolean;
