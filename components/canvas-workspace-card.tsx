@@ -1,6 +1,8 @@
 "use client";
 
-import { ExternalLink, Palette } from "lucide-react";
+import { Check, Copy, ExternalLink, Palette } from "lucide-react";
+import { useState } from "react";
+import { toast } from "sonner";
 import { Markdown } from "@/components/markdown";
 
 export type CanvasWorkspaceCardProps = {
@@ -16,6 +18,19 @@ export function CanvasWorkspaceCard({
   workspaceLink,
   onOpen,
 }: CanvasWorkspaceCardProps) {
+  const [copied, setCopied] = useState(false);
+
+  async function copyRawContent() {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      toast.success("Raw canvas content copied");
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      toast.error("Could not copy canvas content");
+    }
+  }
+
   return (
     <section className="my-2.5 w-full rounded-lg border border-border/50 bg-muted/20 p-2.5">
       <div className="flex items-start gap-2">
@@ -46,8 +61,18 @@ export function CanvasWorkspaceCard({
           </button>
         ) : null}
       </div>
-      {onOpen ? (
-        <div className="mt-2 flex justify-end">
+      <div className="mt-2 flex items-center justify-end gap-1">
+        <button
+          type="button"
+          className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+          aria-label="Copy raw canvas content"
+          title="Copy raw canvas content"
+          onClick={() => void copyRawContent()}
+        >
+          {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+          {copied ? "Copied" : "Copy raw"}
+        </button>
+        {onOpen ? (
           <button
             type="button"
             className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -55,8 +80,8 @@ export function CanvasWorkspaceCard({
           >
             Open canvas
           </button>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
     </section>
   );
 }

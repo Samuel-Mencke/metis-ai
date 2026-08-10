@@ -2096,7 +2096,9 @@ export default function AppShell() {
           },
         }),
       });
-    }, 250);
+    // Session state is best-effort autosave. Keep typing from rewriting the
+    // complete denormalized chat record on every short pause.
+    }, 1_000);
     return () => window.clearTimeout(timer);
   }, [
     activeChatId,
@@ -6060,6 +6062,15 @@ export default function AppShell() {
     }, 0);
   }
 
+  async function copyWorkspaceRaw(workspace: WorkspaceItem) {
+    try {
+      await navigator.clipboard.writeText(workspace.content);
+      toast.success(`Raw ${workspace.type} content copied`);
+    } catch {
+      toast.error(`Could not copy ${workspace.type} content`);
+    }
+  }
+
   function referenceLabel(kind: ReferenceKind) {
     return {
       file: "Files",
@@ -8123,6 +8134,17 @@ export default function AppShell() {
                       placeholder="Plan title"
                       className="h-8 flex-1 text-sm font-medium"
                     />
+                    <Button
+                      type="button"
+                      size="icon-sm"
+                      variant="ghost"
+                      className="size-8 shrink-0"
+                      aria-label="Copy raw plan content"
+                      title="Copy raw plan content"
+                      onClick={() => void copyWorkspaceRaw(activeWorkspace)}
+                    >
+                      <Copy className="size-3.5" />
+                    </Button>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button
@@ -8199,6 +8221,17 @@ export default function AppShell() {
                       placeholder="Canvas title"
                       className="h-8 flex-1 text-sm font-medium"
                     />
+                    <Button
+                      type="button"
+                      size="icon-sm"
+                      variant="ghost"
+                      className="size-8 shrink-0"
+                      aria-label="Copy raw canvas content"
+                      title="Copy raw canvas content"
+                      onClick={() => void copyWorkspaceRaw(activeWorkspace)}
+                    >
+                      <Copy className="size-3.5" />
+                    </Button>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button

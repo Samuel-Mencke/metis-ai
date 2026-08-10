@@ -32,6 +32,7 @@ let previousNetwork: { rx: number; tx: number; timestamp: number } | null = null
 let latest: ServerMetric | null = null;
 const history: ServerMetric[] = [];
 let samplerPromise: Promise<ServerMetric> | null = null;
+let samplerTimer: NodeJS.Timeout | null = null;
 
 function numberOrNull(value: string | undefined) {
   if (!value || !Number.isFinite(Number(value))) return null;
@@ -143,12 +144,26 @@ async function sample(): Promise<ServerMetric> {
   return metric;
 }
 
-export async function getServerMetrics() {
+function requestSample() {
   if (!samplerPromise) {
     samplerPromise = sample().finally(() => { samplerPromise = null; });
-    const timer = setInterval(() => { void sample(); }, SAMPLE_INTERVAL_MS);
-    timer.unref();
+    // Timer-triggered samples have no request waiting on them. Attach a
+    // rejection handler so a transient /proc or GPU command failure cannot
+    // become an unhandled rejection.
+    void samplerPromise.catch(() => undefined);
   }
-  if (!latest) await samplerPromise;
+  return samplerPromise;
+}
+
+export async function getServerMetrics() {
+  if (!samplerTimer) {
+    samplerTimer = setInterval(() => {
+      void requestSample();
+    }, SAMPLE_INTERVAL_MS);
+    samplerTimer.unref();
+  }
+  if (!latest) {
+    await requestSample();
+  }
   return { current: latest, history: [...history] };
 }
