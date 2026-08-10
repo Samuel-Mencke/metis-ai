@@ -23,6 +23,14 @@ import { chatUploadDir, resolveUploadPath } from "@/lib/uploads";
 
 const now = () => new Date().toISOString();
 const chatCache = new Map<string, { updatedAt: string; chat: Chat }>();
+type ChatPageResult = {
+  chat: Chat;
+  messageOffset: number;
+  hasEarlierMessages: boolean;
+  totalMessages: number;
+};
+const chatPageCache = new Map<string, { updatedAt: string; page: ChatPageResult }>();
+const CHAT_PAGE_CACHE_MAX = 128;
 let chatIndexCache: { key: string; expiresAt: number; chats: ChatIndexEntry[] } | null = null;
 
 function hashSharePassword(password: string, salt = randomBytes(16).toString("hex")) {
@@ -97,6 +105,15 @@ function rowChat(row: unknown): Chat | null {
   return parseData<Chat>(row);
 }
 
+function parseJsonField<T>(value: unknown): T | undefined {
+  if (typeof value !== "string") return undefined;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return undefined;
+  }
+}
+
 export function listChatsForUser(
   ownerId?: string,
   options: { includeArchived?: boolean } = {},
@@ -107,38 +124,64 @@ export function listChatsForUser(
     return chatIndexCache.chats;
   }
   const rows = ownerId
-    ? db.prepare("SELECT data, updated_at as updatedAt FROM chats WHERE owner_id = ? ORDER BY updated_at DESC").all(ownerId)
-    : db.prepare("SELECT data, updated_at as updatedAt FROM chats ORDER BY updated_at DESC").all();
-  const result = rows
-    .map((row) => rowChat(row))
-    .filter((chat): chat is Chat => Boolean(chat))
-    .filter((chat) => options.includeArchived || !chat.archived)
+    ? db.prepare(
+        `SELECT id, owner_id AS ownerId, created_at AS createdAt, updated_at AS updatedAt,
+                json_extract(data, '$.title') AS title,
+                json_extract(data, '$.agentId') AS agentId,
+                json_extract(data, '$.modelId') AS modelId,
+                json_extract(data, '$.runStatus') AS runStatus,
+                json_extract(data, '$.runUpdatedAt') AS runUpdatedAt,
+                json_extract(data, '$.queueMessage') AS queueMessage,
+                json_extract(data, '$.pendingQuestion') AS pendingQuestion,
+                json_extract(data, '$.badge') AS badge,
+                json_extract(data, '$.pinned') AS pinned,
+                json_extract(data, '$.archived') AS archived,
+                json_extract(data, '$.share') AS share
+         FROM chats WHERE owner_id = ? ORDER BY updated_at DESC`,
+      ).all(ownerId)
+    : db.prepare(
+        `SELECT id, owner_id AS ownerId, created_at AS createdAt, updated_at AS updatedAt,
+                json_extract(data, '$.title') AS title,
+                json_extract(data, '$.agentId') AS agentId,
+                json_extract(data, '$.modelId') AS modelId,
+                json_extract(data, '$.runStatus') AS runStatus,
+                json_extract(data, '$.runUpdatedAt') AS runUpdatedAt,
+                json_extract(data, '$.queueMessage') AS queueMessage,
+                json_extract(data, '$.pendingQuestion') AS pendingQuestion,
+                json_extract(data, '$.badge') AS badge,
+                json_extract(data, '$.pinned') AS pinned,
+                json_extract(data, '$.archived') AS archived,
+                json_extract(data, '$.share') AS share
+         FROM chats ORDER BY updated_at DESC`,
+      ).all();
+  const result: ChatIndexEntry[] = rows.flatMap((row) => {
+      const item = row as Record<string, unknown>;
+      const archived = Boolean(item.archived);
+      if (!options.includeArchived && archived) return [];
+      const pendingQuestion = parseJsonField<PendingChatQuestion>(item.pendingQuestion);
+      const share = parseJsonField<ChatShare>(item.share);
+      return [{
+        id: String(item.id || ""),
+        ownerId: typeof item.ownerId === "string" ? item.ownerId : undefined,
+        title: typeof item.title === "string" ? item.title : "New chat",
+        updatedAt: String(item.updatedAt || ""),
+        createdAt: String(item.createdAt || ""),
+        ...(typeof item.agentId === "string" ? { agentId: item.agentId } : {}),
+        ...(typeof item.modelId === "string" ? { modelId: item.modelId } : {}),
+        ...(typeof item.runStatus === "string" ? { runStatus: item.runStatus as ChatRunStatus } : {}),
+        ...(typeof item.runUpdatedAt === "string" ? { runUpdatedAt: item.runUpdatedAt } : {}),
+        ...(typeof item.queueMessage === "string" ? { queueMessage: item.queueMessage } : {}),
+        ...(pendingQuestion ? { pendingQuestion } : {}),
+        ...(typeof item.badge === "string" ? { badge: item.badge as ChatBadge } : {}),
+        ...(item.pinned === 1 || item.pinned === true ? { pinned: true } : {}),
+        ...(archived ? { archived: true } : {}),
+        ...(share ? { share: publicShare(share) as ChatIndexEntry["share"] } : {}),
+      }];
+    })
     .sort((a, b) => {
       if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
-      const aLastSentMessage = a.messages.filter((message) => message.role === "user").at(-1)?.createdAt || "";
-      const bLastSentMessage = b.messages.filter((message) => message.role === "user").at(-1)?.createdAt || "";
-      if (Boolean(aLastSentMessage) !== Boolean(bLastSentMessage)) {
-        return aLastSentMessage ? -1 : 1;
-      }
-      return (bLastSentMessage || b.createdAt).localeCompare(aLastSentMessage || a.createdAt);
-    })
-    .map((chat) => ({
-      id: chat.id,
-      ownerId: chat.ownerId,
-      title: chat.title,
-      updatedAt: chat.updatedAt,
-      createdAt: chat.createdAt,
-      agentId: chat.agentId,
-      modelId: chat.modelId,
-      runStatus: chat.runStatus,
-      runUpdatedAt: chat.runUpdatedAt,
-      queueMessage: chat.queueMessage,
-      pendingQuestion: chat.pendingQuestion,
-      badge: chat.badge,
-      pinned: chat.pinned,
-      archived: chat.archived,
-      ...(chat.share ? { share: publicShare(chat.share) } : {}),
-    }));
+      return b.updatedAt.localeCompare(a.updatedAt);
+    });
   chatIndexCache = { key: cacheKey, expiresAt: Date.now() + 1_000, chats: result };
   return result;
 }
@@ -215,7 +258,103 @@ export function getChat(id: string, ownerId?: string): Chat | null {
   return chat && ownerId && chat.ownerId && chat.ownerId !== ownerId ? null : chat;
 }
 
+export function getChatPage(
+  id: string,
+  ownerId: string | undefined,
+  messageLimit: number,
+  messageOffset: number,
+) {
+  if (!id || id.includes("/") || id.includes("..")) return null;
+  const db = getDatabase();
+  const identity = ownerId
+    ? db.prepare(
+        "SELECT updated_at AS updatedAt FROM chats WHERE id = ? AND owner_id = ?",
+      ).get(id, ownerId) as { updatedAt?: string } | undefined
+    : db.prepare(
+        "SELECT updated_at AS updatedAt FROM chats WHERE id = ?",
+      ).get(id) as { updatedAt?: string } | undefined;
+  if (!identity?.updatedAt) return null;
+  const pageKey = `${ownerId || "*"}:${id}:${messageLimit}:${messageOffset}`;
+  const cachedPage = chatPageCache.get(pageKey);
+  if (cachedPage?.updatedAt === identity.updatedAt) {
+    return cachedPage.page;
+  }
+  const row = ownerId
+    ? db.prepare(
+        `SELECT json_remove(data, ?) AS base,
+                json_array_length(data, ?) AS total,
+                updated_at AS updatedAt
+         FROM chats
+         WHERE id = ? AND owner_id = ?`,
+      ).get("$.messages", "$.messages", id, ownerId) as
+      | { base?: string; total?: number; updatedAt?: string }
+      | undefined
+    : db.prepare(
+        `SELECT json_remove(data, ?) AS base,
+                json_array_length(data, ?) AS total,
+                updated_at AS updatedAt
+         FROM chats
+         WHERE id = ?`,
+      ).get("$.messages", "$.messages", id) as
+      | { base?: string; total?: number; updatedAt?: string }
+      | undefined;
+  if (!row?.base) return null;
+
+  const totalMessages = Math.max(0, Number(row.total) || 0);
+  const end = Math.max(0, totalMessages - messageOffset);
+  const start = Math.max(0, end - messageLimit);
+  const messageRow = ownerId
+    ? db.prepare(
+        `SELECT COALESCE(json_group_array(json(value)), ?) AS messages
+         FROM (
+           SELECT value
+           FROM chats, json_each(chats.data, ?)
+           WHERE chats.id = ? AND chats.owner_id = ?
+             AND CAST(json_each.key AS INTEGER) >= ?
+             AND CAST(json_each.key AS INTEGER) < ?
+           ORDER BY CAST(json_each.key AS INTEGER)
+           LIMIT ?
+         )`,
+      ).get("[]", "$.messages", id, ownerId, start, end, messageLimit) as { messages?: string } | undefined
+    : db.prepare(
+        `SELECT COALESCE(json_group_array(json(value)), ?) AS messages
+         FROM (
+           SELECT value
+           FROM chats, json_each(chats.data, ?)
+           WHERE chats.id = ?
+             AND CAST(json_each.key AS INTEGER) >= ?
+             AND CAST(json_each.key AS INTEGER) < ?
+           ORDER BY CAST(json_each.key AS INTEGER)
+           LIMIT ?
+         )`,
+      ).get("[]", "$.messages", id, start, end, messageLimit) as { messages?: string } | undefined;
+
+  try {
+    const base = JSON.parse(row.base) as Omit<Chat, "messages">;
+    const messages = JSON.parse(messageRow?.messages || "[]") as ChatMessage[];
+    const chat: Chat = { ...base, messages };
+    if (row.updatedAt) chat.updatedAt = row.updatedAt;
+    const page: ChatPageResult = {
+      chat,
+      messageOffset,
+      hasEarlierMessages: start > 0,
+      totalMessages,
+    };
+    chatPageCache.set(pageKey, { updatedAt: identity.updatedAt, page });
+    if (chatPageCache.size > CHAT_PAGE_CACHE_MAX) {
+      const oldestKey = chatPageCache.keys().next().value;
+      if (oldestKey) chatPageCache.delete(oldestKey);
+    }
+    return page;
+  } catch {
+    return null;
+  }
+}
+
 function saveChatInternal(chat: Chat) {
+  // `updated_at` is also the cache revision used by getChat/getChatPage.
+  // Every JSON mutation must advance it, including workspace/session changes
+  // that do not necessarily change the chat title or message activity.
   const updated = { ...chat, updatedAt: now() };
   getDatabase()
     .prepare(
@@ -232,6 +371,9 @@ function saveChatInternal(chat: Chat) {
       updated.updatedAt,
     );
   chatCache.set(updated.id, { updatedAt: updated.updatedAt, chat: updated });
+  for (const key of chatPageCache.keys()) {
+    if (key.includes(`:${updated.id}:`)) chatPageCache.delete(key);
+  }
   chatIndexCache = null;
   return updated;
 }

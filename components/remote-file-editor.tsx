@@ -6,6 +6,7 @@ import { createPortal } from "react-dom";
 import { ChevronRight, File, Folder, Fullscreen, LoaderCircle, Minimize2, Pencil, Plus, Save, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 
@@ -55,6 +56,7 @@ export function RemoteFileEditor({ cwd, onCwdChange }: RemoteFileEditorProps) {
   const [explorerWidth, setExplorerWidth] = useState(240);
   const [dragging, setDragging] = useState(false);
   const [unsavedDialogOpen, setUnsavedDialogOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState("");
   const pendingActionRef = useRef<(() => void) | null>(null);
   const dragStartRef = useRef<{ pointerX: number; width: number } | null>(null);
   const dirty = Boolean(selectedPath) && content !== savedContent;
@@ -214,7 +216,7 @@ export function RemoteFileEditor({ cwd, onCwdChange }: RemoteFileEditorProps) {
   }
 
   function deleteSelected() {
-    if (!selectedEntryPath || !window.confirm(`Delete "${selectedEntryPath}"?`)) return;
+    if (!selectedEntryPath) return;
     const action = async () => {
       try {
         await request({ action: "delete", path: selectedEntryPath, cwd });
@@ -307,7 +309,7 @@ export function RemoteFileEditor({ cwd, onCwdChange }: RemoteFileEditorProps) {
             <Button type="button" size="icon-sm" variant="ghost" disabled={!newName.trim()} onClick={() => void createFile()} aria-label="Create file"><Plus className="size-3.5" /></Button>
             <Button type="button" size="icon-sm" variant="ghost" onClick={() => void createFolder()} aria-label="Create folder"><Folder className="size-3.5" /></Button>
             <Button type="button" size="icon-sm" variant="ghost" disabled={!selectedEntryPath} onClick={() => void renameSelected()} aria-label="Rename entry"><Pencil className="size-3.5" /></Button>
-            <Button type="button" size="icon-sm" variant="ghost" disabled={!selectedEntryPath} onClick={deleteSelected} aria-label="Delete entry"><Trash2 className="size-3.5" /></Button>
+            <Button type="button" size="icon-sm" variant="ghost" disabled={!selectedEntryPath} onClick={() => setDeleteTarget(selectedEntryPath)} aria-label="Delete entry"><Trash2 className="size-3.5" /></Button>
             {!fullscreen ? <Button type="button" size="sm" variant="outline" disabled={!selectedPath} onClick={() => setFullscreen(true)} aria-label="Open file fullscreen" title="Open file fullscreen"><Fullscreen className="size-3.5" />Vollbild</Button> : null}
             {!fullscreen ? <Button type="button" size="icon-sm" disabled={!selectedPath || saving} onClick={() => void save()} aria-label="Save file" title="Save file">{saving ? <LoaderCircle className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}</Button> : null}
           </div>
@@ -331,6 +333,14 @@ export function RemoteFileEditor({ cwd, onCwdChange }: RemoteFileEditorProps) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => !open && setDeleteTarget("")}
+        title="Delete entry?"
+        description={`Are you sure you want to delete “${deleteTarget}”? This action cannot be undone.`}
+        confirmLabel="Delete"
+        onConfirm={deleteSelected}
+      />
     </div>
   );
 

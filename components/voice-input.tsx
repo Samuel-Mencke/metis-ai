@@ -1,34 +1,93 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LoaderCircle, Mic, RotateCcw, Square, X } from "lucide-react";
+import { Check, Mic, RotateCcw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 type VoiceInputProps = {
   chatId?: string | null;
   onTranscript: (text: string) => void;
+  onRecordingChange?: (recording: boolean) => void;
+  onStateChange?: (state: VoiceState) => void;
+  onWaveformLevelChange?: (level: number) => void;
   enabled?: boolean;
   maxDurationSeconds?: number;
+  provider?: "openai" | "local" | "custom" | "browser";
+  modelId?: string;
+  realtime?: boolean;
+  endpoint?: string;
+  connectionId?: string;
+  stopSignal?: number;
 };
 
 type VoiceState = "idle" | "permission" | "recording" | "uploading" | "transcribing" | "ready" | "error";
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((event: { results: ArrayLike<{ 0: { transcript: string }; isFinal: boolean }> }) => void) | null;
+  onerror: ((event: { error?: string }) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+};
 
-export function VoiceInput({ chatId, onTranscript, enabled = true, maxDurationSeconds }: VoiceInputProps) {
+function formatDuration(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes}:${String(remainder).padStart(2, "0")}`;
+}
+
+export function VoiceInput({
+  chatId,
+  onTranscript,
+  onRecordingChange,
+  onStateChange,
+  onWaveformLevelChange,
+  enabled = true,
+  maxDurationSeconds,
+  provider = "openai",
+  modelId = "whisper-1",
+  realtime = false,
+  endpoint,
+  connectionId,
+  stopSignal = 0,
+}: VoiceInputProps) {
   const [state, setState] = useState<VoiceState>("idle");
   const [error, setError] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const [maxDuration, setMaxDuration] = useState(300);
   const [lastRecording, setLastRecording] = useState<{ blob: Blob; duration: number } | null>(null);
+  const [level, setLevel] = useState(0);
+  const [livePreview, setLivePreview] = useState("");
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const waveformPeakRef = useRef(0.12);
+  const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const livePreviewRef = useRef("");
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const startedAtRef = useRef(0);
-  const stop = useCallback(() => {
-    const recorder = recorderRef.current;
-    if (!recorder || recorder.state === "inactive") return;
-    recorder.stop();
-  }, []);
-
+  const lastStopSignalRef = useRef(stopSignal);
+  const setRecording = useCallback((recording: boolean) => {
+    onRecordingChange?.(recording);
+  }, [onRecordingChange]);
+  useEffect(() => {
+    onStateChange?.(state);
+  }, [onStateChange, state]);
+  const commitTranscript = useCallback((text: string) => {
+    const transcript = text.trim();
+    if (transcript) onTranscript(transcript);
+    setLivePreview("");
+    livePreviewRef.current = "";
+    setLevel(0);
+    onWaveformLevelChange?.(0);
+    setRecording(false);
+    setState("idle");
+  }, [onTranscript, onWaveformLevelChange, setRecording]);
   useEffect(() => {
     if (typeof maxDurationSeconds === "number") {
       setMaxDuration(Math.max(1, Math.min(3600, Math.floor(maxDurationSeconds))));
@@ -43,21 +102,88 @@ export function VoiceInput({ chatId, onTranscript, enabled = true, maxDurationSe
       .catch(() => undefined);
   }, [maxDurationSeconds]);
 
-  useEffect(() => {
-    if (state !== "recording") return;
-    const timer = window.setInterval(() => {
-      const seconds = Math.floor((Date.now() - startedAtRef.current) / 1_000);
-      setElapsed(seconds);
-      if (seconds >= maxDuration) stop();
-    }, 250);
-    return () => window.clearInterval(timer);
-  }, [state, maxDuration, stop]);
-
   const cleanup = useCallback(() => {
+    if (animationFrameRef.current !== null) cancelAnimationFrame(animationFrameRef.current);
+    animationFrameRef.current = null;
+    void audioContextRef.current?.close();
+    audioContextRef.current = null;
+    analyserRef.current = null;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     recorderRef.current = null;
   }, []);
+
+  const startVisualizer = useCallback((stream: MediaStream) => {
+    const AudioContextClass = window.AudioContext;
+    if (!AudioContextClass) return;
+    const audioContext = new AudioContextClass();
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 256;
+    audioContext.createMediaStreamSource(stream).connect(analyser);
+    audioContextRef.current = audioContext;
+    analyserRef.current = analyser;
+    waveformPeakRef.current = 0.12;
+    const data = new Uint8Array(analyser.fftSize);
+    const animate = () => {
+      analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (const value of data) {
+        const normalized = (value - 128) / 128;
+        sum += normalized * normalized;
+      }
+      const rawLevel = Math.sqrt(sum / data.length) * 9;
+      const gatedLevel = Math.max(0, rawLevel - 0.06);
+      waveformPeakRef.current = Math.max(gatedLevel, waveformPeakRef.current * 0.997);
+      const nextLevel = gatedLevel === 0
+        ? 0
+        : Math.min(1, gatedLevel / Math.max(0.1, waveformPeakRef.current * 0.55));
+      setLevel(nextLevel);
+      onWaveformLevelChange?.(nextLevel);
+      animationFrameRef.current = requestAnimationFrame(animate);
+    };
+    animate();
+  }, [onWaveformLevelChange]);
+
+  const stop = useCallback(() => {
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+      cleanup();
+      if (livePreviewRef.current) commitTranscript(livePreviewRef.current);
+      else {
+        setState("error");
+        setError("No speech was detected.");
+        setRecording(false);
+      }
+      return;
+    }
+    if (speechRecognitionRef.current) {
+      speechRecognitionRef.current.stop();
+      return;
+    }
+    const recorder = recorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    setRecording(false);
+    recorder.stop();
+  }, [cleanup, commitTranscript, setRecording]);
+
+  useEffect(() => {
+    if (lastStopSignalRef.current === stopSignal) return;
+    lastStopSignalRef.current = stopSignal;
+    if (state === "recording") stop();
+  }, [state, stop, stopSignal]);
+
+  useEffect(() => {
+    if (state !== "recording") return;
+    const updateElapsed = () => {
+      const seconds = Math.floor((Date.now() - startedAtRef.current) / 1_000);
+      setElapsed(seconds);
+      if (seconds >= maxDuration) stop();
+    };
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 250);
+    return () => window.clearInterval(timer);
+  }, [state, maxDuration, stop]);
 
   const transcribe = useCallback(async (blob: Blob, duration: number) => {
     setState("uploading");
@@ -66,6 +192,11 @@ export function VoiceInput({ chatId, onTranscript, enabled = true, maxDurationSe
     form.append("file", blob, `recording-${Date.now()}.webm`);
     form.append("durationSeconds", String(duration));
     if (chatId) form.append("chatId", chatId);
+    form.append("provider", provider);
+    form.append("modelId", modelId);
+    form.append("realtime", String(realtime));
+    if (endpoint) form.append("endpoint", endpoint);
+    if (connectionId) form.append("connectionId", connectionId);
     setState("transcribing");
     try {
       const response = await fetch("/api/voice/transcribe", {
@@ -75,15 +206,134 @@ export function VoiceInput({ chatId, onTranscript, enabled = true, maxDurationSe
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok || typeof body.transcript !== "string") throw new Error(body.error || "Transcription failed.");
-      onTranscript(body.transcript);
-      setState("ready");
+      commitTranscript(body.transcript);
     } catch (cause) {
       setState("error");
       setError(cause instanceof Error ? cause.message : "Transcription failed.");
+      setRecording(false);
     }
-  }, [chatId, onTranscript]);
+  }, [chatId, connectionId, endpoint, modelId, commitTranscript, provider, realtime, setRecording]);
 
   const start = async () => {
+    if (provider === "browser") {
+      const speechWindow = window as Window & {
+        SpeechRecognition?: new () => SpeechRecognitionLike;
+        webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+      };
+      const SpeechRecognition = speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        setState("error");
+        setError("Browser transcription is not supported in this browser.");
+        return;
+      }
+      if (navigator.mediaDevices?.getUserMedia) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          streamRef.current = stream;
+          startVisualizer(stream);
+        } catch {
+          // SpeechRecognition can still provide a transcript without the visualizer stream.
+        }
+      }
+      const recognition = new SpeechRecognition();
+      speechRecognitionRef.current = recognition;
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = "en-US";
+      recognition.onresult = (event) => {
+        let text = "";
+        for (let index = 0; index < event.results.length; index += 1) text += `${event.results[index][0].transcript} `;
+        livePreviewRef.current = text.trim();
+        setLivePreview(livePreviewRef.current);
+      };
+      recognition.onerror = (event) => {
+        speechRecognitionRef.current = null;
+        cleanup();
+        setState("error");
+        setError(event.error || "Browser transcription failed.");
+        setRecording(false);
+      };
+      recognition.onend = () => {
+        speechRecognitionRef.current = null;
+        cleanup();
+        if (livePreviewRef.current) commitTranscript(livePreviewRef.current);
+        else {
+          setState("error");
+          setError("No speech was detected.");
+          setRecording(false);
+        }
+      };
+      setLivePreview("");
+      livePreviewRef.current = "";
+      setElapsed(0);
+      startedAtRef.current = Date.now();
+      setState("recording");
+      setRecording(true);
+      recognition.start();
+      return;
+    }
+    if (provider === "openai" && realtime) {
+      if (!navigator.mediaDevices?.getUserMedia || typeof RTCPeerConnection === "undefined") {
+        setState("error");
+        setError("Realtime voice is not supported in this browser.");
+        return;
+      }
+      setState("permission");
+      setError("");
+      try {
+        const tokenResponse = await fetch("/api/voice/realtime", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ modelId, connectionId }),
+        });
+        const tokenBody = await tokenResponse.json().catch(() => ({}));
+        const token = tokenBody.client_secret?.value;
+        if (!tokenResponse.ok || typeof token !== "string") throw new Error(tokenBody.error || "Could not start realtime voice.");
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        streamRef.current = stream;
+        startVisualizer(stream);
+        const peer = new RTCPeerConnection();
+        peerConnectionRef.current = peer;
+        for (const track of stream.getTracks()) peer.addTrack(track, stream);
+        const channel = peer.createDataChannel("oai-events");
+        channel.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data) as { type?: string; delta?: string; transcript?: string };
+            if (payload.type?.includes("transcription.delta") || payload.type === "response.audio_transcript.delta") {
+              livePreviewRef.current += payload.delta || "";
+              setLivePreview(livePreviewRef.current);
+            } else if (payload.type?.includes("transcription.completed") && payload.transcript) {
+              livePreviewRef.current = payload.transcript;
+              setLivePreview(payload.transcript);
+            }
+          } catch {
+            // Ignore non-JSON realtime events.
+          }
+        };
+        const offer = await peer.createOffer();
+        await peer.setLocalDescription(offer);
+        const sdpResponse = await fetch(`https://api.openai.com/v1/realtime/calls?model=${encodeURIComponent(modelId)}`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/sdp" },
+          body: offer.sdp,
+        });
+        if (!sdpResponse.ok) throw new Error("Could not connect to the realtime voice service.");
+        await peer.setRemoteDescription({ type: "answer", sdp: await sdpResponse.text() });
+        livePreviewRef.current = "";
+        setLivePreview("");
+        startedAtRef.current = Date.now();
+        setElapsed(0);
+        setState("recording");
+        setRecording(true);
+      } catch (cause) {
+        peerConnectionRef.current?.close();
+        peerConnectionRef.current = null;
+        cleanup();
+        setState("error");
+        setError(cause instanceof Error ? cause.message : "Realtime voice failed.");
+      }
+      return;
+    }
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
       setState("error");
       setError("This browser does not support microphone recording.");
@@ -109,8 +359,10 @@ export function VoiceInput({ chatId, onTranscript, enabled = true, maxDurationSe
         setLastRecording({ blob, duration });
         void transcribe(blob, duration);
       };
+      startVisualizer(stream);
       recorder.start(250);
       setState("recording");
+      setRecording(true);
     } catch (cause) {
       cleanup();
       setState("error");
@@ -119,29 +371,48 @@ export function VoiceInput({ chatId, onTranscript, enabled = true, maxDurationSe
   };
 
   const discard = () => {
+    speechRecognitionRef.current?.stop();
+    speechRecognitionRef.current = null;
     if (recorderRef.current?.state === "recording") recorderRef.current.stop();
     cleanup();
     setLastRecording(null);
     setElapsed(0);
+    setLevel(0);
+    onWaveformLevelChange?.(0);
+    setLivePreview("");
+    livePreviewRef.current = "";
     setError("");
     setState("idle");
+    setRecording(false);
   };
 
   if (!enabled) return null;
 
   return (
     <div className="flex items-center gap-1">
-      {state === "recording" ? (
-        <Button type="button" size="icon" variant="destructive" className="size-9 shrink-0 rounded-full" onClick={stop} aria-label="Stop recording" title={`Stop recording (${elapsed}s / ${maxDuration}s)`}>
-          <Square className="size-3.5 fill-current" />
-        </Button>
-      ) : (
+      {state !== "recording" ? (
         <Button type="button" size="icon" variant="ghost" className="size-9 shrink-0 rounded-full" onClick={() => void start()} disabled={["permission", "uploading", "transcribing"].includes(state)} aria-label="Record voice input" title="Record voice input">
           <Mic className="size-4" />
         </Button>
-      )}
-      {state === "recording" ? <span className="text-[10px] tabular-nums text-red-400">{elapsed}s</span> : null}
-      {state === "permission" || state === "uploading" || state === "transcribing" ? <LoaderCircle className="size-3.5 animate-spin text-muted-foreground" aria-label={state} /> : null}
+      ) : null}
+      {state === "recording" ? <span className="mr-2 text-[10px] tabular-nums text-red-400">{formatDuration(elapsed)}</span> : null}
+      {provider === "browser" && livePreview ? <span className="max-w-48 truncate text-[11px] italic text-muted-foreground" title={livePreview}>{livePreview}</span> : null}
+      {state === "ready" ? (
+        <>
+          <Button type="button" size="icon-xs" variant="secondary" onClick={() => {
+            if (provider === "browser" || (provider === "openai" && realtime)) {
+              commitTranscript(livePreview);
+            } else if (lastRecording) {
+              void transcribe(lastRecording.blob, lastRecording.duration);
+            }
+          }} aria-label="Confirm voice input" title="Confirm voice input">
+            <Check className="size-3.5" />
+          </Button>
+          <Button type="button" size="icon-xs" variant="ghost" onClick={discard} aria-label="Discard voice input" title="Discard voice input">
+            <X className="size-3.5" />
+          </Button>
+        </>
+      ) : null}
       {state === "ready" ? <span className="text-[10px] text-emerald-500">Draft inserted</span> : null}
       {state === "error" ? (
         <>

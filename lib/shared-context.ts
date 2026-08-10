@@ -153,7 +153,13 @@ export function getNote(id: string, ownerId?: string) {
   return rowToNote(row);
 }
 
-function noteActivity(note: SharedNote, action: NoteActivity["action"], actor: NoteAuthor, summary?: string) {
+function noteActivity(
+  note: SharedNote,
+  action: NoteActivity["action"],
+  actor: NoteAuthor,
+  summary?: string,
+  before?: SharedNote,
+) {
   const activity: NoteActivity = {
     id: randomUUID(),
     noteId: note.id,
@@ -161,6 +167,7 @@ function noteActivity(note: SharedNote, action: NoteActivity["action"], actor: N
     action,
     createdAt: iso(),
     ...(summary ? { summary: boundedText(summary, 500) } : {}),
+    ...(before ? { before, after: note } : { after: note }),
   };
   getDatabase().prepare(
     "INSERT INTO note_activities (id, note_id, owner_id, chat_id, data, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -262,7 +269,7 @@ export function updateNote(
       : input.archived === false
         ? "restored"
         : "updated";
-    noteActivity(next, action, input.author || "user");
+    noteActivity(next, action, input.author || "user", undefined, current);
     return input.idempotencyKey
       ? saveIdempotentResponse("note:update", input.idempotencyKey, next, input.ownerId)
       : next;
@@ -279,10 +286,87 @@ export function deleteNote(id: string, ownerId?: string) {
   });
 }
 
+export function revertChatNotes(chatId: string, ownerId: string | undefined, cutoff: string) {
+  return transaction(() => {
+    const db = getDatabase();
+    const rows = db.prepare(
+      `SELECT a.id, a.note_id AS noteId, a.data
+       FROM note_activities a
+       JOIN notes n ON n.id = a.note_id
+       WHERE n.chat_id = ? AND n.scope = 'chat'
+         AND (? IS NULL OR n.owner_id = ? OR n.owner_id IS NULL)
+         AND a.created_at > ?
+       ORDER BY a.created_at DESC`,
+    ).all(chatId, ownerId ?? null, ownerId ?? null, cutoff) as Array<{
+      id: string;
+      noteId: string;
+      data: string;
+    }>;
+    const reverted = new Set<string>();
+    const deleted = new Set<string>();
+    const restoreByNote = new Map<string, SharedNote>();
+    for (const row of rows) {
+      const activity = parseData<NoteActivity>({ data: row.data });
+      if (!activity || deleted.has(row.noteId)) continue;
+      if (activity.action === "created") {
+        db.prepare("DELETE FROM note_activities WHERE note_id = ?").run(row.noteId);
+        db.prepare("DELETE FROM notes WHERE id = ?").run(row.noteId);
+        deleted.add(row.noteId);
+        reverted.add(row.noteId);
+        continue;
+      }
+      if (activity.before) restoreByNote.set(row.noteId, activity.before);
+    }
+    for (const [noteId, before] of restoreByNote) {
+      if (deleted.has(noteId)) continue;
+      const current = getNote(noteId, ownerId);
+      if (!current) continue;
+      const restored: SharedNote = { ...before, updatedAt: iso(), version: current.version + 1 };
+      db.prepare(
+        "UPDATE notes SET data = ?, version = ?, archived = ?, updated_at = ? WHERE id = ?",
+      ).run(
+        JSON.stringify(restored),
+        restored.version,
+        restored.archived ? 1 : 0,
+        restored.updatedAt,
+        restored.id,
+      );
+      db.prepare(
+        "DELETE FROM note_activities WHERE note_id = ? AND created_at > ?",
+      ).run(noteId, cutoff);
+      reverted.add(noteId);
+    }
+    return [...reverted];
+  });
+}
+
 export function saveSnapshot(snapshot: SessionSnapshot) {
-  getDatabase().prepare(
+  const db = getDatabase();
+  const serialized = JSON.stringify(snapshot);
+  if (snapshot.checkpoint === "periodic") {
+    const existing = db.prepare(
+      `SELECT id FROM session_snapshots
+       WHERE chat_id = ? AND checkpoint = 'periodic'
+       ORDER BY updated_at DESC LIMIT 1`,
+    ).get(snapshot.chatId) as { id?: string } | undefined;
+    if (existing?.id) {
+      db.prepare(
+        `UPDATE session_snapshots
+         SET owner_id = ?, schema_version = ?, data = ?, updated_at = ?
+         WHERE id = ?`,
+      ).run(
+        snapshot.ownerId ?? null,
+        snapshot.schemaVersion,
+        serialized,
+        snapshot.updatedAt,
+        existing.id,
+      );
+      return { ...snapshot, id: existing.id, createdAt: snapshot.createdAt };
+    }
+  }
+  db.prepare(
     "INSERT INTO session_snapshots (id, chat_id, owner_id, schema_version, checkpoint, data, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-  ).run(snapshot.id, snapshot.chatId, snapshot.ownerId ?? null, snapshot.schemaVersion, snapshot.checkpoint, JSON.stringify(snapshot), snapshot.createdAt, snapshot.updatedAt);
+  ).run(snapshot.id, snapshot.chatId, snapshot.ownerId ?? null, snapshot.schemaVersion, snapshot.checkpoint, serialized, snapshot.createdAt, snapshot.updatedAt);
   return snapshot;
 }
 
@@ -311,9 +395,29 @@ export function createSnapshot(input: Omit<SessionSnapshot, "id" | "schemaVersio
 }
 
 export function normalizeVoiceSettings(settings?: Partial<VoiceInputSettings>): VoiceInputSettings {
+  const provider =
+    settings?.provider === "local" ||
+    settings?.provider === "custom" ||
+    settings?.provider === "browser"
+      ? settings.provider
+      : "openai";
+  const modelId = typeof settings?.modelId === "string" && settings.modelId.trim()
+    ? settings.modelId.trim().slice(0, 200)
+    : provider === "openai" && settings?.realtime
+      ? "gpt-realtime-whisper"
+      : "whisper-1";
   return {
     enabled: settings?.enabled !== false,
     maxDurationSeconds: Math.max(1, Math.min(MAX_VOICE_DURATION_SECONDS, Math.floor(Number(settings?.maxDurationSeconds) || 300))),
+    provider,
+    modelId,
+    realtime: settings?.realtime === true,
+    ...(typeof settings?.endpoint === "string" && settings.endpoint.trim()
+      ? { endpoint: settings.endpoint.trim().slice(0, 500) }
+      : {}),
+    ...(typeof settings?.connectionId === "string" && settings.connectionId.trim()
+      ? { connectionId: settings.connectionId.trim().slice(0, 120) }
+      : {}),
     ...(settings?.language?.trim() ? { language: settings.language.trim().slice(0, 20) } : {}),
     autoInsertDraft: settings?.autoInsertDraft !== false,
     deleteAudioAfterTranscription: settings?.deleteAudioAfterTranscription !== false,

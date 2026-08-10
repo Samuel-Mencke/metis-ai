@@ -1,11 +1,12 @@
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { getChat, listChatsForUser, listMemories } from "@/lib/db-store";
 import { config } from "@/lib/config";
+import { listNotes } from "@/lib/shared-context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type ReferenceKind = "file" | "canvas" | "plan" | "browser" | "memory" | "chat" | "terminal";
+type ReferenceKind = "file" | "canvas" | "plan" | "note" | "browser" | "memory" | "chat" | "terminal";
 
 type ReferenceResult = {
   kind: ReferenceKind;
@@ -64,6 +65,20 @@ export async function GET(req: Request) {
         chatId: chat.id,
         isCurrentChat: chat.id === currentChatId,
         content: workspace.content.slice(0, 6_000),
+      });
+    }
+
+    for (const note of listNotes({ ownerId, chatId: chat.id }).filter(
+      (item) => item.scope === "chat" || chat.id === currentChatId,
+    )) {
+      push({
+        kind: "note",
+        id: note.id,
+        label: note.title || note.content.slice(0, 80) || "Untitled note",
+        detail: `in ${chat.title || "Untitled chat"}`,
+        chatId: chat.id,
+        isCurrentChat: chat.id === currentChatId,
+        content: note.content.slice(0, 6_000),
       });
     }
 

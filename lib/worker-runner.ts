@@ -33,6 +33,7 @@ function classifyTool(name: string): ToolPart["kind"] {
   const value = name.toLowerCase();
   if (/(subagent|delegate|agent|task)/.test(value)) return "subagent";
   if (/(todo)/.test(value)) return "todo";
+  if (/(note)/.test(value)) return "note";
   if (/(memory|remember)/.test(value)) return "memory";
   if (/(browser|navigate|playwright|webfetch)/.test(value)) return "browser";
   if (value.includes("edit_plan")) return "plan";
@@ -575,6 +576,8 @@ export async function runQueuedJob(job: AgentJob) {
       `Memories:\n${listMemories(job.userId).map((memory) => `- ${memory.content}`).join("\n") || "(none yet)"}`,
       `Existing workspaces:\n${chat.workspaces?.map((item) => `[${item.type}] ${item.name} (link: workspace://${item.type}/${item.id})\n${item.content}`).join("\n\n") || "(none)"}`,
       "When referring to an existing or newly created plan/canvas, include its exact Markdown link using workspace://plan/<id> or workspace://canvas/<id>.",
+      "When referring to an existing or newly created note, include its exact Markdown link using note://<id>, for example [Note title](note://note-id). Notes must be clickable links, not only bold text.",
+      "Use list_notes or search_notes when you need note IDs before linking them.",
       "When you use browser results, selected references, or other verifiable web sources, cite the exact URL immediately after the sentence it supports using the format [Source: Website title](URL). At the end, put every source used in exactly one fenced block starting with ```sources, with one Markdown link per line. Never invent URLs; if no verifiable source is available, do not create a sources block.",
       "To create a plan or canvas, call the MCP tools create_plan or create_canvas with title and content. Use an empty content string for a blank workspace, and do not claim creation without a completed tool call.",
       "For memories, use list_memories to retrieve the current user's entries, add_memory only for useful durable facts or preferences, and edit_memory with the exact memory id to change an existing entry. Never claim a memory was changed without a completed tool call.",

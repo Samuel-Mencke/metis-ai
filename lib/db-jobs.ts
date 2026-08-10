@@ -4,6 +4,8 @@ import type { AgentJob, JobStatus } from "@/lib/jobs";
 import { updateChat } from "@/lib/db-store";
 
 const iso = () => new Date().toISOString();
+const RUN_EVENT_RETENTION = 10_000;
+let lastRunEventCleanupAt = 0;
 
 export function enqueueJob(input: Omit<AgentJob, "id" | "status" | "attempts" | "createdAt" | "updatedAt">) {
   return transaction(() => {
@@ -145,13 +147,16 @@ export function recoverStaleJobs(maxAgeMs = 15 * 60 * 1000) {
 
 export function appendRunEvent(jobId: string, chatId: string, userId: string | undefined, event: string, data: unknown) {
   const createdAt = iso();
-  const result = getDatabase().prepare(
+  const db = getDatabase();
+  const result = db.prepare(
     "INSERT INTO run_events (job_id, chat_id, user_id, event, data, created_at) VALUES (?, ?, ?, ?, ?, ?)",
   ).run(jobId, chatId, userId ?? null, event, JSON.stringify(data), createdAt);
-  if (Number(result.lastInsertRowid) % 500 === 0) {
-    getDatabase().prepare(
-      "DELETE FROM run_events WHERE id < (SELECT MAX(id) - 10000 FROM run_events)",
-    ).run();
+  if (Date.now() - lastRunEventCleanupAt >= 30_000) {
+    lastRunEventCleanupAt = Date.now();
+    db.prepare(
+      `DELETE FROM run_events
+       WHERE id <= (SELECT MAX(id) - ? FROM run_events)`,
+    ).run(RUN_EVENT_RETENTION);
   }
   return { id: Number(result.lastInsertRowid), jobId, chatId, event, data, createdAt };
 }

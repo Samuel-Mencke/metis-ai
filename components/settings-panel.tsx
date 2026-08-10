@@ -12,6 +12,7 @@ import {
   Link2,
   Lock,
   MessagesSquare,
+  Mic,
   PlugZap,
   Plus,
   RefreshCw,
@@ -49,6 +50,7 @@ import {
 } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import type { MemoryItem } from "@/components/memories-panel";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 
 type ProviderDefinition = {
   key: string;
@@ -259,7 +261,19 @@ type Props = {
   onSoundCuesEnabledChange: (enabled: boolean) => void;
   voiceInputEnabled: boolean;
   voiceMaxDurationSeconds: number;
-  onVoiceInputSettingsChange: (settings: { enabled?: boolean; maxDurationSeconds?: number }) => void;
+  voiceProvider: "openai" | "local" | "custom" | "browser";
+  voiceModelId: string;
+  voiceRealtime: boolean;
+  voiceEndpoint: string;
+  onVoiceApiKeySave: (apiKey: string) => Promise<void>;
+  onVoiceInputSettingsChange: (settings: {
+    enabled?: boolean;
+    maxDurationSeconds?: number;
+    provider?: "openai" | "local" | "custom" | "browser";
+    modelId?: string;
+    realtime?: boolean;
+    endpoint?: string;
+  }) => void;
   browserRealtime: boolean;
   browserFps: number;
   browserViewportWidth: number;
@@ -303,6 +317,11 @@ export function SettingsPanel({
   onSoundCuesEnabledChange,
   voiceInputEnabled,
   voiceMaxDurationSeconds,
+  voiceProvider,
+  voiceModelId,
+  voiceRealtime,
+  voiceEndpoint,
+  onVoiceApiKeySave,
   onVoiceInputSettingsChange,
   browserRealtime,
   browserFps,
@@ -341,6 +360,11 @@ export function SettingsPanel({
   const [mcpLoaded, setMcpLoaded] = useState(false);
   const [mcpDraft, setMcpDraft] = useState<McpDraft>(emptyMcpDraft);
   const [mcpBusy, setMcpBusy] = useState(false);
+  const [voiceApiKey, setVoiceApiKey] = useState("");
+  const [voiceKeyBusy, setVoiceKeyBusy] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<
+    { type: "mcp"; item: McpServer } | { type: "provider"; item: ProviderConnection } | null
+  >(null);
   const [providerDefinitions, setProviderDefinitions] = useState<ProviderDefinition[]>([]);
   const [providerConnections, setProviderConnections] = useState<ProviderConnection[]>([]);
   const [providersLoaded, setProvidersLoaded] = useState(false);
@@ -599,7 +623,6 @@ export function SettingsPanel({
   }
 
   async function deleteMcpServer(server: McpServer) {
-    if (!window.confirm(`Delete MCP server “${server.name}”?`)) return;
     const res = await fetch(`/api/mcp-servers/${encodeURIComponent(server.id)}`, { method: "DELETE" });
     if (!res.ok) {
       toast.error("Failed to delete MCP server");
@@ -823,7 +846,6 @@ export function SettingsPanel({
   }
 
   async function deleteProviderConnection(connection: ProviderConnection) {
-    if (!window.confirm(`Delete provider connection “${connection.label}”?`)) return;
     const res = await fetch(`/api/providers/${encodeURIComponent(connection.id)}`, { method: "DELETE" });
     if (!res.ok) {
       toast.error("Failed to delete provider connection");
@@ -890,7 +912,8 @@ export function SettingsPanel({
   });
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[min(58rem,calc(100dvh-1rem))] min-w-[min(42rem,calc(100vw-1rem))] w-[calc(100%-1rem)] max-w-6xl flex-col gap-0 overflow-hidden rounded-2xl p-0">
         <DialogHeader className="shrink-0 border-b border-border px-6 py-5 pr-14 sm:px-8">
           <DialogTitle className="flex items-center gap-2 text-base">
@@ -911,6 +934,7 @@ export function SettingsPanel({
               className="h-10 w-full"
               options={[
                 { value: "general", label: "General" },
+                { value: "voice", label: "Voice input" },
                 { value: "archived", label: "Chats" },
                 { value: "providers", label: "Providers" },
                 { value: "mcp", label: "MCP Servers" },
@@ -923,6 +947,10 @@ export function SettingsPanel({
             <TabsTrigger value="general" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
               <Settings2 data-icon="inline-start" />
               General
+            </TabsTrigger>
+            <TabsTrigger value="voice" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
+              <Mic data-icon="inline-start" />
+              Voice input
             </TabsTrigger>
             <TabsTrigger value="archived" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
               <MessagesSquare data-icon="inline-start" />
@@ -1034,37 +1062,6 @@ export function SettingsPanel({
                     ? `Custom sound: ${finishSound.name}`
                     : "No custom sound uploaded. The default chime will be used."}
                 </p>
-                <div className="border-t border-border/60 pt-4">
-                  <h3 className="text-sm font-medium">Voice input</h3>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Record audio into an editable draft. The transcription API key stays on the server.
-                  </p>
-                  <div className="mt-3 flex items-center justify-between gap-4">
-                    <p className="text-xs text-muted-foreground">Microphone button</p>
-                    <Button
-                      type="button"
-                      variant={voiceInputEnabled ? "default" : "outline"}
-                      aria-pressed={voiceInputEnabled}
-                      onClick={() => onVoiceInputSettingsChange({ enabled: !voiceInputEnabled })}
-                    >
-                      {voiceInputEnabled ? "On" : "Off"}
-                    </Button>
-                  </div>
-                  <label className="mt-3 grid max-w-xs gap-1 text-xs text-muted-foreground">
-                    Maximum recording length (seconds)
-                    <Input
-                      type="number"
-                      min={1}
-                      max={3600}
-                      value={voiceMaxDurationSeconds}
-                      disabled={!voiceInputEnabled}
-                      onChange={(event) => onVoiceInputSettingsChange({
-                        maxDurationSeconds: Math.max(1, Math.min(3600, Number(event.target.value) || 300)),
-                      })}
-                      aria-label="Maximum voice recording length"
-                    />
-                  </label>
-                </div>
                 <div className="border-t border-border/60 pt-4">
                   <h3 className="text-sm font-medium">Browser stream</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
@@ -1190,6 +1187,119 @@ export function SettingsPanel({
                     ) : null}
                   </div>
                 </div>
+              </section>
+            </TabsContent>
+
+            <TabsContent value="voice" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+              <section className="flex flex-col gap-4">
+                <div>
+                  <h3 className="text-sm font-medium">Voice input</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Choose how speech is transcribed before it is inserted into the composer.
+                  </p>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="grid gap-1 text-xs text-muted-foreground">
+                    Provider
+                    <select
+                      value={voiceProvider}
+                      onChange={(event) => onVoiceInputSettingsChange({
+                        provider: event.target.value as "openai" | "local" | "custom" | "browser",
+                        ...(event.target.value === "browser" ? { realtime: true } : {}),
+                      })}
+                      className="h-9 rounded-md border border-input bg-background px-2 text-sm text-foreground"
+                    >
+                      <option value="openai">OpenAI</option>
+                      <option value="local">Local</option>
+                      <option value="browser">Browser transcription</option>
+                      <option value="custom">Custom endpoint</option>
+                    </select>
+                  </label>
+                  <label className="grid gap-1 text-xs text-muted-foreground">
+                    Model ID
+                    <Input
+                      value={voiceModelId}
+                      onChange={(event) => onVoiceInputSettingsChange({ modelId: event.target.value })}
+                      placeholder={voiceProvider === "openai" ? "whisper-1" : "model id"}
+                    />
+                  </label>
+                </div>
+                {voiceProvider === "openai" ? (
+                  <div className="grid gap-2 rounded-lg border border-border/60 bg-muted/20 p-3 text-xs">
+                    <p className="font-medium text-foreground">OpenAI presets</p>
+                    <div className="flex flex-wrap gap-2">
+                      <Button type="button" size="xs" variant={!voiceRealtime ? "secondary" : "outline"} onClick={() => onVoiceInputSettingsChange({ modelId: "whisper-1", realtime: false })}>
+                        whisper-1
+                      </Button>
+                      <Button type="button" size="xs" variant={voiceRealtime ? "secondary" : "outline"} onClick={() => onVoiceInputSettingsChange({ modelId: "gpt-realtime-whisper", realtime: true })}>
+                        GPT Realtime Whisper
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+                {voiceProvider === "custom" || voiceProvider === "local" ? (
+                  <label className="grid gap-1 text-xs text-muted-foreground">
+                    Transcription endpoint
+                    <Input value={voiceEndpoint} onChange={(event) => onVoiceInputSettingsChange({ endpoint: event.target.value })} placeholder="http://127.0.0.1:9000/v1" />
+                  </label>
+                ) : null}
+                {voiceProvider === "openai" || voiceProvider === "custom" ? (
+                  <div className="grid gap-2 rounded-lg border border-border/60 p-3">
+                    <label className="grid gap-1 text-xs text-muted-foreground">
+                      API key
+                      <Input
+                        type="password"
+                        value={voiceApiKey}
+                        onChange={(event) => setVoiceApiKey(event.target.value)}
+                        placeholder="Stored encrypted on the server"
+                        autoComplete="new-password"
+                      />
+                    </label>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-muted-foreground">The key is never returned to the browser.</span>
+                      <Button
+                        type="button"
+                        size="xs"
+                        disabled={voiceKeyBusy || !voiceApiKey.trim()}
+                        onClick={() => {
+                          setVoiceKeyBusy(true);
+                          void onVoiceApiKeySave(voiceApiKey).then(() => {
+                            setVoiceApiKey("");
+                            toast.success("Voice API key saved");
+                          }).catch((error) => {
+                            toast.error(error instanceof Error ? error.message : "Could not save voice API key.");
+                          }).finally(() => setVoiceKeyBusy(false));
+                        }}
+                      >
+                        {voiceKeyBusy ? "Saving…" : "Save key"}
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+                {voiceProvider === "custom" ? (
+                  <label className="flex items-center justify-between gap-3 rounded-lg border border-border/60 p-3 text-xs">
+                    <span>
+                      <span className="block font-medium text-foreground">Streaming transcription</span>
+                      <span className="text-muted-foreground">Show partial speech above the composer.</span>
+                    </span>
+                    <Button type="button" size="sm" variant={voiceRealtime ? "default" : "outline"} aria-pressed={voiceRealtime} onClick={() => onVoiceInputSettingsChange({ realtime: !voiceRealtime })}>
+                      {voiceRealtime ? "On" : "Off"}
+                    </Button>
+                  </label>
+                ) : null}
+                <div className="flex items-center justify-between gap-4 border-t border-border/60 pt-4">
+                  <div>
+                    <p className="text-xs font-medium">Microphone button</p>
+                    <p className="text-xs text-muted-foreground">Enable voice input in the composer.</p>
+                  </div>
+                  <Button type="button" size="sm" variant={voiceInputEnabled ? "default" : "outline"} aria-pressed={voiceInputEnabled} onClick={() => onVoiceInputSettingsChange({ enabled: !voiceInputEnabled })}>
+                    {voiceInputEnabled ? "On" : "Off"}
+                  </Button>
+                </div>
+                <label className="grid max-w-xs gap-1 text-xs text-muted-foreground">
+                  Maximum recording length (seconds)
+                  <Input type="number" min={1} max={3600} value={voiceMaxDurationSeconds} disabled={!voiceInputEnabled} onChange={(event) => onVoiceInputSettingsChange({ maxDurationSeconds: Math.max(1, Math.min(3600, Number(event.target.value) || 300)) })} />
+                </label>
               </section>
             </TabsContent>
 
@@ -1513,7 +1623,7 @@ export function SettingsPanel({
                           <Button type="button" size="icon-sm" variant="ghost" aria-label={`Test ${connection.label}`} onClick={() => void testProviderConnection(connection)}><PlugZap className="size-3.5" /></Button>
                           <Button type="button" size="icon-sm" variant="ghost" aria-label={`Refresh models for ${connection.label}`} onClick={() => void discoverProviderModels(connection)}><RefreshCw className="size-3.5" /></Button>
                           <Button type="button" size="sm" variant="ghost" onClick={() => editProviderConnection(connection)}>Edit</Button>
-                          <Button type="button" size="icon-sm" variant="ghost" aria-label={`Delete ${connection.label}`} onClick={() => void deleteProviderConnection(connection)}><Trash2 className="size-3.5" /></Button>
+                          <Button type="button" size="icon-sm" variant="ghost" aria-label={`Delete ${connection.label}`} onClick={() => setDeleteTarget({ type: "provider", item: connection })}><Trash2 className="size-3.5" /></Button>
                         </li>
                       );
                     })}
@@ -1635,7 +1745,7 @@ export function SettingsPanel({
                       <Button type="button" size="sm" variant="ghost" onClick={() => editMcpServer(server)}>
                         Edit
                       </Button>
-                      <Button type="button" size="icon-sm" variant="ghost" onClick={() => void deleteMcpServer(server)} aria-label={`Delete ${server.name}`}>
+                      <Button type="button" size="icon-sm" variant="ghost" onClick={() => setDeleteTarget({ type: "mcp", item: server })} aria-label={`Delete ${server.name}`}>
                         <Trash2 className="size-3.5" />
                       </Button>
                     </li>
@@ -1736,6 +1846,24 @@ export function SettingsPanel({
           </div>
         </Tabs>
       </DialogContent>
-    </Dialog>
+      </Dialog>
+      <ConfirmDialog
+      open={Boolean(deleteTarget)}
+      onOpenChange={(open) => !open && setDeleteTarget(null)}
+      title={deleteTarget?.type === "mcp" ? "Delete MCP server?" : "Delete provider connection?"}
+      description={
+        deleteTarget?.type === "mcp"
+          ? `Are you sure you want to delete “${deleteTarget.item.name}”? This action cannot be undone.`
+          : `Are you sure you want to delete “${deleteTarget?.item.label || "this connection"}”? This action cannot be undone.`
+      }
+      confirmLabel="Delete"
+      onConfirm={() => {
+        if (!deleteTarget) return;
+        return deleteTarget.type === "mcp"
+          ? deleteMcpServer(deleteTarget.item)
+          : deleteProviderConnection(deleteTarget.item);
+      }}
+      />
+    </>
   );
 }

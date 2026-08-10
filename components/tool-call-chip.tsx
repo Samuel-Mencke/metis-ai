@@ -14,9 +14,10 @@ import {
   LoaderCircle,
   ExternalLink,
   Palette,
+  StickyNote,
   Terminal,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { PlanWorkspaceCard } from "@/components/plan-workspace-card";
 import { CanvasWorkspaceCard } from "@/components/canvas-workspace-card";
@@ -26,7 +27,7 @@ export type ToolCallData = {
   name: string;
   status: string;
   detail?: string;
-  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "todo" | "browser" | "memory" | "other";
+  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "other";
   path?: string;
   diff?: { before?: string; after?: string; additions?: number; deletions?: number };
   input?: string;
@@ -164,6 +165,30 @@ function canvasInfo(input?: string, result?: string, detail?: string) {
   return null;
 }
 
+function noteInfo(input?: string, result?: string, detail?: string) {
+  for (const source of [result, input, detail].filter(Boolean) as string[]) {
+    try {
+      const parsed = JSON.parse(source) as Record<string, unknown>;
+      const value = parsed.value && typeof parsed.value === "object"
+        ? parsed.value as Record<string, unknown>
+        : {};
+      const note = [parsed.note, value.note].find(
+        (candidate): candidate is Record<string, unknown> =>
+          Boolean(candidate) && typeof candidate === "object" && !Array.isArray(candidate),
+      );
+      if (!note || typeof note.id !== "string") continue;
+      return {
+        id: note.id,
+        title: typeof note.title === "string" && note.title.trim() ? note.title.trim() : "Untitled note",
+        content: typeof note.content === "string" ? note.content : "",
+      };
+    } catch {
+      // Tool output may still be streaming or plain text.
+    }
+  }
+  return null;
+}
+
 function mcpDisplayInfo(name: string, input?: string, detail?: string) {
   const source = input || detail;
   let values: Record<string, unknown> = {};
@@ -207,7 +232,7 @@ function mcpDisplayInfo(name: string, input?: string, detail?: string) {
   };
 }
 
-export function ToolCallChip({
+export const ToolCallChip = memo(function ToolCallChip({
   name,
   status,
   detail,
@@ -241,6 +266,7 @@ export function ToolCallChip({
     subagent: { label: "Subagent", icon: Bot, color: "text-purple-400", border: "border-purple-400/30", bg: "bg-purple-400/10" },
     mcp: { label: "MCP", icon: Cable, color: "text-cyan-400", border: "border-cyan-400/30", bg: "bg-cyan-400/10" },
     canvas: { label: "Canvas", icon: Palette, color: "text-pink-400", border: "border-pink-400/30", bg: "bg-pink-400/10" },
+    note: { label: "Note", icon: StickyNote, color: "text-yellow-300", border: "border-yellow-300/30", bg: "bg-yellow-300/10" },
     todo: { label: "Tasks", icon: ListTodo, color: "text-blue-400", border: "border-blue-400/30", bg: "bg-blue-400/10" },
     browser: { label: "Browser", icon: Globe2, color: "text-cyan-400", border: "border-cyan-400/30", bg: "bg-cyan-400/10" },
     memory: { label: "Memory", icon: Brain, color: "text-violet-400", border: "border-violet-400/30", bg: "bg-violet-400/10" },
@@ -297,20 +323,16 @@ export function ToolCallChip({
       </div>
     );
   }
-  const outputText = formatToolOutput(result || detail || input);
+  const rawOutput = result || detail || input || "";
   const plan = kind === "plan" ? planInfo(input, result, detail) : null;
   const mcpInfo = kind === "mcp" ? mcpDisplayInfo(name, input, detail) : undefined;
   const displayName = kind === "plan"
     ? plan?.title || ""
     : mcpInfo?.label || path || name.replaceAll("_", " ");
-  const previewText = mcpInfo?.detail || path || (subagent?.prompt || outputText)?.replace(/\s+/g, " ").trim();
+  const previewText = mcpInfo?.detail || path || (subagent?.prompt || rawOutput)?.replace(/\s+/g, " ").trim();
   const compactDetail = previewText && previewText.length > 120
     ? `${previewText.slice(0, 117)}…`
     : previewText;
-  const formattedOutput =
-    kind === "edit" && diff
-      ? `Before:\n${diff.before || "(empty)"}\n\nAfter:\n${diff.after || "(empty)"}`
-      : outputText || "No output available yet.";
   if (kind === "plan" && !running && plan) {
     return (
       <PlanWorkspaceCard
@@ -334,6 +356,59 @@ export function ToolCallChip({
         workspaceLink={canvas.workspaceLink}
         onOpen={onOpenWorkspace}
       />
+    );
+  }
+  const note = kind === "note" && !running ? noteInfo(input, result, detail) : null;
+  if (note) {
+    return (
+      <section className="my-2.5 w-full rounded-lg border border-border/50 border-l-yellow-300/70 bg-muted/20 p-2.5">
+        <div className="flex items-start gap-2">
+          <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-yellow-300/10 text-yellow-300">
+            <StickyNote className="size-3.5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-[10px] font-medium uppercase tracking-wide text-yellow-300/80">Note ready</p>
+            <a
+              href={`#note-${note.id}`}
+              className="block truncate text-[13px] font-medium text-foreground underline decoration-border underline-offset-2 hover:text-primary"
+              onClick={(event) => {
+                event.preventDefault();
+                window.dispatchEvent(new CustomEvent("ai-chat:open-note", { detail: { id: note.id } }));
+              }}
+            >
+              {note.title}
+            </a>
+            <p className="mt-0.5 max-h-20 overflow-hidden whitespace-pre-wrap text-xs text-muted-foreground">
+              {note.content || "No note details available yet."}
+            </p>
+            <p className="mt-1 truncate text-[10px] text-muted-foreground/70">note://{note.id}</p>
+          </div>
+          <a
+            href={`#note-${note.id}`}
+            className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+            aria-label="Open note"
+            title="Open note"
+            onClick={(event) => {
+              event.preventDefault();
+              window.dispatchEvent(new CustomEvent("ai-chat:open-note", { detail: { id: note.id } }));
+            }}
+          >
+            <ExternalLink className="size-3.5" />
+          </a>
+        </div>
+        <div className="mt-2 flex justify-end">
+          <a
+            href={`#note-${note.id}`}
+            className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+            onClick={(event) => {
+              event.preventDefault();
+              window.dispatchEvent(new CustomEvent("ai-chat:open-note", { detail: { id: note.id } }));
+            }}
+          >
+            Open note
+          </a>
+        </div>
+      </section>
     );
   }
   return (
@@ -409,12 +484,14 @@ export function ToolCallChip({
         </div>
       {expanded ? (
         <div className="my-1 min-w-0 max-w-full max-h-56 overflow-x-hidden overflow-y-auto break-all rounded-md border border-border/40 bg-muted/20 px-2.5 py-2 font-mono text-[11px] leading-4 whitespace-pre-wrap text-foreground/80">
-          {formattedOutput}
+          {kind === "edit" && diff
+            ? `Before:\n${diff.before || "(empty)"}\n\nAfter:\n${diff.after || "(empty)"}`
+            : formatToolOutput(rawOutput) || "No output available yet."}
         </div>
       ) : null}
     </div>
   );
-}
+});
 
 export function PlanToolCallCard({
   tool,
@@ -449,7 +526,7 @@ export function PlanToolCallCard({
   );
 }
 
-export function ToolCallGroup({
+export const ToolCallGroup = memo(function ToolCallGroup({
   tools,
   onOpenDiff,
   onOpenSubagent,
@@ -475,7 +552,10 @@ export function ToolCallGroup({
     setExpanded(autoExpand);
   }, [autoExpand]);
   const planTools = includePlans ? tools.filter((tool) => tool.kind === "plan") : [];
-  const regularTools = tools.filter((tool) => includePlans || tool.kind !== "plan");
+  const noteTools = tools.filter((tool) => tool.kind === "note");
+  const regularTools = tools.filter(
+    (tool) => tool.kind !== "note" && (includePlans || tool.kind !== "plan"),
+  );
   const first = regularTools[0];
   const firstMcpInfo = first?.kind === "mcp"
     ? mcpDisplayInfo(first.name, first.input, first.detail)
@@ -500,12 +580,18 @@ export function ToolCallGroup({
         {planTools.map((tool) => (
           <div key={tool.id}>{renderTool(tool)}</div>
         ))}
+        {noteTools.map((tool) => (
+          <div key={tool.id}>{renderTool(tool)}</div>
+        ))}
       </>
     );
   }
   return (
     <>
       {planTools.map((tool) => (
+        <div key={tool.id}>{renderTool(tool)}</div>
+      ))}
+      {noteTools.map((tool) => (
         <div key={tool.id}>{renderTool(tool)}</div>
       ))}
       {regularTools.length === 1 ? renderTool(regularTools[0]) : (
@@ -535,4 +621,4 @@ export function ToolCallGroup({
       )}
     </>
   );
-}
+});

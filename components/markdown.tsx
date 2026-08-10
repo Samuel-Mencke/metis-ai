@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  memo,
   useEffect,
   useRef,
   useState,
@@ -29,6 +30,7 @@ function MarkdownLink({
   const isWebUrl = Boolean(href && /^https?:\/\//i.test(href));
   const isSubagentUrl = Boolean(href && /^subagent:\/\//i.test(href));
   const workspaceMatch = href?.match(/^workspace:\/\/(plan|canvas)\/([^/?#]+)(?:[?#].*)?$/i);
+  const noteMatch = href?.match(/^note:\/\/([^/?#]+)(?:[?#].*)?$/i);
   const childText = typeof children === "string"
     ? children
     : Array.isArray(children)
@@ -38,7 +40,7 @@ function MarkdownLink({
   const link = (
     <a
       {...props}
-      href={workspaceMatch ? `#workspace-${workspaceMatch[2]}` : href}
+      href={workspaceMatch ? `#workspace-${workspaceMatch[2]}` : noteMatch ? `#note-${noteMatch[1]}` : href}
       className={cn(
         props.className,
         sourceTitle && "inline-flex items-center gap-1 rounded-full border border-border/60 bg-secondary/60 px-1.5 py-0.5 text-[11px] font-medium no-underline hover:bg-secondary",
@@ -53,6 +55,16 @@ function MarkdownLink({
                 type: workspaceMatch[1].toLowerCase(),
                 id: decodeURIComponent(workspaceMatch[2]),
               },
+            }),
+          );
+          return;
+        }
+        if (noteMatch) {
+          event.preventDefault();
+          event.stopPropagation();
+          window.dispatchEvent(
+            new CustomEvent("ai-chat:open-note", {
+              detail: { id: decodeURIComponent(noteMatch[1]) },
             }),
           );
           return;
@@ -85,7 +97,7 @@ function MarkdownLink({
 const markdownComponents = { a: MarkdownLink };
 
 function transformMarkdownUrl(url: string) {
-  if (/^(workspace|subagent):\/\//i.test(url)) return url;
+  if (/^(workspace|note|subagent):\/\//i.test(url)) return url;
   return defaultUrlTransform(url);
 }
 
@@ -145,7 +157,7 @@ const markdownComponentsWithCode = {
   code: CodeBlock,
 };
 
-export function Markdown({
+export const Markdown = memo(function Markdown({
   content,
   streaming = false,
 }: {
@@ -191,9 +203,9 @@ export function Markdown({
       </ReactMarkdown>
     </div>
   );
-}
+});
 
-export function StreamingMarkdown({ content }: { content: string }) {
+export const StreamingMarkdown = memo(function StreamingMarkdown({ content }: { content: string }) {
   const targetRef = useRef(content);
   const displayedRef = useRef("");
   const visibleTokenRef = useRef("");
@@ -241,4 +253,4 @@ export function StreamingMarkdown({ content }: { content: string }) {
       ) : null}
     </div>
   );
-}
+});

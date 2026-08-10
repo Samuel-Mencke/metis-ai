@@ -3,6 +3,7 @@ import { requestJobCancel } from "@/lib/db-jobs";
 import { getAgentCwd } from "@/lib/mcp";
 import { revertMessages } from "@/lib/revert";
 import { getChat, saveChat } from "@/lib/db-store";
+import { revertChatNotes } from "@/lib/shared-context";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,6 +36,7 @@ export async function POST(req: Request, { params }: Params) {
 
   const rollbackStart = body.keepMessage === true ? index + 1 : index;
   const result = revertMessages(chat.messages, rollbackStart, getAgentCwd(ownerId));
+  const revertedNotes = revertChatNotes(id, ownerId, chat.messages[index].createdAt);
   chat.messages = chat.messages.slice(0, body.keepMessage === true ? index + 1 : index);
   delete chat.agentId;
   if (result.canvasUpdated) {
@@ -50,6 +52,7 @@ export async function POST(req: Request, { params }: Params) {
   return Response.json({
     chat: saved,
     revertedFiles: result.revertedFiles,
+    revertedNotes,
     conflicts: result.revertedFiles.filter((file) => file.status === "conflict"),
     nonReversible: {
       count: result.nonReversibleNames.length,

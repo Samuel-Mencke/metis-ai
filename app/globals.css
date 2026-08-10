@@ -329,9 +329,79 @@
   @apply text-muted-foreground;
 }
 
+.sticky-note,
+.sticky-note .markdown-body,
+.sticky-note .markdown-body * {
+  color: #000;
+}
+
+.sticky-note .editable-markdown::before {
+  color: rgb(0 0 0 / 45%);
+}
+
+.sticky-note .editable-markdown {
+  scrollbar-color: color-mix(in srgb, #000 28%, var(--note-color)) transparent;
+}
+
+.sticky-note .editable-markdown::-webkit-scrollbar {
+  width: 8px;
+}
+
+.sticky-note .editable-markdown::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sticky-note .editable-markdown::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, #000 28%, var(--note-color));
+  background-clip: padding-box;
+}
+
+.sticky-note .editable-markdown::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, #000 42%, var(--note-color));
+  background-clip: padding-box;
+}
+
 .rich-composer-input:empty::before {
   content: attr(data-placeholder);
   @apply text-muted-foreground;
+}
+
+.rich-composer-input {
+  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 38%, transparent) transparent;
+  scrollbar-width: thin;
+}
+
+.rich-composer-input::-webkit-scrollbar {
+  width: 7px;
+}
+
+.rich-composer-input::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.rich-composer-input::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--muted-foreground) 38%, transparent);
+  background-clip: padding-box;
+}
+
+.rich-composer-input::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklch, var(--muted-foreground) 58%, transparent);
+  background-clip: padding-box;
+}
+
+.composer-single-line {
+  min-height: 52px;
+}
+
+.composer-single-line .composer-input-area {
+  position: absolute;
+  right: 5.25rem;
+  bottom: 0.5rem;
+  left: 3rem;
 }
 
 @keyframes caret-blink {
@@ -409,6 +479,10 @@
 .workspace-panel-exit {
   animation: workspace-panel-out 180ms ease-in both;
   pointer-events: none;
+}
+
+.workspace-surface {
+  background-color: var(--background);
 }
 
 @keyframes workspace-panel-out {

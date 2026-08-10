@@ -27,26 +27,40 @@ function transcriptionEndpoint(baseUrl?: string) {
   return `${base}/audio/transcriptions`;
 }
 
-async function openAiTranscription(file: File, language?: string, ownerId?: string) {
+async function openAiTranscription(
+  file: File,
+  language?: string,
+  ownerId?: string,
+  modelId = "whisper-1",
+  endpoint?: string,
+  connectionId?: string,
+) {
   let apiKey = process.env.OPENAI_API_KEY?.trim();
   let baseUrl: string | undefined;
   if (ownerId) {
-    const connection = findActiveConnection(ownerId, "openai");
+    const connection = connectionId
+      ? getProviderConnectionSecret(connectionId, ownerId)
+      : findActiveConnection(ownerId, "openai")
+        ? getProviderConnectionSecret(findActiveConnection(ownerId, "openai")!.id, ownerId)
+        : null;
     if (connection) {
-      const credential = getProviderConnectionSecret(connection.id, ownerId);
-      apiKey = credential?.secret || apiKey;
-      baseUrl = credential?.baseUrl;
+      apiKey = connection.secret || apiKey;
+      baseUrl = connection.baseUrl;
     }
   }
-  if (!apiKey) throw new Error("No OpenAI transcription connection is configured.");
+  const unauthenticatedEndpoint = endpoint && /^https?:\/\//i.test(endpoint)
+    && !/^(https?:\/\/)?(169\.254\.169\.254|metadata\.google\.internal|metadata\.google)(\/|$)/i.test(endpoint);
+  if (!apiKey && !unauthenticatedEndpoint) throw new Error("No transcription connection is configured.");
   const form = new FormData();
   form.append("file", file, file.name || `recording-${randomUUID()}.webm`);
-  form.append("model", process.env.OPENAI_TRANSCRIPTION_MODEL?.trim() || "whisper-1");
+  form.append("model", modelId.trim() || process.env.OPENAI_TRANSCRIPTION_MODEL?.trim() || "whisper-1");
   form.append("response_format", "json");
   if (language?.trim()) form.append("language", language.trim().slice(0, 20));
-  const response = await fetch(transcriptionEndpoint(baseUrl), {
+  const response = await fetch(transcriptionEndpoint(endpoint || baseUrl), {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}` },
+    headers: {
+      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+    },
     body: form,
     signal: AbortSignal.timeout(10 * 60 * 1000),
   });
@@ -61,9 +75,12 @@ async function transcribeWithProviderLimits(
   source: File,
   language: string | undefined,
   ownerId: string | undefined,
+  modelId: string,
+  endpoint?: string,
+  connectionId?: string,
 ) {
   if (source.size <= MAX_PROVIDER_AUDIO_BYTES) {
-    return openAiTranscription(source, language, ownerId);
+    return openAiTranscription(source, language, ownerId, modelId, endpoint, connectionId);
   }
   const segmentDir = await mkdtemp(path.join(process.env.TMPDIR || "/tmp", "metis-voice-segments-"));
   try {
@@ -89,7 +106,7 @@ async function transcribeWithProviderLimits(
     for (const name of segmentNames) {
       const segment = await readFile(path.join(segmentDir, name));
       const segmentFile = new File([segment], name, { type: "audio/webm" });
-      parts.push(await openAiTranscription(segmentFile, language, ownerId));
+      parts.push(await openAiTranscription(segmentFile, language, ownerId, modelId, endpoint, connectionId));
     }
     return parts.filter(Boolean).join("\n\n").trim();
   } catch (error) {
@@ -134,6 +151,11 @@ export async function POST(req: Request) {
     return Response.json({ error: `Audio duration must be between 1 and ${maxDuration} seconds.` }, { status: 400 });
   }
   const language = typeof form?.get("language") === "string" ? String(form?.get("language")) : undefined;
+  const provider = typeof form?.get("provider") === "string" ? String(form?.get("provider")) : "openai";
+  const modelId = typeof form?.get("modelId") === "string" ? String(form?.get("modelId")) : "whisper-1";
+  const endpoint = typeof form?.get("endpoint") === "string" ? String(form?.get("endpoint")) : undefined;
+  const connectionId = typeof form?.get("connectionId") === "string" ? String(form?.get("connectionId")) : undefined;
+  if (provider === "browser") return Response.json({ error: "Browser transcription runs in the browser." }, { status: 400 });
   const idempotencyKey = req.headers.get("idempotency-key") || undefined;
   let job;
   try {
@@ -153,7 +175,7 @@ export async function POST(req: Request) {
   try {
     updateVoiceJob(job.id, { status: "transcribing" }, ownerId);
     await writeFile(tempPath, Buffer.from(await file.arrayBuffer()), { mode: 0o600 });
-    const transcript = await transcribeWithProviderLimits(tempPath, file, language, ownerId);
+    const transcript = await transcribeWithProviderLimits(tempPath, file, language, ownerId, modelId, endpoint, connectionId);
     const completed = updateVoiceJob(job.id, { status: "completed", transcript }, ownerId);
     return Response.json({ job: completed, transcript });
   } catch (error) {

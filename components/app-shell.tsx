@@ -202,7 +202,7 @@ type ToolPart = {
   name: string;
   status: string;
   detail?: string;
-  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "todo" | "browser" | "memory" | "other";
+  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "other";
   path?: string;
   diff?: { before?: string; after?: string; additions?: number; deletions?: number };
   todos?: Array<{ id?: string; content: string; status?: string }>;
@@ -591,7 +591,7 @@ type WorkspaceItem = {
   updatedAt: string;
 };
 
-type ReferenceKind = "file" | "canvas" | "plan" | "browser" | "memory" | "chat" | "terminal";
+type ReferenceKind = "file" | "canvas" | "plan" | "note" | "browser" | "memory" | "chat" | "terminal";
 
 type ReferenceItem = {
   kind: ReferenceKind;
@@ -627,7 +627,7 @@ type ConfiguredModelProvider = {
 };
 
 const CHAT_MESSAGE_LOAD_LIMIT = 20;
-const CHAT_MESSAGE_PRELOAD_MAX = 60;
+const CHAT_MESSAGE_PRELOAD_MAX = CHAT_MESSAGE_LOAD_LIMIT;
 const MODEL_STORAGE_KEY = `${clientConfig.storagePrefix}_model`;
 const PARAMS_STORAGE_KEY = `${clientConfig.storagePrefix}_model_params`;
 const SIDEBAR_WIDTH_STORAGE_KEY = `${clientConfig.storagePrefix}_sidebar_width`;
@@ -635,7 +635,7 @@ const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 420;
 const WORKSPACE_WIDTH_STORAGE_KEY = `${clientConfig.storagePrefix}_workspace_width_compact`;
 const WORKSPACE_MIN_WIDTH = 280;
-const WORKSPACE_MAX_WIDTH = 480;
+const WORKSPACE_MAX_WIDTH = 720;
 const NOTIFICATIONS_STORAGE_KEY = `${clientConfig.storagePrefix}_notifications_enabled`;
 const SOUND_CUES_STORAGE_KEY = `${clientConfig.storagePrefix}_sound_cues_enabled`;
 const FINISH_SOUND_STORAGE_KEY = `${clientConfig.storagePrefix}_finish_sound`;
@@ -1069,6 +1069,7 @@ function SidebarResizeHandle({
     const onPointerMove = (event: PointerEvent) => {
       const start = startRef.current;
       if (!start) return;
+      event.preventDefault();
       onWidthChange(
         Math.min(
           SIDEBAR_MAX_WIDTH,
@@ -1209,6 +1210,7 @@ function WorkspaceResizeHandle({
       onPointerDown={(event) => {
         if (event.pointerType === "mouse" && event.button !== 0) return;
         event.preventDefault();
+        event.currentTarget.setPointerCapture?.(event.pointerId);
         startRef.current = { pointerX: event.clientX, width: widthRef.current };
         setDragging(true);
         document.body.style.cursor = "col-resize";
@@ -1230,7 +1232,7 @@ function WorkspaceResizeHandle({
         }
       }}
       className={cn(
-        "absolute inset-y-0 left-0 z-10 hidden w-3 -translate-x-1/2 cursor-col-resize items-center justify-center sm:flex",
+        "absolute inset-y-0 left-0 z-10 hidden w-3 -translate-x-1/2 cursor-col-resize touch-none select-none items-center justify-center sm:flex",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         dragging && "bg-primary/10",
       )}
@@ -1304,6 +1306,11 @@ function mergeMessages(current: Msg[], incoming: Msg[]): Msg[] {
     const createdAtOrder = (a.createdAt || "").localeCompare(b.createdAt || "");
     return createdAtOrder || (order.get(a.id) || 0) - (order.get(b.id) || 0);
   });
+}
+
+function prependMessages(current: Msg[], incoming: Msg[]): Msg[] {
+  const existing = new Set(current.map((message) => message.id));
+  return [...incoming.filter((message) => !existing.has(message.id)), ...current];
 }
 
 function ChatLoadingSkeleton() {
@@ -1560,6 +1567,7 @@ export default function AppShell() {
   const [workspaceMounted, setWorkspaceMounted] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState<"canvas" | "plan" | "terminal" | "files" | "browser" | "monitor">("canvas");
   const [notesOpen, setNotesOpen] = useState(false);
+  const [focusedNoteId, setFocusedNoteId] = useState<string | null>(null);
   const [browserFullscreen, setBrowserFullscreen] = useState(false);
   const [remoteTerminalCwd, setRemoteTerminalCwd] = useState(clientConfig.defaultCwd);
   const [remoteFileCwd, setRemoteFileCwd] = useState(clientConfig.defaultCwd);
@@ -1581,6 +1589,15 @@ export default function AppShell() {
   const [browserDefaultViewport, setBrowserDefaultViewport] = useState({ width: 1280, height: 800 });
   const [voiceInputEnabled, setVoiceInputEnabled] = useState(true);
   const [voiceMaxDurationSeconds, setVoiceMaxDurationSeconds] = useState(300);
+  const [voiceProvider, setVoiceProvider] = useState<"openai" | "local" | "custom" | "browser">("openai");
+  const [voiceModelId, setVoiceModelId] = useState("whisper-1");
+  const [voiceRealtime, setVoiceRealtime] = useState(false);
+  const [voiceEndpoint, setVoiceEndpoint] = useState("");
+  const [voiceConnectionId, setVoiceConnectionId] = useState("");
+  const [voiceRecording, setVoiceRecording] = useState(false);
+  const [voiceState, setVoiceState] = useState("idle");
+  const [voiceStopSignal, setVoiceStopSignal] = useState(0);
+  const [voiceWaveformLevel, setVoiceWaveformLevel] = useState(0);
   const [monitorData, setMonitorData] = useState<MonitorPayload>({ current: null, history: [] });
   const browserSocketRef = useRef<WebSocket | null>(null);
   const browserStreamObjectUrlRef = useRef<string | null>(null);
@@ -1608,6 +1625,7 @@ export default function AppShell() {
   const [editValue, setEditValue] = useState("");
 
   const [input, setInput] = useState("");
+  const [composerMultiline, setComposerMultiline] = useState(false);
   const [references, setReferences] = useState<ReferenceItem[]>([]);
   const [referenceMenu, setReferenceMenu] = useState<{
     query: string;
@@ -1631,6 +1649,7 @@ export default function AppShell() {
   const queuedSendRef = useRef<Set<string>>(new Set());
   const [attentionChatIds, setAttentionChatIds] = useState<string[]>([]);
   const attentionNotifiedRef = useRef<Set<string>>(new Set());
+  const recoveryErrorNotifiedRef = useRef<Set<string>>(new Set());
   const [showScrollDown, setShowScrollDown] = useState(false);
   const [liveStatus, setLiveStatus] = useState("");
   const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null);
@@ -1674,6 +1693,11 @@ export default function AppShell() {
   const [desktopSidebarMounted, setDesktopSidebarMounted] = useState(true);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findMatchCount, setFindMatchCount] = useState(0);
+  const [findMatchIndex, setFindMatchIndex] = useState(0);
+  const findInputRef = useRef<HTMLInputElement>(null);
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [notificationsReady, setNotificationsReady] = useState(false);
   const [soundCuesEnabled, setSoundCuesEnabled] = useState(false);
@@ -1721,6 +1745,7 @@ export default function AppShell() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const activeChatIdRef = useRef<string | null>(null);
   const chatCacheRef = useRef<Map<string, ChatSnapshot>>(new Map());
+  const loadedChatIdsRef = useRef<Set<string>>(new Set());
   const serverSnapshotVersionRef = useRef<Map<string, string>>(new Map());
   const pendingFilesRef = useRef<PendingFile[]>([]);
   const notifiedQuestionRef = useRef<string | null>(null);
@@ -1731,6 +1756,7 @@ export default function AppShell() {
   const swipeRef = useRef<{ x: number; y: number; ignored: boolean } | null>(null);
   const chatLoadRequestRef = useRef(0);
   const chatLoadAbortRef = useRef<AbortController | null>(null);
+  const recoveryFingerprintRef = useRef<Map<string, string>>(new Map());
   const seenChatUpdatedAtRef = useRef<Map<string, string>>(new Map());
   const chatListInitializedRef = useRef(false);
   const stateRef = useRef({
@@ -2055,61 +2081,92 @@ export default function AppShell() {
 
   useEffect(() => {
     if (!activeChatId) return;
-    const timer = window.setTimeout(() => {
-      const activeChat = chats.find((chat) => chat.id === activeChatId);
-      void fetch("/api/recovery", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chatId: activeChatId,
-          checkpoint: "periodic",
-          runStatus: activeChat?.runStatus || "idle",
-          sessionState: {
-            input,
-            workspaceTab,
-            activeWorkspaceId,
-            workspaceOpen,
-            workspaceWidth,
-            terminalTabs,
-            activeTerminalTabId,
-          },
-          browser: {
-            tabs: browserTabs,
-            activeTabId: activeBrowserTabId,
-            reachable: true,
-          },
-          terminals: terminalTabs.map((tab) => ({
-            id: tab.id,
-            sessionId: tab.sessionId,
-            cwd: tab.cwd,
-            reachable: Boolean(tab.sessionId),
-          })),
-          notesView: {
-            x: 0,
-            y: 0,
-            zoom: 1,
-            selectedNoteId: null,
-          },
-          resumeMarker: activeChat?.runStatus === "running"
-            ? { safe: false, reason: "Run was active at the last checkpoint." }
-            : { safe: true },
-        }),
-      }).catch(() => undefined);
-    }, 1_000);
-    return () => window.clearTimeout(timer);
-  }, [
-    activeChatId,
-    activeWorkspaceId,
-    activeBrowserTabId,
-    browserTabs,
-    chats,
-    input,
-    terminalTabs,
-    activeTerminalTabId,
-    workspaceOpen,
-    workspaceTab,
-    workspaceWidth,
-  ]);
+    let disposed = false;
+    let controller: AbortController | null = null;
+
+    const saveRecoveryState = async () => {
+      if (disposed || activeChatIdRef.current !== activeChatId) return;
+      const state = stateRef.current;
+      const runActive = runtimeRef.current.has(activeChatId);
+      const runStatus = runActive
+        ? pendingQuestionIdRef.current ? "waiting_for_user" : "running"
+        : "idle";
+      const terminals = state.terminalTabs.map((tab) => ({
+        id: tab.id,
+        sessionId: tab.sessionId,
+        cwd: tab.cwd,
+        reachable: Boolean(tab.sessionId),
+      }));
+      const fingerprint = JSON.stringify({
+        input: state.input,
+        workspaceTab: state.workspaceTab,
+        activeWorkspaceId: state.activeWorkspaceId,
+        workspaceOpen: state.workspaceOpen,
+        workspaceWidth: state.workspaceWidth,
+        browserTabs: state.browserTabs,
+        activeBrowserTabId: state.activeBrowserTabId,
+        terminals,
+        activeTerminalTabId: state.activeTerminalTabId,
+        runStatus,
+      });
+      if (recoveryFingerprintRef.current.get(activeChatId) === fingerprint) return;
+
+      controller?.abort();
+      controller = new AbortController();
+      try {
+        const response = await fetch("/api/recovery", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chatId: activeChatId,
+            checkpoint: "periodic",
+            runStatus,
+            sessionState: {
+              input: state.input,
+              workspaceTab: state.workspaceTab,
+              activeWorkspaceId: state.activeWorkspaceId,
+              workspaceOpen: state.workspaceOpen,
+              workspaceWidth: state.workspaceWidth,
+              terminalTabs: state.terminalTabs,
+              activeTerminalTabId: state.activeTerminalTabId,
+            },
+            browser: {
+              tabs: state.browserTabs,
+              activeTabId: state.activeBrowserTabId,
+              reachable: true,
+            },
+            terminals,
+            notesView: {
+              x: 0,
+              y: 0,
+              zoom: 1,
+              selectedNoteId: null,
+            },
+            resumeMarker: runActive
+              ? { safe: false, reason: "Run was active at the last checkpoint." }
+              : { safe: true },
+          }),
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error("Could not save the session recovery state.");
+        recoveryFingerprintRef.current.set(activeChatId, fingerprint);
+        recoveryErrorNotifiedRef.current.delete(activeChatId);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (!recoveryErrorNotifiedRef.current.has(activeChatId)) {
+          recoveryErrorNotifiedRef.current.add(activeChatId);
+          toast.error(error instanceof Error ? error.message : "Could not save the session recovery state.");
+        }
+      }
+    };
+
+    const timer = window.setInterval(() => void saveRecoveryState(), 15_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      controller?.abort();
+    };
+  }, [activeChatId]);
 
   useEffect(() => {
     if (!activeChatId) {
@@ -2119,22 +2176,28 @@ export default function AppShell() {
     }
     let disposed = false;
     void fetch(`/api/recovery?chatId=${encodeURIComponent(activeChatId)}`, { cache: "no-store" })
-      .then((response) => (response.ok ? response.json() : null))
+      .then((response) => {
+        if (!response.ok) throw new Error("Could not load the session recovery state.");
+        return response.json();
+      })
       .then((body: { snapshot?: { availability?: "available" | "restored" | "needs_attention" | "not_available"; runStatus?: string; resumeMarker?: { jobId?: string; safe?: boolean } } | null } | null) => {
         if (disposed) return;
         const snapshot = body?.snapshot;
         if (!snapshot) {
-          setRecoveryStatus("not_available");
+          setRecoveryStatus(null);
           setRecoveryJobId(null);
           return;
         }
         const needsAttention = snapshot.availability === "needs_attention" ||
           (snapshot.runStatus === "running" && snapshot.resumeMarker?.safe === false);
-        setRecoveryStatus(needsAttention ? "needs_attention" : "restored");
+        setRecoveryStatus(needsAttention ? "needs_attention" : null);
         setRecoveryJobId(snapshot.resumeMarker?.jobId || null);
       })
-      .catch(() => {
-        if (!disposed) setRecoveryStatus("not_available");
+      .catch((error) => {
+        if (!disposed) {
+          setRecoveryStatus(null);
+          toast.error(error instanceof Error ? error.message : "Could not load the session recovery state.");
+        }
       });
     return () => {
       disposed = true;
@@ -2145,12 +2208,13 @@ export default function AppShell() {
     const id = activeChatIdRef.current;
     if (!id) return;
     const s = stateRef.current;
+    const cachedMessages = s.messages.slice(-CHAT_MESSAGE_PRELOAD_MAX).map((m) => ({
+      ...m,
+      streaming: false,
+      thinkingDone: m.thinking ? true : m.thinkingDone,
+    }));
     chatCacheRef.current.set(id, {
-      messages: s.messages.map((m) => ({
-        ...m,
-        streaming: false,
-        thinkingDone: m.thinking ? true : m.thinkingDone,
-      })),
+      messages: cachedMessages,
       chatTitle: s.chatTitle,
       agentId: s.agentId,
       modelId: s.modelId,
@@ -2182,8 +2246,8 @@ export default function AppShell() {
         workspaceOpen: s.workspaceOpen,
         workspaceWidth: s.workspaceWidth,
       },
-      messageOffset: s.messageOffset,
-      hasEarlierMessages: s.hasEarlierMessages,
+      messageOffset: 0,
+      hasEarlierMessages: s.hasEarlierMessages || s.messages.length > cachedMessages.length,
     });
     void fetch(`/api/chats/${id}`, {
       method: "PATCH",
@@ -2808,6 +2872,11 @@ export default function AppShell() {
           voiceInput?: {
             enabled?: boolean;
             maxDurationSeconds?: number;
+            provider?: "openai" | "local" | "custom" | "browser";
+            modelId?: string;
+            realtime?: boolean;
+            endpoint?: string;
+            connectionId?: string;
           };
         };
       } | null) => {
@@ -2853,6 +2922,11 @@ export default function AppShell() {
         if (typeof settings.voiceInput?.maxDurationSeconds === "number") {
           setVoiceMaxDurationSeconds(Math.max(1, Math.min(3600, Math.round(settings.voiceInput.maxDurationSeconds))));
         }
+        if (settings.voiceInput?.provider) setVoiceProvider(settings.voiceInput.provider);
+        if (typeof settings.voiceInput?.modelId === "string") setVoiceModelId(settings.voiceInput.modelId);
+        if (typeof settings.voiceInput?.realtime === "boolean") setVoiceRealtime(settings.voiceInput.realtime);
+        if (typeof settings.voiceInput?.endpoint === "string") setVoiceEndpoint(settings.voiceInput.endpoint);
+        if (typeof settings.voiceInput?.connectionId === "string") setVoiceConnectionId(settings.voiceInput.connectionId);
         const defaultWidth = typeof settings.browserViewportWidth === "number"
           ? Math.max(320, Math.min(2560, Math.round(settings.browserViewportWidth)))
           : 1280;
@@ -2973,11 +3047,24 @@ export default function AppShell() {
     });
   }
 
-  function updateVoiceInputSettings(next: { enabled?: boolean; maxDurationSeconds?: number }) {
+  function updateVoiceInputSettings(next: {
+    enabled?: boolean;
+    maxDurationSeconds?: number;
+    provider?: "openai" | "local" | "custom" | "browser";
+    modelId?: string;
+    realtime?: boolean;
+    endpoint?: string;
+    connectionId?: string;
+  }) {
     if (next.enabled !== undefined) setVoiceInputEnabled(next.enabled);
     if (next.maxDurationSeconds !== undefined) {
       setVoiceMaxDurationSeconds(Math.max(1, Math.min(3600, Math.round(next.maxDurationSeconds))));
     }
+    if (next.provider !== undefined) setVoiceProvider(next.provider);
+    if (next.modelId !== undefined) setVoiceModelId(next.modelId);
+    if (next.realtime !== undefined) setVoiceRealtime(next.realtime);
+    if (next.endpoint !== undefined) setVoiceEndpoint(next.endpoint);
+    if (next.connectionId !== undefined) setVoiceConnectionId(next.connectionId);
     void fetch("/api/preferences", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -2985,13 +3072,30 @@ export default function AppShell() {
         voiceInput: {
           enabled: next.enabled ?? voiceInputEnabled,
           maxDurationSeconds: next.maxDurationSeconds ?? voiceMaxDurationSeconds,
+          provider: next.provider ?? voiceProvider,
+          modelId: next.modelId ?? voiceModelId,
+          realtime: next.realtime ?? voiceRealtime,
+          endpoint: next.endpoint ?? voiceEndpoint,
+          ...(next.connectionId ?? voiceConnectionId ? { connectionId: next.connectionId ?? voiceConnectionId } : {}),
         },
       }),
     });
   }
 
+  async function saveVoiceApiKey(apiKey: string) {
+    const response = await fetch("/api/voice/credentials", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: voiceProvider, endpoint: voiceEndpoint, apiKey }),
+    });
+    const body = await response.json().catch(() => ({})) as { connectionId?: string; error?: string };
+    if (!response.ok || !body.connectionId) throw new Error(body.error || "Could not save voice API key.");
+    updateVoiceInputSettings({ connectionId: body.connectionId });
+  }
+
   const applySnapshot = useCallback((id: string, snap: ChatSnapshot) => {
     if (!acceptServerSnapshot(id, snap.updatedAt)) return;
+    loadedChatIdsRef.current.add(id);
     const browser = normalizeBrowserContext(snap.browserContext, id);
     const session = snap.sessionState || {};
     clearUnread(id);
@@ -3071,15 +3175,17 @@ export default function AppShell() {
   const openDraft = useCallback(
     (opts?: { skipNav?: boolean }) => {
       setNotesOpen(false);
+      const previousChatId = activeChatIdRef.current;
+      persistActiveSnapshot();
+      setBusy(Boolean(previousChatId && runtimeRef.current.has(previousChatId)));
+      setAttentionChatIds((current) => current.filter((id) => id !== previousChatId));
+      activeChatIdRef.current = null;
+      if (!opts?.skipNav) navigateChat(null);
       chatLoadAbortRef.current?.abort();
       chatLoadAbortRef.current = null;
       chatLoadRequestRef.current += 1;
       setLoadingChatId(null);
-      const previousChatId = activeChatIdRef.current;
-      persistActiveSnapshot();
-      setBusy(Boolean(activeChatIdRef.current && runtimeRef.current.has(activeChatIdRef.current)));
       setPendingQuestion(null);
-      setAttentionChatIds((current) => current.filter((id) => id !== activeChatIdRef.current));
       setQuestionAnswers([]);
       setQuestionCustom([]);
       setQuestionCustomActive([]);
@@ -3120,7 +3226,6 @@ export default function AppShell() {
       setLiveStatus("");
       setMobileNavOpen(false);
       setPaneKey((k) => k + 1);
-      if (!opts?.skipNav) navigateChat(null);
     },
     [navigateChat, persistActiveSnapshot],
   );
@@ -3128,18 +3233,28 @@ export default function AppShell() {
   const loadChat = useCallback(
     async (id: string, opts?: { skipNav?: boolean; forceReload?: boolean }) => {
       setNotesOpen(false);
+      const alreadyActive = activeChatIdRef.current === id;
+      if (!alreadyActive) persistActiveSnapshot();
+      activeChatIdRef.current = id;
+      stickToBottomRef.current = true;
+      if (!opts?.skipNav) navigateChat(id);
       chatLoadAbortRef.current?.abort();
       const controller = new AbortController();
       chatLoadAbortRef.current = controller;
       const requestId = ++chatLoadRequestRef.current;
       clearUnread(id);
-      if (activeChatIdRef.current === id && !opts?.forceReload) {
-        if (!opts?.skipNav) navigateChat(id);
+      const cached = chatCacheRef.current.get(id);
+      const hasUsableCachedMessages = Boolean(cached?.messages.length);
+      if (
+        alreadyActive &&
+        loadedChatIdsRef.current.has(id) &&
+        hasUsableCachedMessages &&
+        !opts?.forceReload
+      ) {
         setLoadingChatId(null);
         return true;
       }
 
-      persistActiveSnapshot();
       setLoadingChatId(id);
       setActiveChatId(id);
       activeChatIdRef.current = id;
@@ -3158,12 +3273,11 @@ export default function AppShell() {
       setQuestionCustom([]);
       setQuestionCustomActive([]);
 
-      const cached = chatCacheRef.current.get(id);
-      const useChatCache = false;
-      if (cached && useChatCache && !opts?.forceReload) {
+      const useChatCache = true;
+      if (cached && cached.messages.length > 0 && useChatCache && !opts?.forceReload) {
         if (chatLoadRequestRef.current !== requestId) return false;
         applySnapshot(id, cached);
-        if (!opts?.skipNav) navigateChat(id);
+        setLoadingChatId(null);
         // Soft revalidate in background without clearing UI
         void (async () => {
           try {
@@ -3302,7 +3416,6 @@ export default function AppShell() {
       chatCacheRef.current.set(data.chat.id, snap);
       applySnapshot(data.chat.id, snap);
       setLoadingChatId(null);
-      if (!opts?.skipNav) navigateChat(data.chat.id);
       return true;
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") return false;
@@ -3332,7 +3445,7 @@ export default function AppShell() {
       if (!res.ok) return;
       const data = (await res.json()) as ChatPage;
       const olderMessages = mapApiMessages(data.chat.messages);
-      setMessages((current) => mergeMessages(current, olderMessages));
+        setMessages((current) => prependMessages(current, olderMessages));
       setMessageOffset(data.messageOffset ?? nextOffset);
       setHasEarlierMessages(Boolean(data.hasEarlierMessages));
       window.requestAnimationFrame(() => {
@@ -3368,7 +3481,7 @@ export default function AppShell() {
           const data = (await res.json()) as ChatPage;
           const olderMessages = mapApiMessages(data.chat.messages);
           if (cancelled) return;
-          setMessages((current) => mergeMessages(current, olderMessages));
+          setMessages((current) => prependMessages(current, olderMessages));
           offset = data.messageOffset ?? nextOffset;
           loaded += olderMessages.length;
           setMessageOffset(offset);
@@ -3522,7 +3635,12 @@ export default function AppShell() {
   useEffect(() => {
     if (!authed) return;
     const current = activeChatIdRef.current;
-    if (routeChatId) {
+    if (routeChatId === "notes") {
+      setNotesOpen(true);
+      setWorkspaceOpen(false);
+      setMobileNavOpen(false);
+    } else if (routeChatId) {
+      setNotesOpen(false);
       if (current !== routeChatId) {
         void loadChat(routeChatId, { skipNav: true });
       }
@@ -3650,6 +3768,14 @@ export default function AppShell() {
         setWorkspaceOpen(true);
         return;
       }
+      if (reference.kind === "note") {
+        setWorkspaceOpen(false);
+        setNotesOpen(true);
+        setFocusedNoteId(null);
+        window.setTimeout(() => setFocusedNoteId(reference.id), 0);
+        navigateChat("notes");
+        return;
+      }
       if (reference.kind === "browser" && reference.path) {
         navigateBrowser(reference.path);
         setWorkspaceTab("browser");
@@ -3707,13 +3833,27 @@ export default function AppShell() {
       setWorkspaceTab(detail.type);
       setWorkspaceOpen(true);
     };
+    const openLinkedNote = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string; chatId?: string }>).detail;
+      if (!detail?.id) return;
+      void openLinkedReference(new CustomEvent("ai-chat:open-reference", {
+        detail: {
+          kind: "note",
+          id: detail.id,
+          label: "Note",
+          chatId: detail.chatId,
+        } satisfies ReferenceItem,
+      }));
+    };
     window.addEventListener("ai-chat:open-browser", openLinkedUrl);
     window.addEventListener("ai-chat:open-reference", openLinkedReference);
     window.addEventListener("ai-chat:open-workspace", openLinkedWorkspace);
+    window.addEventListener("ai-chat:open-note", openLinkedNote);
     return () => {
       window.removeEventListener("ai-chat:open-browser", openLinkedUrl);
       window.removeEventListener("ai-chat:open-reference", openLinkedReference);
       window.removeEventListener("ai-chat:open-workspace", openLinkedWorkspace);
+      window.removeEventListener("ai-chat:open-note", openLinkedNote);
     };
   }, [activeChatId, loadChat, messageOffset, navigateBrowser, terminalTabs, workspaces]);
 
@@ -3724,6 +3864,25 @@ export default function AppShell() {
       const key = event.key.toLowerCase();
       const target = event.target as HTMLElement | null;
       if (target?.closest("[data-browser-viewport]")) return;
+      if (modifier && key === "f") {
+        event.preventDefault();
+        setFindOpen(true);
+        window.setTimeout(() => findInputRef.current?.focus(), 0);
+        return;
+      }
+      if (findOpen && key === "escape") {
+        event.preventDefault();
+        setFindOpen(false);
+        return;
+      }
+      if (findOpen && key === "enter") {
+        event.preventDefault();
+        setFindMatchIndex((current) => {
+          if (!findMatchCount) return 0;
+          return (current + (event.shiftKey ? -1 : 1) + findMatchCount) % findMatchCount;
+        });
+        return;
+      }
       const isEditable =
         target?.isContentEditable ||
         target?.tagName === "INPUT" ||
@@ -3765,7 +3924,7 @@ export default function AppShell() {
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [authed, chats, loadChat, openDraft]);
+  }, [authed, chats, findMatchCount, findOpen, loadChat, openDraft]);
 
   useEffect(() => {
     if (!authed) return;
@@ -3784,12 +3943,13 @@ export default function AppShell() {
   // Keep in-memory chat cache warm so switches stay instant
   useEffect(() => {
     if (!activeChatId) return;
+    const cachedMessages = messages.slice(-CHAT_MESSAGE_PRELOAD_MAX).map((m) => ({
+      ...m,
+      streaming: false,
+      thinkingDone: m.thinking ? true : m.thinkingDone,
+    }));
     chatCacheRef.current.set(activeChatId, {
-      messages: messages.map((m) => ({
-        ...m,
-        streaming: false,
-        thinkingDone: m.thinking ? true : m.thinkingDone,
-      })),
+      messages: cachedMessages,
       chatTitle,
       agentId,
       modelId,
@@ -3826,8 +3986,8 @@ export default function AppShell() {
           ? "running"
           : "completed",
       pendingQuestion: pendingQuestion ?? undefined,
-      messageOffset,
-      hasEarlierMessages,
+      messageOffset: 0,
+      hasEarlierMessages: hasEarlierMessages || messages.length > cachedMessages.length,
     });
   }, [
     activeChatId,
@@ -3893,8 +4053,8 @@ export default function AppShell() {
   useEffect(() => {
     const el = messagesScrollRef.current;
     if (!el) return;
-    el.scrollTop = el.scrollHeight;
     stickToBottomRef.current = true;
+    el.scrollTop = el.scrollHeight;
     const frame = window.requestAnimationFrame(() => {
       el.scrollTop = el.scrollHeight;
     });
@@ -3946,6 +4106,60 @@ export default function AppShell() {
     return () => window.cancelAnimationFrame(frame);
   }, [highlightedMessageId, messages.length]);
 
+  useEffect(() => {
+    if (!findOpen || !findQuery.trim()) {
+      setFindMatchCount(0);
+      return;
+    }
+    const query = findQuery.trim();
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(escaped, "gi");
+    const marks: HTMLElement[] = [];
+    const articles = document.querySelectorAll<HTMLElement>("[data-message-id]");
+
+    articles.forEach((article) => {
+      const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+      const textNodes: Text[] = [];
+      let node: Node | null;
+      while ((node = walker.nextNode())) {
+        if (node.parentElement?.closest("button, textarea, input, [data-chat-find-ignore]")) continue;
+        if (node.textContent?.match(pattern)) textNodes.push(node as Text);
+      }
+      textNodes.forEach((textNode) => {
+        const text = textNode.textContent || "";
+        pattern.lastIndex = 0;
+        let lastIndex = 0;
+        const fragment = document.createDocumentFragment();
+        let match: RegExpExecArray | null;
+        while ((match = pattern.exec(text))) {
+          fragment.append(document.createTextNode(text.slice(lastIndex, match.index)));
+          const mark = document.createElement("mark");
+          mark.dataset.chatFindMatch = "true";
+          mark.className = "rounded-sm bg-amber-300/60 px-0.5 text-inherit dark:bg-amber-400/40";
+          mark.textContent = match[0];
+          fragment.append(mark);
+          marks.push(mark);
+          lastIndex = match.index + match[0].length;
+        }
+        fragment.append(document.createTextNode(text.slice(lastIndex)));
+        textNode.replaceWith(fragment);
+      });
+    });
+    setFindMatchCount(marks.length);
+    if (findMatchIndex >= marks.length) setFindMatchIndex(Math.max(0, marks.length - 1));
+    marks.forEach((mark, index) => {
+      if (index === findMatchIndex) {
+        mark.classList.add("bg-primary", "text-primary-foreground");
+        mark.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    });
+    return () => {
+      document.querySelectorAll<HTMLElement>("[data-chat-find-match]").forEach((mark) => {
+        mark.replaceWith(document.createTextNode(mark.textContent || ""));
+      });
+    };
+  }, [findOpen, findQuery, findMatchIndex, findMatchCount, messages]);
+
   function scrollMessagesToBottom() {
     stickToBottomRef.current = true;
     setShowScrollDown(false);
@@ -3960,6 +4174,11 @@ export default function AppShell() {
     if (!el) return;
     const minPx = 36; // match send button size-9
     el.style.height = "auto";
+    setComposerMultiline((current) =>
+      input.trim()
+        ? current || input.includes("\n") || el.scrollHeight > minPx + 2
+        : false,
+    );
     el.style.height = `${Math.min(Math.max(el.scrollHeight, minPx), 180)}px`;
   }, [input]);
 
@@ -5119,6 +5338,14 @@ export default function AppShell() {
               typeof attachmentPayload.size === "number"
                 ? attachmentPayload as MsgAttachment
                 : undefined;
+            if (
+              typeof window !== "undefined" &&
+              /(^|_)(create|update|edit|list|search)_?note(s)?$/i.test(name)
+            ) {
+              window.dispatchEvent(new CustomEvent("ai-chat:notes-updated", {
+                detail: { chatId },
+              }));
+            }
             if (activeChatIdRef.current === chatId) {
               setLiveStatus(
                 status === "running"
@@ -5130,9 +5357,15 @@ export default function AppShell() {
               m.map((x) => {
                 if (x.id !== asstId) return x;
                 const parts = [...(x.parts ?? partsFromFlat(x))];
-                const idx = parts.findIndex(
+                const exactIndex = parts.findIndex(
                   (p) => p.type === "tool" && p.id === callId,
                 );
+                const workspaceIndex = exactIndex < 0 && (kind === "plan" || kind === "canvas")
+                  ? parts.findIndex(
+                    (p) => p.type === "tool" && p.id.startsWith("workspace-") && p.kind === kind,
+                  )
+                  : -1;
+                const idx = exactIndex >= 0 ? exactIndex : workspaceIndex;
                 const prevTool: ToolMsgPart | null =
                   idx >= 0 && parts[idx].type === "tool"
                     ? (parts[idx] as ToolMsgPart)
@@ -5275,6 +5508,33 @@ export default function AppShell() {
               setWorkspaceTab(workspace.type === "plan" ? "plan" : "canvas");
               setWorkspaceOpen(true);
             }
+            setMessages((current) =>
+              current.map((message) => {
+                if (message.id !== asstId) return message;
+                const parts = [...(message.parts ?? partsFromFlat(message))];
+                const workspaceTool: ToolPart = {
+                  id: `workspace-${workspace.id}`,
+                  name: workspace.type === "plan" ? "create_plan" : "create_canvas",
+                  status: "completed",
+                  kind: workspace.type,
+                  result: JSON.stringify({
+                    title: workspace.name,
+                    content: workspace.content,
+                    id: workspace.id,
+                    workspaceLink: `workspace://${workspace.type}/${workspace.id}`,
+                  }),
+                };
+                const existingIndex = parts.findIndex(
+                  (part) => part.type === "tool" && part.id === workspaceTool.id,
+                );
+                if (existingIndex >= 0) {
+                  parts[existingIndex] = { ...parts[existingIndex], ...workspaceTool };
+                } else {
+                  parts.push({ type: "tool", ...workspaceTool });
+                }
+                return { ...message, ...withSyncedFlat(parts) };
+              }),
+            );
             if (workspace.type === "plan" && notifiedPlanRef.current !== workspace.id) {
               notifiedPlanRef.current = workspace.id;
               const preview = workspace.content.replace(/\s+/g, " ").trim();
@@ -5297,7 +5557,35 @@ export default function AppShell() {
             };
             setWorkspaces((current) => mergeWorkspaceItems(current, workspace));
             setActiveWorkspaceId(workspace.id);
+            setWorkspaceTab("canvas");
             setWorkspaceOpen(true);
+            setMessages((current) =>
+              current.map((message) => {
+                if (message.id !== asstId) return message;
+                const parts = [...(message.parts ?? partsFromFlat(message))];
+                const workspaceTool: ToolPart = {
+                  id: `workspace-${workspace.id}`,
+                  name: "create_canvas",
+                  status: "completed",
+                  kind: "canvas",
+                  result: JSON.stringify({
+                    title: workspace.name,
+                    content: workspace.content,
+                    id: workspace.id,
+                    workspaceLink: "workspace://canvas/canvas-default",
+                  }),
+                };
+                const existingIndex = parts.findIndex(
+                  (part) => part.type === "tool" && part.id === workspaceTool.id,
+                );
+                if (existingIndex >= 0) {
+                  parts[existingIndex] = { ...parts[existingIndex], ...workspaceTool };
+                } else {
+                  parts.push({ type: "tool", ...workspaceTool });
+                }
+                return { ...message, ...withSyncedFlat(parts) };
+              }),
+            );
           } else if (
             event === "agentId" &&
             typeof payload.agentId === "string"
@@ -5741,6 +6029,7 @@ export default function AppShell() {
       file: "Files",
       canvas: "Canvases",
       plan: "Plans",
+      note: "Notes",
       browser: "Browser",
       memory: "Memories",
       chat: "Chats",
@@ -5753,6 +6042,7 @@ export default function AppShell() {
       file: FileIcon,
       canvas: Palette,
       plan: ClipboardList,
+      note: StickyNote,
       browser: PanelRight,
       memory: Brain,
       chat: MessageSquare,
@@ -5922,6 +6212,7 @@ export default function AppShell() {
         onDrop={onComposerDrop}
         className={cn(
           "relative flex w-full flex-col gap-2 rounded-3xl border border-border/50 bg-card/80 p-2 shadow-[0_8px_40px_-12px_rgba(0,0,0,0.4)] backdrop-blur-xl transition-colors",
+          !composerMultiline && "composer-single-line",
           dragOver && "border-primary/60 bg-primary/5",
         )}
       >
@@ -6067,6 +6358,66 @@ export default function AppShell() {
             ))}
           </div>
         ) : null}
+        <div className="composer-input-area relative min-w-0">
+          <RichComposerInput
+            ref={textareaRef}
+            value={input}
+            mentionLabels={references.map((reference) => reference.label)}
+            onChange={handleComposerInputChange}
+            onPaste={onComposerPaste}
+            onKeyDown={(e) => {
+            if (referenceMenu && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+              e.preventDefault();
+              const count = referenceResults.length;
+              if (count > 0) {
+                setReferenceIndex((current) => (
+                  e.key === "ArrowDown"
+                    ? (current + 1) % count
+                    : (current - 1 + count) % count
+                ));
+              }
+              return;
+            }
+            if (referenceMenu && e.key === "Enter" && referenceResults[referenceIndex]) {
+              e.preventDefault();
+              selectReference(referenceResults[referenceIndex]);
+              return;
+            }
+            if (referenceMenu && e.key === "Escape") {
+              e.preventDefault();
+              setReferenceMenu(null);
+              referenceAutocompleteDismissedRef.current = true;
+              return;
+            }
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              void send(e);
+            }
+            }}
+            placeholder="Message…"
+            className={cn(voiceRecording ? "opacity-0" : "dark:bg-transparent")}
+            aria-label="Message"
+          />
+          {voiceRecording ? (
+            <div
+              className="pointer-events-none absolute inset-0 z-10 flex items-center justify-between overflow-hidden bg-transparent px-3"
+              aria-label="Audio waveform"
+            >
+              {Array.from({ length: 72 }, (_, index) => {
+                const detail = 0.35 + Math.abs(Math.sin(index * 1.73)) * 0.65;
+                return (
+                  <span
+                    key={index}
+                    className="h-1 w-px rounded-full bg-primary/65 transition-[height]"
+                    style={{
+                      height: `${Math.max(2, 2 + voiceWaveformLevel * (8 + detail * 14))}px`,
+                    }}
+                  />
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
         <div className="flex w-full items-end gap-1">
           <Button
             type="button"
@@ -6078,66 +6429,47 @@ export default function AppShell() {
           >
             <Plus className="size-4" />
           </Button>
+          <span className="flex-1" />
           <VoiceInput
             chatId={activeChatId}
             enabled={voiceInputEnabled}
             maxDurationSeconds={voiceMaxDurationSeconds}
+            provider={voiceProvider}
+            modelId={voiceModelId}
+            realtime={voiceRealtime}
+            endpoint={voiceEndpoint}
+            connectionId={voiceConnectionId}
+            onRecordingChange={setVoiceRecording}
+            onStateChange={setVoiceState}
+            onWaveformLevelChange={setVoiceWaveformLevel}
+            stopSignal={voiceStopSignal}
             onTranscript={(transcript) => {
               const next = input.trim() ? `${input.trim()} ${transcript}` : transcript;
               handleComposerInputChange(next, next.length);
               window.requestAnimationFrame(() => textareaRef.current?.focus());
             }}
           />
-          <RichComposerInput
-            ref={textareaRef}
-            value={input}
-            mentionLabels={references.map((reference) => reference.label)}
-            onChange={handleComposerInputChange}
-            onPaste={onComposerPaste}
-            onKeyDown={(e) => {
-              if (referenceMenu && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
-                e.preventDefault();
-                const count = referenceResults.length;
-                if (count > 0) {
-                  setReferenceIndex((current) => (
-                    e.key === "ArrowDown"
-                      ? (current + 1) % count
-                      : (current - 1 + count) % count
-                  ));
-                }
-                return;
-              }
-              if (referenceMenu && e.key === "Enter" && referenceResults[referenceIndex]) {
-                e.preventDefault();
-                selectReference(referenceResults[referenceIndex]);
-                return;
-              }
-              if (referenceMenu && e.key === "Escape") {
-                e.preventDefault();
-                setReferenceMenu(null);
-                referenceAutocompleteDismissedRef.current = true;
-                return;
-              }
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void send(e);
-              }
-            }}
-            placeholder="Message…"
-            className={cn(
-              "dark:bg-transparent",
-            )}
-            aria-label="Message"
-          />
           <Button
-            type={busy && !canSend ? "button" : "submit"}
+            type={voiceRecording || (busy && !canSend) || voiceState === "permission" || voiceState === "uploading" || voiceState === "transcribing" ? "button" : "submit"}
             size="icon"
-            disabled={!canSend && !busy}
-            aria-label={busy && !canSend ? "Stop agent" : busy ? "Queue message" : "Send"}
+            disabled={voiceState === "permission" || voiceState === "uploading" || voiceState === "transcribing" ? true : !canSend && !busy && !voiceRecording}
+            aria-label={voiceRecording ? "Stop recording" : voiceState === "permission" || voiceState === "uploading" || voiceState === "transcribing" ? "Transcribing voice input" : busy && !canSend ? "Stop agent" : busy ? "Queue message" : "Send"}
             className="size-9 shrink-0 self-end rounded-full"
-            onClick={busy && !canSend ? () => void stopAgent() : undefined}
+            onClick={
+              voiceRecording
+                ? () => setVoiceStopSignal((current) => current + 1)
+                : busy && !canSend
+                  ? () => void stopAgent()
+                  : undefined
+            }
           >
-            {busy && !canSend ? <Square className="size-3.5 fill-current" /> : <ArrowUp className="size-4" />}
+            {voiceState === "permission" || voiceState === "uploading" || voiceState === "transcribing" ? (
+              <LoaderCircle className="size-4 animate-spin" />
+            ) : voiceRecording || (busy && !canSend) ? (
+              <Square className="size-3.5 fill-current" />
+            ) : (
+              <ArrowUp className="size-4" />
+            )}
           </Button>
         </div>
       </form>
@@ -6366,13 +6698,14 @@ export default function AppShell() {
           className={cn(
             "flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors",
             notesOpen
-              ? "text-primary"
+              ? "text-foreground"
               : "text-muted-foreground hover:bg-white/[0.03] hover:text-foreground",
           )}
           onClick={() => {
             setNotesOpen(true);
             setWorkspaceOpen(false);
             setMobileNavOpen(false);
+            navigateChat("notes");
           }}
         >
           <StickyNote className="size-3.5 shrink-0 opacity-60" />
@@ -6407,9 +6740,11 @@ export default function AppShell() {
                 type="button"
                 className={cn(
                   "min-w-0 flex-1 overflow-hidden pl-1.5 pr-2.5 py-2 text-left text-[13px] text-ellipsis whitespace-nowrap",
-                  activeChatId === c.id
-                    ? "text-primary hover:text-primary"
-                    : "text-muted-foreground hover:text-foreground",
+                  notesOpen
+                    ? "text-muted-foreground hover:text-foreground"
+                    : activeChatId === c.id
+                      ? "text-primary hover:text-primary"
+                      : "text-muted-foreground hover:text-foreground",
                 )}
                 onClick={() => void loadChat(c.id)}
                 title={c.title || "Untitled"}
@@ -6615,6 +6950,57 @@ export default function AppShell() {
         onToggleSidebar={() => setDesktopSidebarOpen((open) => !open)}
         onExport={exportCurrentChat}
       />
+      {findOpen ? (
+        <div className="fixed right-4 top-3 z-50 flex items-center gap-1.5 rounded-xl border border-border/60 bg-popover/95 p-1.5 shadow-lg backdrop-blur">
+          <Search className="ml-1 size-4 text-muted-foreground" />
+          <Input
+            ref={findInputRef}
+            value={findQuery}
+            onChange={(event) => {
+              setFindQuery(event.target.value);
+              setFindMatchIndex(0);
+            }}
+            placeholder="Find in chat"
+            aria-label="Find in chat"
+            className="h-8 w-44 border-0 bg-transparent px-2 text-xs shadow-none focus-visible:ring-0"
+          />
+          <span className="min-w-12 px-1 text-center text-xs tabular-nums text-muted-foreground">
+            {findMatchCount ? `${findMatchIndex + 1}/${findMatchCount}` : "0/0"}
+          </span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label="Previous match"
+            title="Previous match"
+            disabled={!findMatchCount}
+            onClick={() => setFindMatchIndex((current) => (current - 1 + findMatchCount) % findMatchCount)}
+          >
+            <ArrowUp className="size-3.5" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label="Next match"
+            title="Next match"
+            disabled={!findMatchCount}
+            onClick={() => setFindMatchIndex((current) => (current + 1) % findMatchCount)}
+          >
+            <ArrowDown className="size-3.5" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label="Close find"
+            title="Close find"
+            onClick={() => setFindOpen(false)}
+          >
+            <X className="size-3.5" />
+          </Button>
+        </div>
+      ) : null}
       {desktopSidebarMounted ? (
         <aside
           className={cn(
@@ -6718,7 +7104,7 @@ export default function AppShell() {
         >
         {notesOpen ? (
           <div className="h-full min-h-0 flex-1 p-3 sm:p-5">
-            <NotesVoid />
+            <NotesVoid chatId={activeChatId} focusNoteId={focusedNoteId} />
           </div>
         ) : loadingChatId ? (
           <ChatLoadingSkeleton />
@@ -6756,23 +7142,15 @@ export default function AppShell() {
                 className="mx-auto w-full max-w-2xl space-y-6 px-4 pt-6 sm:px-6"
                 style={{ paddingBottom: Math.max(144, composerHeight + 80) }}
               >
-                {recoveryStatus ? (
+                {recoveryStatus === "needs_attention" ? (
                   <div className={cn(
                     "flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-xs",
-                    recoveryStatus === "needs_attention"
-                      ? "border-amber-400/30 bg-amber-400/10 text-amber-200"
-                      : recoveryStatus === "not_available"
-                        ? "border-border/60 bg-muted/20 text-muted-foreground"
-                        : "border-emerald-400/20 bg-emerald-400/5 text-emerald-300",
+                    "border-amber-400/30 bg-amber-400/10 text-amber-200",
                   )}>
                     <span>
-                      {recoveryStatus === "needs_attention"
-                        ? "The last run needs attention after a restart."
-                        : recoveryStatus === "not_available"
-                          ? "No recoverable session snapshot is available."
-                          : "Session context restored."}
+                      The last run needs attention after a restart.
                     </span>
-                    {recoveryStatus === "needs_attention" && recoveryJobId && !busy ? (
+                    {recoveryJobId && !busy ? (
                       <Button type="button" size="xs" variant="outline" onClick={() => void resumeInterruptedRun()}>
                         Resume
                       </Button>
@@ -7395,7 +7773,7 @@ export default function AppShell() {
       {!notesOpen && workspaceMounted ? (
         <aside
           className={cn(
-            "relative flex min-h-0 w-full shrink-0 flex-col overflow-hidden border-l border-border/30 bg-background/95 max-md:absolute max-md:inset-0 max-md:z-30 max-md:!w-full",
+            "workspace-surface relative flex min-h-0 w-full shrink-0 flex-col overflow-hidden border-l border-border/30 bg-background/95 max-md:absolute max-md:inset-0 max-md:z-30 max-md:!w-full",
             browserFullscreen && workspaceTab === "browser" && "fixed inset-[1%] z-50 !w-auto rounded-xl border border-border shadow-2xl ring-1 ring-foreground/10",
             workspaceOpen ? "workspace-panel-enter" : "workspace-panel-exit",
           )}
@@ -8052,6 +8430,11 @@ export default function AppShell() {
         onSoundCuesEnabledChange={setSoundCuesEnabled}
         voiceInputEnabled={voiceInputEnabled}
         voiceMaxDurationSeconds={voiceMaxDurationSeconds}
+        voiceProvider={voiceProvider}
+        voiceModelId={voiceModelId}
+        voiceRealtime={voiceRealtime}
+        voiceEndpoint={voiceEndpoint}
+        onVoiceApiKeySave={saveVoiceApiKey}
         onVoiceInputSettingsChange={updateVoiceInputSettings}
         browserRealtime={browserRealtime}
         browserFps={browserFps}

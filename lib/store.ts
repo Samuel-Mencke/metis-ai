@@ -15,7 +15,7 @@ export type ToolPart = {
   name: string;
   status: "running" | "completed" | "error" | string;
   detail?: string;
-  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "todo" | "browser" | "memory" | "other";
+  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "other";
   path?: string;
   input?: string;
   result?: string;
@@ -124,6 +124,8 @@ export type NoteActivity = {
   action: "created" | "updated" | "archived" | "restored" | "deleted";
   createdAt: string;
   summary?: string;
+  before?: SharedNote;
+  after?: SharedNote;
 };
 
 export type SnapshotAvailability = "available" | "restored" | "needs_attention" | "not_available";
@@ -179,6 +181,11 @@ export type SessionSnapshot = {
 export type VoiceInputSettings = {
   enabled: boolean;
   maxDurationSeconds: number;
+  provider: "openai" | "local" | "custom" | "browser";
+  modelId: string;
+  realtime: boolean;
+  endpoint?: string;
+  connectionId?: string;
   language?: string;
   autoInsertDraft: boolean;
   deleteAudioAfterTranscription: boolean;

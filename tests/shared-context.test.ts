@@ -57,6 +57,37 @@ test("note creation is idempotent and optimistic conflicts are explicit", () => 
   );
 });
 
+test("chat reverts restore chat notes without touching global notes", async () => {
+  const { createNote, getNote, revertChatNotes, updateNote } = modules[1];
+  const revertChatId = modules[0].createChat("Note revert test").id;
+  const chatNote = createNote({
+    chatId: revertChatId,
+    scope: "chat",
+    title: "Chat note",
+    content: "before",
+  });
+  const globalNote = createNote({
+    scope: "global",
+    title: "Global note",
+    content: "keep",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const cutoff = new Date().toISOString();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  updateNote(chatNote.id, { content: "after" });
+  createNote({
+    chatId: revertChatId,
+    scope: "chat",
+    title: "Created after cutoff",
+    content: "remove",
+  });
+
+  const reverted = revertChatNotes(revertChatId, undefined, cutoff);
+  assert.equal(reverted.length, 2);
+  assert.equal(getNote(chatNote.id)?.content, "before");
+  assert.equal(getNote(globalNote.id)?.content, "keep");
+});
+
 test("snapshots survive through the latest-valid record path", () => {
   const { createSnapshot, getLatestSnapshot } = modules[1];
   const snapshot = createSnapshot({
@@ -109,8 +140,26 @@ test("voice jobs enforce the hard duration limit", () => {
   assert.equal(job.status, "queued");
 });
 
+test("voice settings normalize provider defaults without retaining secrets", () => {
+  const { normalizeVoiceSettings } = modules[1];
+  const settings = normalizeVoiceSettings({
+    provider: "custom",
+    realtime: true,
+    modelId: "  local-model  ",
+    endpoint: " http://127.0.0.1:9000 ",
+    maxDurationSeconds: 999999,
+  });
+  assert.equal(settings.provider, "custom");
+  assert.equal(settings.modelId, "local-model");
+  assert.equal(settings.realtime, true);
+  assert.equal(settings.maxDurationSeconds, 3600);
+  assert.equal("apiKey" in settings, false);
+});
+
 test("workspace creation is persisted, addressable, and idempotent", async () => {
   const { POST } = modules[3];
+  const beforePage = modules[0].getChatPage(chatId, undefined, 100, 0);
+  assert.equal(beforePage?.chat.workspaces?.length || 0, 0);
   const headers = {
     "Content-Type": "application/json",
     Authorization: "Bearer shared-context-test-token",
@@ -138,6 +187,8 @@ test("workspace creation is persisted, addressable, and idempotent", async () =>
   }));
   const listBody = await list.json() as { workspaces?: Array<{ id: string }> };
   assert.equal(listBody.workspaces?.filter((item) => item.id === firstBody.id).length, 1);
+  const afterPage = modules[0].getChatPage(chatId, undefined, 100, 0);
+  assert.equal(afterPage?.chat.workspaces?.some((item) => item.id === firstBody.id), true);
   const open = await POST(new Request("http://localhost/api/internal/mcp-workspace", {
     method: "POST",
     headers: { ...headers, "Idempotency-Key": "" },

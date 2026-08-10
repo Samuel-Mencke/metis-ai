@@ -102,7 +102,9 @@ export function EditableMarkdown({
         onChange(nextValue);
       }}
     >
-      <StableMarkdownPreview content={initialValueRef.current} />
+      {initialValueRef.current ? (
+        <StableMarkdownPreview content={initialValueRef.current} />
+      ) : null}
     </div>
   );
 }
