@@ -27,6 +27,7 @@ export type ToolPart = {
     model?: string;
     prompt?: string;
     messages?: Array<{ role: string; text: string; timestamp?: string }>;
+    tools?: ToolPart[];
   };
   diff?: {
     before?: string;
@@ -314,6 +315,7 @@ export type Chat = {
   share?: ChatShare;
   pinned?: boolean;
   archived?: boolean;
+  lastMessageSent?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -333,6 +335,7 @@ export type ChatIndexEntry = {
   badge?: ChatBadge;
   pinned?: boolean;
   archived?: boolean;
+  lastMessageSent?: string;
   share?: Omit<ChatShare, "passwordHash">;
 };
 

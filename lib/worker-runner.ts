@@ -39,7 +39,7 @@ function classifyTool(name: string): ToolPart["kind"] {
   if (value.includes("edit_plan")) return "plan";
   if (value.includes("edit_canvas")) return "canvas";
   if (value.includes("plan")) return "plan";
-  if (/(edit|write|patch|replace|create_file|delete_file)/.test(value)) return "edit";
+  if (/(edit|write|patch|replace|create_file|delete|remove|unlink)/.test(value)) return "edit";
   if (/(read|search|list|glob|grep)/.test(value)) return "read";
   if (/(shell|terminal|command|exec|run)/.test(value)) return "shell";
   if (/(mcp|connector|integration)/.test(value)) return "mcp";
@@ -132,7 +132,24 @@ function readFileSnapshot(rawPath: string, agentCwd: string): string | undefined
 }
 
 function isDeleteTool(name: string) {
-  return /(^|[._:/-])(delete|remove|unlink)([._:/-]|$)/i.test(name);
+  return /(^|[._:/-])(delete|remove|unlink)(?=[._:/-]|$)/i.test(name);
+}
+
+function diffStats(before?: string, after?: string) {
+  const beforeLines = (before ?? "").split("\n");
+  const afterLines = (after ?? "").split("\n");
+  let start = 0;
+  while (start < beforeLines.length && start < afterLines.length && beforeLines[start] === afterLines[start]) start += 1;
+  let beforeEnd = beforeLines.length;
+  let afterEnd = afterLines.length;
+  while (beforeEnd > start && afterEnd > start && beforeLines[beforeEnd - 1] === afterLines[afterEnd - 1]) {
+    beforeEnd -= 1;
+    afterEnd -= 1;
+  }
+  return {
+    additions: Math.max(0, afterEnd - start),
+    deletions: Math.max(0, beforeEnd - start),
+  };
 }
 
 function extractEditMetadata(
@@ -154,7 +171,7 @@ function extractEditMetadata(
   const before = previousDiff?.before ?? readFileSnapshot(rawPath, agentCwd);
   if (!captureAfter) return { path: rawPath, diff: { before } };
   if (isDeleteTool(name)) {
-    return { path: rawPath, diff: { before, after: undefined } };
+    return { path: rawPath, diff: { before, after: undefined, ...diffStats(before, undefined) } };
   }
 
   const edits = Array.isArray(input.edits)
@@ -180,9 +197,10 @@ function extractEditMetadata(
       if (position < 0) break;
       reconstructedBefore = `${reconstructedBefore.slice(0, position)}${oldText}${reconstructedBefore.slice(position + newText.length)}`;
     }
-    return { path: rawPath, diff: { before: previousDiff?.before ?? reconstructedBefore, after } };
+    const originalBefore = previousDiff?.before ?? reconstructedBefore;
+    return { path: rawPath, diff: { before: originalBefore, after, ...diffStats(originalBefore, after) } };
   }
-  return { path: rawPath, diff: { before, after } };
+  return { path: rawPath, diff: { before, after, ...diffStats(before, after) } };
 }
 
 function extractSubagent(
@@ -199,6 +217,23 @@ function extractSubagent(
     : Array.isArray(resultValue.messages)
       ? resultValue.messages
       : [];
+  const nestedTools = steps
+    .map((step) => asRecord(step))
+    .flatMap((item) => {
+      const candidates = Array.isArray(item.tools) ? item.tools : item.tool ? [item.tool] : [];
+      return candidates.map((candidate) => asRecord(candidate));
+    })
+    .map((item, index) => {
+      const name = typeof item.name === "string" ? item.name : typeof item.toolName === "string" ? item.toolName : "tool";
+      return {
+        id: typeof item.id === "string" ? item.id : `${name}-${index}`,
+        name,
+        status: typeof item.status === "string" ? item.status : "completed",
+        kind: classifyTool(name),
+        ...(item.input !== undefined ? { input: JSON.stringify(item.input) } : {}),
+        ...(item.result !== undefined ? { result: JSON.stringify(item.result) } : {}),
+      } satisfies ToolPart;
+    });
   const messages = steps
     .map((step) => {
       const item = asRecord(step);
@@ -228,6 +263,7 @@ function extractSubagent(
     model,
     prompt,
     ...(messages.length ? { messages } : {}),
+    ...(nestedTools.length ? { tools: nestedTools } : {}),
   };
 }
 
@@ -239,52 +275,13 @@ function isFinishedToolStatus(value: string) {
   return ["completed", "success", "succeeded", "done"].includes(value.trim().toLowerCase());
 }
 
-function isAskUserTool(tool: ToolPart) {
-  const normalizedName = tool.name.trim().toLowerCase().replaceAll("-", "_");
-  if (
-    normalizedName === "ask_user" ||
-    normalizedName.endsWith(".ask_user") ||
-    normalizedName.endsWith("/ask_user") ||
-    normalizedName.endsWith(":ask_user")
-  ) {
-    return true;
-  }
-  if (!tool.input) return false;
-  try {
-    const input = JSON.parse(tool.input) as {
-      toolName?: unknown;
-      name?: unknown;
-      tool?: unknown;
-      arguments?: { toolName?: unknown; name?: unknown; tool?: unknown };
-    };
-    return [
-      input.toolName,
-      input.name,
-      input.tool,
-      input.arguments?.toolName,
-      input.arguments?.name,
-      input.arguments?.tool,
-    ].some(
-      (name) =>
-        typeof name === "string" &&
-        name.trim().toLowerCase().replaceAll("-", "_") === "ask_user",
-    );
-  } catch {
-    return false;
-  }
-}
-
-function closeAskUserTools(tools: ToolPart[], status: string) {
-  for (const tool of tools) {
-    if (isAskUserTool(tool) && tool.status === "running") {
-      tool.status = status;
-    }
-  }
+function isActiveToolStatus(value: string) {
+  return ["running", "in_progress", "pending", "started", "executing", "queued"].includes(value.trim().toLowerCase());
 }
 
 function closeRunningTools(tools: ToolPart[], status: string) {
   for (const tool of tools) {
-    if (tool.status === "running") tool.status = status;
+    if (isActiveToolStatus(tool.status)) tool.status = status;
   }
 }
 
@@ -660,14 +657,28 @@ export async function runQueuedJob(job: AgentJob) {
           status: String((event as { status?: string }).status || "running"),
           message: (event as { message?: string }).message,
         });
-        } else if (event.type === "tool_call") {
-        const toolEvent = event as { call_id?: string; name?: string; status?: string; args?: unknown; result?: unknown };
-        const toolId = normalizeToolId(toolEvent.call_id || crypto.randomUUID());
-        const toolName = toolEvent.name || "tool";
-        const toolStatus = toolEvent.status || "running";
-        const subagent = extractSubagent(toolName, toolEvent.args, toolEvent.result);
+        } else if (["tool_call", "tool_use", "tool_result"].includes(String((event as { type?: unknown }).type))) {
+        const eventType = String((event as { type?: unknown }).type);
+        const rawToolEvent = event as unknown as Record<string, unknown>;
+        const rawCallId =
+          rawToolEvent.call_id ||
+          rawToolEvent.callId ||
+          rawToolEvent.tool_call_id;
+        const toolId = normalizeToolId(typeof rawCallId === "string" ? rawCallId : crypto.randomUUID());
         const existingTool = tools.find((tool) => tool.id === toolId);
-        let editArgs = toolEvent.args;
+        const toolName =
+          (typeof rawToolEvent.name === "string" && rawToolEvent.name) ||
+          (typeof rawToolEvent.tool_name === "string" && rawToolEvent.tool_name) ||
+          (typeof rawToolEvent.toolName === "string" && rawToolEvent.toolName) ||
+          existingTool?.name ||
+          "tool";
+        const toolStatus =
+          (typeof rawToolEvent.status === "string" && rawToolEvent.status) ||
+          (eventType === "tool_result" ? "completed" : "running");
+        const toolArgs = rawToolEvent.args ?? rawToolEvent.input ?? rawToolEvent.arguments;
+        const toolResult = rawToolEvent.result ?? rawToolEvent.output ?? rawToolEvent.content;
+        const subagent = extractSubagent(toolName, toolArgs, toolResult);
+        let editArgs = toolArgs;
         if (editArgs === undefined && existingTool?.input) {
           try {
             editArgs = JSON.parse(existingTool.input);
@@ -693,7 +704,7 @@ export async function runQueuedJob(job: AgentJob) {
           ...(editMetadata.path ? { path: editMetadata.path } : {}),
           ...(editMetadata.diff ? { diff: editMetadata.diff } : {}),
           ...(editArgs !== undefined ? { input: JSON.stringify(editArgs) } : {}),
-          ...(toolEvent.result !== undefined ? { result: JSON.stringify(toolEvent.result) } : {}),
+          ...(toolResult !== undefined ? { result: JSON.stringify(toolResult) } : {}),
           ...(subagent ? { subagent } : {}),
         };
         const existingToolIndex = tools.findIndex((tool) => tool.id === toolId);
@@ -703,19 +714,19 @@ export async function runQueuedJob(job: AgentJob) {
           tools.push(nextTool);
         }
         checkpoint(true);
-        const toolResult = typeof toolEvent.result === "string"
-          ? toolEvent.result
-          : toolEvent.result ? JSON.stringify(toolEvent.result) : "";
+        const toolResultText = typeof toolResult === "string"
+          ? toolResult
+          : toolResult ? JSON.stringify(toolResult) : "";
         const providedAttachment =
           toolName === "provide_file" && isFinishedToolStatus(toolStatus)
-            ? extractProvidedAttachment(toolEvent.result)
+            ? extractProvidedAttachment(toolResult)
             : null;
         if (providedAttachment && !providedAttachments.some((item) => item.id === providedAttachment.id)) {
           providedAttachments.push(providedAttachment);
         }
         const parsedWorkspace =
-          extractWorkspace(toolResult) ||
-          (toolEvent.args !== undefined ? extractWorkspace(JSON.stringify(toolEvent.args)) : null) ||
+          extractWorkspace(toolResultText) ||
+          (toolArgs !== undefined ? extractWorkspace(JSON.stringify(toolArgs)) : null) ||
           (existingTool?.input ? extractWorkspace(existingTool.input) : null);
         if (isFinishedToolStatus(toolStatus) && (nextTool.kind === "plan" || nextTool.kind === "canvas") && parsedWorkspace) {
           const workspaceType: WorkspaceItem["type"] = nextTool.kind === "canvas" ? "canvas" : "plan";
@@ -791,6 +802,8 @@ export async function runQueuedJob(job: AgentJob) {
           name: tool.name,
           status: tool.status,
           kind: tool.kind,
+          ...(tool.path ? { path: tool.path } : {}),
+          ...(tool.diff ? { diff: tool.diff } : {}),
           ...(tool.input ? { input: tool.input } : {}),
           ...(tool.result ? { result: tool.result } : {}),
           ...(tool.subagent ? { subagent: tool.subagent } : {}),
@@ -809,16 +822,18 @@ export async function runQueuedJob(job: AgentJob) {
     // after ask_user returned and the agent continued. Finalize that event
     // before persisting the assistant message so the UI reflects the actual
     // completed run.
-    closeAskUserTools(tools, result.status === "error" ? "error" : "completed");
+    closeRunningTools(tools, result.status === "error" ? "error" : "completed");
     for (const tool of tools) {
-      if (!isAskUserTool(tool)) continue;
       emit("tool", {
         callId: tool.id,
         name: tool.name,
         status: tool.status,
         kind: tool.kind,
+        ...(tool.path ? { path: tool.path } : {}),
+        ...(tool.diff ? { diff: tool.diff } : {}),
         ...(tool.input ? { input: tool.input } : {}),
         ...(tool.result ? { result: tool.result } : {}),
+        ...(tool.subagent ? { subagent: tool.subagent } : {}),
       });
     }
     checkpoint(true);

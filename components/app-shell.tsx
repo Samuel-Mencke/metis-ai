@@ -27,8 +27,10 @@ import {
   Check,
   Copy,
   ChevronDown,
+  ChevronRight,
   CircleAlert,
   Brain,
+  Bot,
   AudioLines,
   PanelRight,
   File as FileIcon,
@@ -77,6 +79,7 @@ import { RemoteFileEditor } from "@/components/remote-file-editor";
 import { RemoteTerminal } from "@/components/remote-terminal";
 import { NotesVoid } from "@/components/notes-void";
 import { VoiceInput } from "@/components/voice-input";
+import { SubagentChatView } from "@/components/subagent-chat-view";
 import { RichUserText } from "@/components/rich-user-text";
 import { ProviderSetupDialog } from "@/components/provider-setup-dialog";
 import { CommandPalette } from "@/components/command-palette";
@@ -215,6 +218,7 @@ type ToolPart = {
     model?: string;
     prompt?: string;
     messages?: Array<{ role: string; text: string; timestamp?: string }>;
+    tools?: ToolPart[];
   };
 };
 
@@ -939,7 +943,7 @@ type ChatRuntime = {
   generation: string;
 };
 
-type ActiveDiff = { name: string; path?: string; detail?: string; diff?: ToolPart["diff"] };
+type ActiveDiff = { name: string; path?: string; detail?: string; input?: string; diff?: ToolPart["diff"] };
 type ActiveSubagent = ToolPart;
 type ActiveRawTool = ToolPart;
 type BrowserTab = { id: string; title: string; url: string };
@@ -1006,8 +1010,30 @@ function DiffViewer({ active }: { active: ActiveDiff }) {
   const before = active.diff?.before ?? "";
   const after = active.diff?.after ?? "";
   const lines = buildDiffLines(before, after);
-  const additions = lines.filter((line) => line.kind === "add").length;
-  const deletions = lines.filter((line) => line.kind === "remove").length;
+  let additions = lines.filter((line) => line.kind === "add").length;
+  let deletions = lines.filter((line) => line.kind === "remove").length;
+  if (!additions && !deletions && active.input) {
+    try {
+      const parsed = JSON.parse(active.input) as {
+        edits?: Array<{ oldText?: unknown; newText?: unknown }>;
+        content?: unknown;
+      };
+      if (Array.isArray(parsed.edits)) {
+        additions = parsed.edits.reduce(
+          (total, edit) => total + (typeof edit.newText === "string" && edit.newText ? edit.newText.split("\n").length : 0),
+          0,
+        );
+        deletions = parsed.edits.reduce(
+          (total, edit) => total + (typeof edit.oldText === "string" && edit.oldText ? edit.oldText.split("\n").length : 0),
+          0,
+        );
+      } else if (typeof parsed.content === "string") {
+        additions = parsed.content ? parsed.content.split("\n").length : 0;
+      }
+    } catch {
+      // Keep the snapshot-based count when the request is not JSON.
+    }
+  }
   return (
     <div className="min-w-0 space-y-3">
       <div>
@@ -1619,6 +1645,7 @@ export default function AppShell() {
   const [activeRawTool, setActiveRawTool] = useState<ActiveRawTool | null>(null);
   const [activeSubagent, setActiveSubagent] = useState<ActiveSubagent | null>(null);
   const [cancellingSubagent, setCancellingSubagent] = useState(false);
+  const [subagentsExpanded, setSubagentsExpanded] = useState(true);
   const [revertTarget, setRevertTarget] = useState<Msg | null>(null);
   const [manualCleanupTools, setManualCleanupTools] = useState<ToolPart[]>([]);
   const [reverting, setReverting] = useState(false);
@@ -2319,6 +2346,7 @@ export default function AppShell() {
       .filter((part): part is ToolMsgPart => part.type === "tool")
       .filter((part) => part.kind === "subagent"),
   );
+  const runningSubagents = subagentOutputs.filter((tool) => tool.status === "running");
 
   function handleTouchStart(event: React.TouchEvent<HTMLDivElement>) {
     if (event.touches.length !== 1) {
@@ -7390,6 +7418,7 @@ export default function AppShell() {
                                     name: tool.name,
                                     path: tool.path,
                                     detail: tool.detail,
+                                    input: tool.input,
                                     diff: tool.diff,
                                   })
                                 }
@@ -7741,6 +7770,39 @@ export default function AppShell() {
                     >
                       <LoaderCircle className="size-3.5 animate-spin" />
                       <span>{liveStatus || "Agent running…"}</span>
+                    </div>
+                  ) : null}
+                  {subagentOutputs.length > 0 ? (
+                    <div className="mb-2 overflow-hidden rounded-xl border border-purple-400/20 bg-purple-400/[0.06]">
+                      <button
+                        type="button"
+                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-muted-foreground hover:bg-purple-400/[0.08]"
+                        onClick={() => setSubagentsExpanded((value) => !value)}
+                        aria-expanded={subagentsExpanded}
+                      >
+                        <Bot className="size-3.5 text-purple-300" />
+                        <span className="font-medium text-foreground/80">
+                          {runningSubagents.length} subagent{runningSubagents.length === 1 ? "" : "s"} running
+                        </span>
+                        {runningSubagents.length === 0 ? <span className="text-muted-foreground/70">· recent</span> : null}
+                        <ChevronRight className={cn("ml-auto size-3.5 transition-transform", subagentsExpanded && "rotate-90")} />
+                      </button>
+                      {subagentsExpanded ? (
+                        <div className="border-t border-purple-400/15 px-2 py-1">
+                          {subagentOutputs.map((tool) => (
+                            <button
+                              key={tool.id}
+                              type="button"
+                              className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs hover:bg-muted/40"
+                              onClick={() => setActiveSubagent(tool)}
+                            >
+                              {tool.status === "running" ? <LoaderCircle className="size-3 animate-spin text-purple-300" /> : <Bot className="size-3 text-muted-foreground" />}
+                              <span className="min-w-0 flex-1 truncate">{tool.subagent?.title || tool.subagent?.prompt || tool.name}</span>
+                              <span className="shrink-0 text-[10px] text-muted-foreground/70">{tool.status}</span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
                   {composer}
@@ -8495,70 +8557,14 @@ export default function AppShell() {
 
       <AttachmentViewer active={activeAttachment} onOpenChange={(open) => !open && setActiveAttachment(null)} />
 
-      <Dialog open={Boolean(activeSubagent)} onOpenChange={(open) => !open && setActiveSubagent(null)}>
-        <DialogContent className="h-[100dvh] max-h-none w-screen max-w-none rounded-none p-4 sm:h-auto sm:max-h-[90vh] sm:max-w-4xl sm:rounded-xl sm:p-6">
-          <DialogHeader>
-            <div className="flex flex-wrap items-center gap-2">
-              <DialogTitle>{activeSubagent?.subagent?.title || activeSubagent?.subagent?.prompt || "Subagent chat"}</DialogTitle>
-            </div>
-            {activeSubagent ? (
-              <p className="text-left text-xs text-muted-foreground">
-                {activeSubagent.status === "running" ? "Running" : activeSubagent.status}
-                {activeSubagent.name ? ` · ${activeSubagent.name}` : ""}
-                {activeSubagent.subagent?.agentId ? ` · ${activeSubagent.subagent.agentId}` : ""}
-                {activeSubagent.subagent?.mode ? ` · ${activeSubagent.subagent.mode}` : ""}
-                {activeSubagent.subagent?.model ? ` · model: ${activeSubagent.subagent.model}` : ""}
-              </p>
-            ) : null}
-          </DialogHeader>
-          {activeSubagent ? (
-            <div className="min-h-0 flex-1 max-h-[calc(100dvh-7rem)] space-y-4 overflow-y-auto pr-1 sm:max-h-[75vh]">
-              {activeSubagent.subagent?.prompt || activeSubagent.input ? (
-                <div className="ml-auto max-w-[85%] rounded-2xl rounded-tr-sm bg-primary/15 px-4 py-3 text-sm text-foreground">
-                  <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-primary/70">Task</p>
-                  <p className="whitespace-pre-wrap">{activeSubagent.subagent?.prompt || activeSubagent.input}</p>
-                </div>
-              ) : null}
-              {activeSubagent.subagent?.messages?.map((message, index) => (
-                <div
-                  key={`${message.timestamp ?? "message"}-${index}`}
-                  className={cn(
-                    "max-w-[85%] rounded-2xl px-4 py-3 text-sm",
-                    message.role.toLowerCase().includes("user") || message.role.toLowerCase().includes("task")
-                      ? "ml-auto rounded-tr-sm bg-primary/15 text-foreground"
-                      : message.role.toLowerCase().includes("tool") || message.role.toLowerCase().includes("system")
-                        ? "mx-auto max-w-[92%] rounded-lg bg-muted/40 text-muted-foreground"
-                        : "rounded-tl-sm border border-border/50 bg-muted/20 text-foreground/90",
-                  )}
-                >
-                  <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{message.role}</p>
-                  {message.role.toLowerCase().includes("assistant") ? (
-                    <Markdown content={message.text} />
-                  ) : (
-                    <p className="whitespace-pre-wrap break-words">{message.text}</p>
-                  )}
-                </div>
-              ))}
-              {!activeSubagent.subagent?.messages?.length && activeSubagent.result ? (
-                <div className="rounded-2xl rounded-tl-sm border border-border/50 bg-muted/20 px-4 py-3 text-sm">
-                  <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Result</p>
-                  <p className="whitespace-pre-wrap break-words">{activeSubagent.result}</p>
-                </div>
-              ) : null}
-              {!activeSubagent.subagent?.messages?.length && !activeSubagent.result ? (
-                <p className="text-sm text-muted-foreground">{activeSubagent.detail || "No conversation details available yet."}</p>
-              ) : null}
-            </div>
-          ) : null}
-          {activeSubagent?.status === "running" ? (
-            <DialogFooter>
-              <Button type="button" variant="destructive" onClick={() => void cancelSubagent()} disabled={cancellingSubagent}>
-                {cancellingSubagent ? "Cancelling…" : "Stop agent"}
-              </Button>
-            </DialogFooter>
-          ) : null}
-        </DialogContent>
-      </Dialog>
+      {activeSubagent ? (
+        <SubagentChatView
+          tool={activeSubagent}
+          onBack={() => setActiveSubagent(null)}
+          onCancel={() => void cancelSubagent()}
+          cancelling={cancellingSubagent}
+        />
+      ) : null}
 
       <Dialog
         open={manualCleanupTools.length > 0}
@@ -8579,6 +8585,9 @@ export default function AppShell() {
                   <span className="break-words font-medium text-foreground">{tool.name}</span>
                   <span className="text-xs text-muted-foreground">({tool.status})</span>
                   {tool.kind ? <span className="text-xs text-muted-foreground">· {tool.kind}</span> : null}
+                </div>
+                <div className="-mx-1 mt-1">
+                  <ToolCallGroup tools={[tool]} autoExpand={false} />
                 </div>
                 <div className="mt-2 grid gap-2">
                   <div>

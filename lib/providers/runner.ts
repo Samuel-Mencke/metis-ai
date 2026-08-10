@@ -209,6 +209,15 @@ async function consumeAiStream(
           name: part.toolName,
           status: "completed",
           kind: "other",
+          ...("input" in part && part.input !== undefined ? { input: JSON.stringify(part.input) } : {}),
+        });
+      } else if (part.type === "tool-result") {
+        context.onTool({
+          id: part.toolCallId,
+          name: part.toolName,
+          status: "completed",
+          kind: "other",
+          ...("result" in part && part.result !== undefined ? { result: JSON.stringify(part.result) } : {}),
         });
       }
     }
@@ -765,7 +774,12 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
     emit("text", { text: value });
   };
   const onTool = (tool: ToolPart) => {
-    tools.push(tool);
+    const existingIndex = tools.findIndex((item) => item.id === tool.id);
+    if (existingIndex >= 0) {
+      tools[existingIndex] = { ...tools[existingIndex], ...tool };
+    } else {
+      tools.push(tool);
+    }
     checkpoint(true);
     emit("tool", {
       callId: tool.id,

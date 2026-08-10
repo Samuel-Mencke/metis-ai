@@ -16,6 +16,7 @@ import {
   Palette,
   StickyNote,
   Terminal,
+  Trash2,
 } from "lucide-react";
 import { memo, useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
@@ -40,6 +41,7 @@ export type ToolCallData = {
     model?: string;
     prompt?: string;
     messages?: Array<{ role: string; text: string; timestamp?: string }>;
+    tools?: ToolCallData[];
   };
 };
 
@@ -107,6 +109,46 @@ function formatToolOutput(value?: string): string {
     // Tool output is often plain text.
   }
   return value;
+}
+
+function displayedDiffStats(diff?: ToolCallData["diff"], input?: string) {
+  if (!diff && !input) return null;
+  if (diff && (typeof diff.additions === "number" || typeof diff.deletions === "number")) {
+    if ((diff.additions ?? 0) !== 0 || (diff.deletions ?? 0) !== 0 || diff.before === diff.after) {
+      return { additions: diff.additions ?? 0, deletions: diff.deletions ?? 0 };
+    }
+  }
+  try {
+    const parsed = input ? JSON.parse(input) as { edits?: Array<{ oldText?: unknown; newText?: unknown }>; content?: unknown } : null;
+    if (Array.isArray(parsed?.edits)) {
+      return parsed.edits.reduce(
+        (stats, edit) => ({
+          additions: stats.additions + (typeof edit.newText === "string" && edit.newText ? edit.newText.split("\n").length : 0),
+          deletions: stats.deletions + (typeof edit.oldText === "string" && edit.oldText ? edit.oldText.split("\n").length : 0),
+        }),
+        { additions: 0, deletions: 0 },
+      );
+    }
+    if (typeof parsed?.content === "string") {
+      return { additions: parsed.content ? parsed.content.split("\n").length : 0, deletions: 0 };
+    }
+  } catch {
+    // Input may be streamed plain text.
+  }
+  const before = (diff?.before ?? "").split("\n");
+  const after = (diff?.after ?? "").split("\n");
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) start += 1;
+  let beforeEnd = before.length;
+  let afterEnd = after.length;
+  while (beforeEnd > start && afterEnd > start && before[beforeEnd - 1] === after[afterEnd - 1]) {
+    beforeEnd -= 1;
+    afterEnd -= 1;
+  }
+  return {
+    additions: Math.max(0, afterEnd - start),
+    deletions: Math.max(0, beforeEnd - start),
+  };
 }
 
 function planInfo(input?: string, result?: string, detail?: string) {
@@ -232,6 +274,34 @@ function mcpDisplayInfo(name: string, input?: string, detail?: string) {
   };
 }
 
+function toolDisplayInfo(kind: ToolCallData["kind"], name: string, input?: string, detail?: string, path?: string) {
+  let values: Record<string, unknown> = {};
+  try {
+    const parsed = input ? JSON.parse(input) : null;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) values = parsed as Record<string, unknown>;
+  } catch {
+    // Keep the compact fallback for streamed or plain-text arguments.
+  }
+  const command = [values.command, values.cmd, values.script]
+    .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+  const inputPath = path || [values.path, values.file, values.filePath, values.filename]
+    .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+  const readableName = name
+    .replaceAll("_", " ")
+    .replace(/^(shell|read|edit|write)\s*/i, "")
+    .trim();
+  const primary = kind === "shell"
+    ? command || readableName
+    : kind === "read" || kind === "edit"
+      ? inputPath || readableName
+      : readableName;
+  const output = detail?.replace(/\s+/g, " ").trim();
+  return {
+    label: primary || kind || name.replaceAll("_", " "),
+    detail: command && primary !== command ? command : output,
+  };
+}
+
 export const ToolCallChip = memo(function ToolCallChip({
   name,
   status,
@@ -252,7 +322,7 @@ export const ToolCallChip = memo(function ToolCallChip({
   todos,
 }: ToolCallProps) {
   const [expanded, setExpanded] = useState(false);
-  const running = status === "running";
+  const running = ["running", "in_progress", "pending", "started", "executing", "queued"].includes(status.toLowerCase());
 
   useEffect(() => {
     setExpanded(autoExpand);
@@ -272,7 +342,9 @@ export const ToolCallChip = memo(function ToolCallChip({
     memory: { label: "Memory", icon: Brain, color: "text-violet-400", border: "border-violet-400/30", bg: "bg-violet-400/10" },
     other: { label: name.replaceAll("_", " "), icon: Globe2, color: "text-muted-foreground", border: "border-border/50", bg: "bg-muted/20" },
   }[kind ?? "other"];
-  const Icon = config.icon;
+  const deleteTool = /(^|[._:/-])(delete|remove|unlink)(?=[._:/-]|$)/i.test(name);
+  const Icon = deleteTool && kind === "edit" ? Trash2 : config.icon;
+  const toolLabel = deleteTool && kind === "edit" ? "File delete" : config.label;
   const clickable = kind === "edit" && Boolean(diff || path);
   const subagentClickable = kind === "subagent";
   const workspaceClickable = kind === "plan" || kind === "canvas" || kind === "browser";
@@ -329,10 +401,15 @@ export const ToolCallChip = memo(function ToolCallChip({
   const displayName = kind === "plan"
     ? plan?.title || ""
     : mcpInfo?.label || path || name.replaceAll("_", " ");
-  const previewText = mcpInfo?.detail || path || (subagent?.prompt || rawOutput)?.replace(/\s+/g, " ").trim();
+  const genericInfo = kind !== "plan" && kind !== "mcp"
+    ? toolDisplayInfo(kind, name, input, detail, path)
+    : undefined;
+  const compactName = genericInfo?.label || displayName;
+  const previewText = mcpInfo?.detail || genericInfo?.detail || path || (subagent?.prompt || rawOutput)?.replace(/\s+/g, " ").trim();
   const compactDetail = previewText && previewText.length > 120
     ? `${previewText.slice(0, 117)}…`
     : previewText;
+  const diffStats = displayedDiffStats(diff, input);
   if (kind === "plan" && !running && plan) {
     return (
       <PlanWorkspaceCard
@@ -441,14 +518,18 @@ export const ToolCallChip = memo(function ToolCallChip({
       </span>
       <div className="min-w-0 flex-1 truncate">
         <div className="flex min-w-0 items-center gap-1.5">
-          <span className={cn("shrink-0 font-medium", config.color)}>{config.label}</span>
-          <span className="truncate text-foreground/75">{displayName}</span>
+          <span className={cn("shrink-0 font-medium", deleteTool ? "text-rose-400" : config.color)}>
+            {toolLabel}
+          </span>
+          {compactName && compactName.toLocaleLowerCase() !== toolLabel.toLocaleLowerCase() ? (
+            <span className="truncate text-foreground/75">{compactName}</span>
+          ) : null}
           {kind === "subagent" && subagent?.model ? (
             <span className="shrink-0 text-[10px] text-muted-foreground/70">{subagent.model}</span>
           ) : null}
-          {kind === "edit" && diff ? (
+          {kind === "edit" && diffStats ? (
             <span className="shrink-0 text-[10px] text-muted-foreground/70">
-              +{diff.additions ?? 0} -{diff.deletions ?? 0}
+              +{diffStats.additions} -{diffStats.deletions}
             </span>
           ) : null}
         </div>
@@ -483,10 +564,26 @@ export const ToolCallChip = memo(function ToolCallChip({
           ) : null}
         </div>
       {expanded ? (
-        <div className="my-1 min-w-0 max-w-full max-h-56 overflow-x-hidden overflow-y-auto break-all rounded-md border border-border/40 bg-muted/20 px-2.5 py-2 font-mono text-[11px] leading-4 whitespace-pre-wrap text-foreground/80">
-          {kind === "edit" && diff
-            ? `Before:\n${diff.before || "(empty)"}\n\nAfter:\n${diff.after || "(empty)"}`
-            : formatToolOutput(rawOutput) || "No output available yet."}
+        <div className="my-1 min-w-0 max-w-full max-h-72 space-y-2 overflow-x-hidden overflow-y-auto rounded-md border border-border/40 bg-muted/20 px-2.5 py-2 text-[11px] leading-4 text-foreground/80">
+          {input ? (
+            <section>
+              <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Request</p>
+              <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono">{formatToolOutput(input)}</pre>
+            </section>
+          ) : null}
+          {kind === "edit" && diff ? (
+            <section>
+              <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground">File diff</p>
+              <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono">{`Before:\n${diff.before || "(empty)"}\n\nAfter:\n${diff.after || "(empty)"}`}</pre>
+            </section>
+          ) : null}
+          {result || detail ? (
+            <section>
+              <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Response</p>
+              <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono">{formatToolOutput(result || detail)}</pre>
+            </section>
+          ) : null}
+          {!input && !(kind === "edit" && diff) && !result && !detail ? "No output available yet." : null}
         </div>
       ) : null}
     </div>

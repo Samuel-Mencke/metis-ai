@@ -41,8 +41,9 @@ export function NotePinDialog({
       .then((response) => response.ok ? response.json() : null)
       .then((data: { chats?: ChatOption[]; globalNoteIds?: string[]; configuredChatIds?: string[] } | null) => {
         setChats(data?.chats || []);
-        setEverywhere(Boolean(note && data?.globalNoteIds?.includes(note.id)));
-        setChatIds(data?.configuredChatIds || []);
+        const isEverywhere = Boolean(note && data?.globalNoteIds?.includes(note.id));
+        setEverywhere(isEverywhere);
+        setChatIds(isEverywhere ? [] : data?.configuredChatIds || []);
       })
       .catch(() => setChats([]));
   }, [open]);
@@ -72,18 +73,21 @@ export function NotePinDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[calc(100dvh-2rem)] max-w-lg overflow-hidden">
+      <DialogContent className="box-border min-w-[40vw] w-[min(90vw,42rem)] max-h-[calc(100dvh-2rem)] max-w-[calc(100vw-2rem)] overflow-x-hidden overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex min-w-0 items-start gap-2 pr-10 leading-5">
             <Pin className="size-4 text-primary" />
             <span className="min-w-0 break-words">Pin “{note?.title || "Untitled note"}”</span>
           </DialogTitle>
         </DialogHeader>
-        <div className="space-y-3">
+        <div className="min-w-0 max-w-full space-y-3">
           <button
             type="button"
-            className={cn("flex w-full items-center gap-3 rounded-xl border p-3 text-left", everywhere ? "border-primary bg-primary/10" : "border-border/60")}
-            onClick={() => setEverywhere((value) => !value)}
+            className={cn("flex min-w-0 max-w-full items-center gap-3 rounded-xl border p-3 text-left", everywhere ? "border-primary bg-primary/10" : "border-border/60")}
+            onClick={() => {
+              setEverywhere((value) => !value);
+              setChatIds([]);
+            }}
           >
             <Globe2 className="size-4 shrink-0" />
             <span className="min-w-0 flex-1">
@@ -93,17 +97,44 @@ export function NotePinDialog({
             {everywhere ? <Check className="size-4 text-primary" /> : null}
           </button>
           <div className="min-h-0 space-y-2">
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search chats…"
-                aria-label="Search chats"
-                className="h-9 pl-8"
-              />
+            <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
+              <div className="relative min-w-0 flex-1">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Search chats…"
+                  aria-label="Search chats"
+                  className="h-9 pl-8"
+                />
+              </div>
+              <div className="flex min-w-0 max-w-full flex-wrap justify-end gap-1">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="min-w-0 px-2 text-xs"
+                  disabled={everywhere || !filteredChats.length}
+                  onClick={() => setChatIds((current) => [...new Set([...current, ...filteredChats.map((chat) => chat.id)])])}
+                >
+                  Select all
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="min-w-0 px-2 text-xs"
+                  disabled={everywhere || !filteredChats.length}
+                  onClick={() => {
+                    const visibleIds = new Set(filteredChats.map((chat) => chat.id));
+                    setChatIds((current) => current.filter((id) => !visibleIds.has(id)));
+                  }}
+                >
+                  Deselect all
+                </Button>
+              </div>
             </div>
-            <div className="max-h-[min(40vh,18rem)] space-y-1 overflow-x-hidden overflow-y-auto rounded-xl border border-border/60 p-2">
+            <div className="min-w-0 max-w-full max-h-[min(40vh,18rem)] space-y-1 overflow-x-hidden overflow-y-auto rounded-xl border border-border/60 p-2">
             {filteredChats.length ? filteredChats.map((chat) => {
               const selected = !everywhere && chatIds.includes(chat.id);
               return (
@@ -126,7 +157,7 @@ export function NotePinDialog({
             </div>
           </div>
         </div>
-        <DialogFooter className="sm:flex-row sm:flex-wrap sm:items-center [&>button]:shrink-0 [&>button]:whitespace-nowrap">
+        <DialogFooter className="min-w-0 max-w-full sm:flex-row sm:flex-wrap sm:items-center [&>button]:min-w-0 [&>button]:max-w-full [&>button]:shrink-0 [&>button]:whitespace-normal">
           <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button type="button" disabled={saving || !note} onClick={() => void save()}>{saving ? "Saving…" : confirmLabel}</Button>
         </DialogFooter>

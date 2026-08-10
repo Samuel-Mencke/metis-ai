@@ -126,6 +126,7 @@ export function listChatsForUser(
   const rows = ownerId
     ? db.prepare(
         `SELECT id, owner_id AS ownerId, created_at AS createdAt, updated_at AS updatedAt,
+                json_extract(data, '$.lastMessageSent') AS lastMessageSent,
                 json_extract(data, '$.title') AS title,
                 json_extract(data, '$.agentId') AS agentId,
                 json_extract(data, '$.modelId') AS modelId,
@@ -137,10 +138,11 @@ export function listChatsForUser(
                 json_extract(data, '$.pinned') AS pinned,
                 json_extract(data, '$.archived') AS archived,
                 json_extract(data, '$.share') AS share
-         FROM chats WHERE owner_id = ? ORDER BY updated_at DESC`,
+         FROM chats WHERE owner_id = ?`,
       ).all(ownerId)
     : db.prepare(
         `SELECT id, owner_id AS ownerId, created_at AS createdAt, updated_at AS updatedAt,
+                json_extract(data, '$.lastMessageSent') AS lastMessageSent,
                 json_extract(data, '$.title') AS title,
                 json_extract(data, '$.agentId') AS agentId,
                 json_extract(data, '$.modelId') AS modelId,
@@ -152,7 +154,7 @@ export function listChatsForUser(
                 json_extract(data, '$.pinned') AS pinned,
                 json_extract(data, '$.archived') AS archived,
                 json_extract(data, '$.share') AS share
-         FROM chats ORDER BY updated_at DESC`,
+         FROM chats`,
       ).all();
   const result: ChatIndexEntry[] = rows.flatMap((row) => {
       const item = row as Record<string, unknown>;
@@ -166,6 +168,7 @@ export function listChatsForUser(
         title: typeof item.title === "string" ? item.title : "New chat",
         updatedAt: String(item.updatedAt || ""),
         createdAt: String(item.createdAt || ""),
+        ...(typeof item.lastMessageSent === "string" ? { lastMessageSent: item.lastMessageSent } : {}),
         ...(typeof item.agentId === "string" ? { agentId: item.agentId } : {}),
         ...(typeof item.modelId === "string" ? { modelId: item.modelId } : {}),
         ...(typeof item.runStatus === "string" ? { runStatus: item.runStatus as ChatRunStatus } : {}),
@@ -180,7 +183,7 @@ export function listChatsForUser(
     })
     .sort((a, b) => {
       if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
-      return b.updatedAt.localeCompare(a.updatedAt);
+      return (b.lastMessageSent || b.createdAt).localeCompare(a.lastMessageSent || a.createdAt);
     });
   chatIndexCache = { key: cacheKey, expiresAt: Date.now() + 1_000, chats: result };
   return result;
@@ -639,6 +642,9 @@ export function appendMessage(
       id,
       createdAt: message.createdAt || now(),
     });
+    if (message.role === "user") {
+      chat.lastMessageSent = message.createdAt || chat.messages.at(-1)?.createdAt || now();
+    }
     return saveChatInternal(chat);
   });
 }

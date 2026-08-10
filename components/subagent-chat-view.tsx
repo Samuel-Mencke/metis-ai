@@ -4,6 +4,8 @@ import { ArrowLeft, Bot, CircleStop, Clock3, LoaderCircle } from "lucide-react";
 import type { ToolPart } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { Markdown } from "@/components/markdown";
+import { ToolCallGroup } from "@/components/tool-call-chip";
 
 type Props = {
   tool: ToolPart;
@@ -57,9 +59,19 @@ export function SubagentChatView({ tool, onBack, onCancel, cancelling = false }:
               )}
             >
               <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{message.role}</p>
-              <p className="whitespace-pre-wrap break-words">{message.text}</p>
+              {message.role.toLowerCase().includes("assistant") ? (
+                <Markdown content={message.text} />
+              ) : (
+                <p className="whitespace-pre-wrap break-words">{message.text}</p>
+              )}
             </div>
           ))}
+          {tool.subagent?.tools?.length ? (
+            <ToolCallGroup
+              tools={tool.subagent.tools}
+              autoExpand={tool.status === "running"}
+            />
+          ) : null}
           {!messages.length && tool.result ? (
             <div className="rounded-2xl rounded-tl-sm border border-border/50 bg-muted/20 px-4 py-3 text-sm">
               <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Result</p>

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { LayoutGrid, Maximize2, Palette, Pin, PinOff, Plus, RefreshCw, Search, Trash2, ZoomIn, ZoomOut } from "lucide-react";
+import { ExternalLink, LayoutGrid, Maximize2, Palette, Pin, PinOff, Plus, RefreshCw, Search, Trash2, ZoomIn, ZoomOut } from "lucide-react";
 import type { SharedNote } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -82,9 +82,11 @@ export function NotesVoid({
           cache: "no-store",
           signal: controller.signal,
         });
-        const pinBody = await pinResponse.json().catch(() => ({})) as { pinnedNoteIds?: string[] };
+        const pinBody = await pinResponse.json().catch(() => ({})) as { pinnedNoteIds?: string[]; globalNoteIds?: string[] };
         const pinnedIds = new Set(pinBody.pinnedNoteIds || []);
         next = next.filter((note) => pinnedIds.has(note.id));
+        setGlobalPinnedIds(pinBody.globalNoteIds || []);
+        setConfiguredPinnedIds(pinBody.pinnedNoteIds || []);
       }
       setNotes(next);
       if (!chatId) {
@@ -263,6 +265,28 @@ export function NotesVoid({
     }
   }, []);
 
+  const unpinFromChat = useCallback(async (note: SharedNote) => {
+    try {
+      const response = await fetch(`/api/context/pins?noteId=${encodeURIComponent(note.id)}`, { cache: "no-store" });
+      const body = await response.json().catch(() => ({})) as { configuredChatIds?: string[]; globalNoteIds?: string[] };
+      const everywhere = body.globalNoteIds?.includes(note.id) ?? false;
+      const chatIds = everywhere
+        ? []
+        : (body.configuredChatIds || []).filter((id) => id !== chatId);
+      await fetch("/api/context/pins", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ noteId: note.id, everywhere: false, chatIds }),
+      });
+      setGlobalPinnedIds((current) => current.filter((id) => id !== note.id));
+      setConfiguredPinnedIds((current) => current.filter((id) => id !== note.id));
+      setNotes((current) => current.filter((item) => item.id !== note.id));
+    } catch {
+      setError("Could not unpin note.");
+      setStatus("error");
+    }
+  }, [chatId]);
+
   const isPinned = (note: SharedNote) => globalPinnedIds.includes(note.id) || configuredPinnedIds.includes(note.id);
 
   const changeColor = useCallback((noteId: string) => {
@@ -391,7 +415,7 @@ export function NotesVoid({
   return (
     <div className={cn(
       "flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border/40 bg-muted/10",
-      compact && "absolute inset-0 z-10 rounded-none border-0 bg-transparent",
+      compact && "pointer-events-none absolute inset-0 z-10 rounded-none border-0 bg-transparent",
     )}>
       {!compact ? <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border/40 px-2 py-1.5">
         <div className="relative min-w-32 flex-1 sm:max-w-56">
@@ -532,7 +556,7 @@ export function NotesVoid({
             key={note.id}
             data-note-card
             className={cn(
-              "sticky-note pointer-events-auto absolute flex flex-col overflow-hidden rounded-md border border-black/10 shadow-md transition-shadow",
+              "sticky-note pointer-events-auto absolute flex cursor-move flex-col overflow-hidden rounded-md border border-black/10 shadow-md transition-shadow",
               note.id === frontNoteId && "ring-4 ring-primary ring-offset-2 ring-offset-background",
             )}
             style={{
@@ -625,13 +649,33 @@ export function NotesVoid({
                 }}
                 onClick={(event) => {
                   event.stopPropagation();
-                  if (isPinned(note)) void requestUnpin(note);
+                  if (isPinned(note)) void (compact ? unpinFromChat(note) : requestUnpin(note));
                   else setPinTarget(note);
                 }}
               >
                 {isPinned(note) ? <PinOff className="size-3" /> : <Pin className="size-3" />}
               </Button>
-              <Button
+              {compact ? (
+                <Button
+                  type="button"
+                  size="icon-xs"
+                  variant="ghost"
+                  className="size-6 text-black/70 hover:bg-black/10"
+                  aria-label="Open note in Shared Notes"
+                  title="Open in Shared Notes"
+                  onPointerDown={(event) => {
+                    event.stopPropagation();
+                    setFrontNoteId(note.id);
+                  }}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    window.dispatchEvent(new CustomEvent("ai-chat:open-note", { detail: { id: note.id, chatId } }));
+                  }}
+                >
+                  <ExternalLink className="size-3" />
+                </Button>
+              ) : null}
+              {!compact ? <Button
                 type="button"
                 size="icon-xs"
                 variant="ghost"
@@ -647,12 +691,12 @@ export function NotesVoid({
                 }}
               >
                 <Trash2 className="size-3" />
-              </Button>
+              </Button> : null}
             </div>
             <EditableMarkdown
               value={note.content}
               onChange={(value) => scheduleUpdate(note, { content: value })}
-              className="min-h-0 flex-1 bg-transparent text-xs text-black [&_.markdown-body]:text-black [&_.markdown-body_p]:my-1 [&_.markdown-body_ul]:my-1 [&_.markdown-body_ol]:my-1"
+              className="min-h-0 flex-1 cursor-text bg-transparent text-xs text-black [&_.markdown-body]:text-black [&_.markdown-body_p]:my-1 [&_.markdown-body_ul]:my-1 [&_.markdown-body_ol]:my-1"
               placeholder="Write a note…"
               aria-label="Note content"
               onPointerDown={(event) => {
