@@ -53,6 +53,41 @@ through MCP.
 
 ## Quick start
 
+### One-line installer
+
+For a guided installation with runtime detection, first-user creation, encrypted
+provider storage, native background services and an uninstall manifest, download
+the installer directly from GitHub:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/main/install/linux.sh | bash
+```
+
+On macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/main/install/macos.sh | bash
+```
+
+On Windows, run:
+
+```powershell
+irm https://raw.githubusercontent.com/f1shyondrugs/metis-ai/main/install/windows.ps1 | iex
+```
+
+The installer asks for all machine-specific values instead of assuming a user,
+home directory, port or public hostname. Review downloaded scripts before
+executing them in security-sensitive environments. The repository source can be
+overridden with `METIS_AI_REPO_URL`.
+
+The scripts are hosted in the repository under `install/`; the website and
+Nginx configuration are not required for installation. Every installer writes
+an installation manifest and a matching uninstaller into
+the selected installation directory. Use `--keep-data` (or `-KeepData` on
+Windows) to remove services and application files while retaining chats,
+memories, uploads and encrypted provider credentials. Use `--dry-run` before
+removal when reviewing an existing installation.
+
 ### Prerequisites
 
 - Node.js 20+

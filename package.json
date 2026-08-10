@@ -15,7 +15,7 @@
     "build": "next build",
     "start": "tsx server.mjs",
     "lint": "eslint .",
-    "test": "pnpm run test:providers && pnpm run test:shared && tsx --test scripts/security.test.ts",
+    "test": "pnpm run test:providers && pnpm run test:shared && tsx --test scripts/security.test.ts tests/installers.test.ts",
     "test:providers": "tsx --test tests/providers.test.ts tests/uploads.test.ts",
     "test:shared": "tsx --test tests/shared-context.test.ts",
     "typecheck": "tsc --noEmit"

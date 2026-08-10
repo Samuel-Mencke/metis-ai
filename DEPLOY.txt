@@ -41,9 +41,13 @@ Security checklist
 WebSocket browser server
 ------------------------
 
-The production start command is now `pnpm start`, which runs `tsx server.mjs`
+The production start command is `pnpm start`, which runs `tsx server.mjs`
 so the browser preview can use the authenticated WebSocket endpoint at
 `/api/browser/stream`. If systemd starts Next directly, update its `ExecStart`
-to the package start command (or `tsx /home/f1shy312/ai-chat/server.mjs`) before
+to the package start command (or `tsx <install-dir>/server.mjs`) before
 reloading the service. Do not expose the WebSocket endpoint without the same
 authenticated reverse-proxy boundary as the application.
+
+The generic Nginx template is `deploy/nginx/metis-ai.conf.template`. Replace
+`YOUR_DOMAIN` and `YOUR_PORT` for the local deployment; never copy a host's
+systemd unit or Nginx file unchanged to another machine.

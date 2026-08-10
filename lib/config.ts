@@ -19,6 +19,7 @@ function booleanEnv(name: string, fallback = false) {
 const root = env("AI_CHAT_ROOT") || process.cwd();
 const dataDir = env("CHAT_DATA_DIR") || path.join(root, "data");
 const port = numberEnv("PORT", 3100);
+const publicUrl = env("AI_CHAT_PUBLIC_URL") || `http://127.0.0.1:${port}`;
 
 export const config = {
   appName: env("APP_NAME") || "Metis AI",
@@ -26,11 +27,14 @@ export const config = {
   chatUsername: env("CHAT_USERNAME") || "admin",
   agentCwd: env("AGENT_CWD") || env("HOME") || os.homedir() || process.cwd(),
   root,
+  installDir: env("AI_CHAT_INSTALL_DIR") || root,
   dataDir,
   databasePath: env("CHAT_DB_PATH") || path.join(dataDir, "chat.sqlite"),
   mcpStateDir: env("AI_CHAT_MCP_STATE_DIR") || path.join(dataDir, "mcp-state"),
   internalUrl:
     env("AI_CHAT_INTERNAL_URL") || `http://127.0.0.1:${port}/api/internal/mcp-question`,
+  publicUrl,
+  serviceName: env("AI_CHAT_SERVICE_NAME") || "metis-ai",
   port,
   mcpPort: numberEnv("MCP_PORT", 8787),
   mcpPublicUrl: env("MCP_PUBLIC_URL") || `http://127.0.0.1:${numberEnv("MCP_PORT", 8787)}`,

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /home/f1shy312/ai-chat
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+cd "${AI_CHAT_ROOT:-$PROJECT_ROOT}"
 
 # A service restart must never try to serve an incomplete build. Deploys that
 # were interrupted leave .next without BUILD_ID; rebuild it as the service
