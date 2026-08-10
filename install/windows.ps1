@@ -118,7 +118,14 @@ Set-Location `$PSScriptRoot
 
 foreach ($suffix in @("app", "worker", "mcp")) {
   $taskName = "$serviceName-$suffix"
-  schtasks /Delete /TN $taskName /F 2>$null | Out-Null
+  try {
+    schtasks.exe /Query /TN $taskName 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+      schtasks.exe /Delete /TN $taskName /F 2>&1 | Out-Null
+    }
+  } catch {
+    # The task does not exist on a first installation.
+  }
   $targetArgs = switch ($suffix) {
     "app" { @("server.mjs") }
     "worker" { @("node_modules/tsx/dist/cli.mjs", "worker.ts") }
