@@ -97,7 +97,15 @@ export async function PATCH(req: Request, { params }: Params) {
   if (!chat) {
     return Response.json({ error: "Not found" }, { status: 404 });
   }
-  return Response.json({ chat });
+  // Metadata/session PATCHes do not need to send the complete transcript back
+  // to the browser. Large chats can contain several megabytes of messages,
+  // and returning them here multiplies the cost of otherwise tiny autosaves.
+  return Response.json({
+    chat: {
+      ...chat,
+      messages: [],
+    },
+  });
 }
 
 export async function DELETE(req: Request, { params }: Params) {
