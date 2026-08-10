@@ -92,7 +92,7 @@ EOF
   launchctl bootout "gui/$(id -u)" "$launch_dir/$label.plist" >/dev/null 2>&1 || true
   launchctl bootstrap "gui/$(id -u)" "$launch_dir/$label.plist"
 }
-write_plist app "$install_dir/server.mjs"
+write_plist app "$install_dir/node_modules/tsx/dist/cli.mjs $install_dir/server.mjs"
 write_plist worker "$install_dir/node_modules/tsx/dist/cli.mjs $install_dir/worker.ts"
 write_plist mcp "$install_dir/lib/mcp-core/gateway-core.mjs"
 curl --fail --silent --show-error --retry 20 --retry-delay 1 "http://127.0.0.1:$port/api/status" >/dev/null ||
