@@ -129,7 +129,7 @@ EnvironmentFile=$install_dir/.env
 Environment=HOME=$HOME
 Environment=NODE_ENV=production
 Environment=PATH=$node_home/bin:$install_dir/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=$node_bin $install_dir/server.mjs
+ExecStart=$node_bin $install_dir/node_modules/tsx/dist/cli.mjs $install_dir/server.mjs
 Restart=always
 RestartSec=5
 

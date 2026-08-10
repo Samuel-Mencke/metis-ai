@@ -127,7 +127,7 @@ foreach ($suffix in @("app", "worker", "mcp")) {
     # The task does not exist on a first installation.
   }
   $targetArgs = switch ($suffix) {
-    "app" { @("server.mjs") }
+    "app" { @("node_modules/tsx/dist/cli.mjs", "server.mjs") }
     "worker" { @("node_modules/tsx/dist/cli.mjs", "worker.ts") }
     default { @("lib/mcp-core/gateway-core.mjs") }
   }
