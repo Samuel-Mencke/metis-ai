@@ -98,6 +98,16 @@ function extractProvidedAttachment(value: unknown): ProvidedAttachment | null {
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : {};
+    } catch {
+      return {};
+    }
+  }
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
@@ -220,7 +230,13 @@ function extractSubagent(
   const nestedTools = steps
     .map((step) => asRecord(step))
     .flatMap((item) => {
-      const candidates = Array.isArray(item.tools) ? item.tools : item.tool ? [item.tool] : [];
+      const candidates = Array.isArray(item.tools)
+        ? item.tools
+        : item.toolCall || item.tool_call
+          ? [item.toolCall || item.tool_call]
+          : item.tool
+            ? [item.tool]
+            : [];
       return candidates.map((candidate) => asRecord(candidate));
     })
     .map((item, index) => {
@@ -234,15 +250,18 @@ function extractSubagent(
         ...(item.result !== undefined ? { result: JSON.stringify(item.result) } : {}),
       } satisfies ToolPart;
     });
+  let thinking = "";
   const messages = steps
     .map((step) => {
       const item = asRecord(step);
+      const thinkingText = asText(item.thinkingMessage ?? item.thinking ?? item.reasoning);
+      if (thinkingText) thinking += `${thinking ? "\n\n" : ""}${thinkingText}`;
       const role = typeof item.role === "string"
         ? item.role
         : typeof item.type === "string"
           ? item.type
           : "assistant";
-      const text = asText(item.text ?? item.content ?? item.message ?? item.result);
+      const text = asText(item.text ?? item.content ?? item.message ?? item.response ?? item.answer ?? item.result);
       return text ? { role, text } : null;
     })
     .filter((message): message is { role: string; text: string } => Boolean(message));
@@ -262,6 +281,7 @@ function extractSubagent(
     mode,
     model,
     prompt,
+    ...(thinking ? { thinking } : {}),
     ...(messages.length ? { messages } : {}),
     ...(nestedTools.length ? { tools: nestedTools } : {}),
   };

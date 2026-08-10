@@ -1647,6 +1647,10 @@ export default function AppShell() {
   const [cancellingSubagent, setCancellingSubagent] = useState(false);
   const [subagentsExpanded, setSubagentsExpanded] = useState(true);
   const [revertTarget, setRevertTarget] = useState<Msg | null>(null);
+
+  useEffect(() => {
+    setActiveSubagent(null);
+  }, [activeChatId]);
   const [manualCleanupTools, setManualCleanupTools] = useState<ToolPart[]>([]);
   const [reverting, setReverting] = useState(false);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
@@ -2347,6 +2351,9 @@ export default function AppShell() {
       .filter((part) => part.kind === "subagent"),
   );
   const runningSubagents = subagentOutputs.filter((tool) => tool.status === "running");
+  const selectedSubagent = activeSubagent
+    ? subagentOutputs.find((tool) => tool.id === activeSubagent.id) ?? activeSubagent
+    : null;
 
   function handleTouchStart(event: React.TouchEvent<HTMLDivElement>) {
     if (event.touches.length !== 1) {
@@ -6866,7 +6873,10 @@ export default function AppShell() {
                     <button
                       key={subagent.id}
                       type="button"
-                      className="relative flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-white/[0.04] hover:text-foreground"
+                      className={cn(
+                        "relative flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-white/[0.04] hover:text-foreground",
+                        selectedSubagent?.id === subagent.id && "bg-white/[0.08] text-foreground",
+                      )}
                       onClick={() => {
                         setMobileNavOpen(false);
                         setActiveSubagent({ ...subagent });
@@ -6876,9 +6886,6 @@ export default function AppShell() {
                       <span className="absolute -left-3 top-1/2 w-3 border-t border-border/40" aria-hidden="true" />
                       <span className={cn("size-1.5 shrink-0 rounded-full", subagent.status === "running" ? "animate-pulse bg-purple-400" : "bg-muted-foreground/50")} />
                       <span className="min-w-0 flex-1 truncate">{title}</span>
-                      {subagent.subagent?.model ? (
-                        <span className="max-w-24 shrink-0 truncate text-[10px] text-muted-foreground/60">{subagent.subagent.model}</span>
-                      ) : null}
                     </button>
                   );
                 })}
@@ -7793,11 +7800,15 @@ export default function AppShell() {
                             <button
                               key={tool.id}
                               type="button"
-                              className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs hover:bg-muted/40"
+                              className={cn(
+                                "flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs hover:bg-muted/40",
+                                selectedSubagent?.id === tool.id && "bg-muted/60",
+                              )}
                               onClick={() => setActiveSubagent(tool)}
                             >
                               {tool.status === "running" ? <LoaderCircle className="size-3 animate-spin text-purple-300" /> : <Bot className="size-3 text-muted-foreground" />}
                               <span className="min-w-0 flex-1 truncate">{tool.subagent?.title || tool.subagent?.prompt || tool.name}</span>
+                              {tool.subagent?.model ? <span className="max-w-28 shrink-0 truncate text-[10px] text-muted-foreground/70">{tool.subagent.model}</span> : null}
                               <span className="shrink-0 text-[10px] text-muted-foreground/70">{tool.status}</span>
                             </button>
                           ))}
@@ -8557,12 +8568,14 @@ export default function AppShell() {
 
       <AttachmentViewer active={activeAttachment} onOpenChange={(open) => !open && setActiveAttachment(null)} />
 
-      {activeSubagent ? (
+      {selectedSubagent ? (
         <SubagentChatView
-          tool={activeSubagent}
+          key={selectedSubagent.id}
+          tool={selectedSubagent}
           onBack={() => setActiveSubagent(null)}
           onCancel={() => void cancelSubagent()}
           cancelling={cancellingSubagent}
+          sidebarWidth={desktopSidebarOpen ? sidebarWidth : 0}
         />
       ) : null}
 

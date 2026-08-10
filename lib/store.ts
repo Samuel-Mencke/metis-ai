@@ -26,6 +26,7 @@ export type ToolPart = {
     mode?: string;
     model?: string;
     prompt?: string;
+    thinking?: string;
     messages?: Array<{ role: string; text: string; timestamp?: string }>;
     tools?: ToolPart[];
   };
