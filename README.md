@@ -69,6 +69,18 @@ On macOS:
 curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/macos.sh | bash
 ```
 
+For agents and CI, macOS also supports a prompt-free argument mode. When
+piping a script to Bash, use `bash -s --` so the arguments are passed to the
+installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/macos.sh |
+  bash -s -- --non-interactive --password 'replace-with-a-strong-password'
+```
+
+Use `--help` for all available options. Prefer `--password-file` or another
+secret manager when the password should not appear in process listings.
+
 On Windows, run:
 
 ```powershell
