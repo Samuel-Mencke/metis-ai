@@ -18,6 +18,7 @@ export type AgentJob = {
   id: string;
   chatId: string;
   userId?: string;
+  incognito?: boolean;
   message: string;
   messageId?: string;
   referenceText?: string;

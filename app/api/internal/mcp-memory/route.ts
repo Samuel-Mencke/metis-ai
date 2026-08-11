@@ -11,6 +11,9 @@ function authorized(req: Request) {
 export async function POST(req: Request) {
   if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
   const userId = req.headers.get("x-ai-chat-user-id")?.trim() || undefined;
+  if (req.headers.get("x-ai-chat-incognito") === "1") {
+    return Response.json({ error: "Memory tools are unavailable in Incognito." }, { status: 403 });
+  }
   const body = await req.json().catch(() => ({})) as Record<string, unknown>;
   const action = typeof body.action === "string" ? body.action : "list";
 

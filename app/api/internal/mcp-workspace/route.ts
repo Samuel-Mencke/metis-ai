@@ -14,6 +14,9 @@ function authorized(req: Request) {
 
 export async function POST(req: Request) {
   if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  if (req.headers.get("x-ai-chat-incognito") === "1") {
+    return Response.json({ error: "Workspace tools are unavailable in Incognito." }, { status: 403 });
+  }
 
   const chatId = req.headers.get("x-ai-chat-id")?.trim() || "";
   const userId = req.headers.get("x-ai-chat-user-id")?.trim() || undefined;

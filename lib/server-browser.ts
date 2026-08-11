@@ -39,7 +39,7 @@ type BrowserResult = {
   activeTabId: string;
   url: string;
   title: string;
-  tabs: Array<{ id: string; url: string; title: string }>;
+  tabs: Array<{ id: string; url: string; title: string; favicon?: string }>;
   screenshot?: string;
   snapshot?: string;
   viewport: { width: number; height: number };
@@ -158,7 +158,19 @@ function tabIdFor(state: BrowserContextState, requested?: string) {
 
 async function pageInfo(state: BrowserContextState, tabId: string) {
   const page = state.tabs.get(tabId)!;
-  return { id: tabId, url: page.url(), title: await page.title().catch(() => "New tab") };
+  const url = page.url();
+  const faviconHref = await page.locator('link[rel~="icon"], link[rel="shortcut icon"]').first().getAttribute("href").catch(() => null);
+  let favicon: string | undefined;
+  if (faviconHref) {
+    try {
+      favicon = new URL(faviconHref, url).toString();
+    } catch {
+      favicon = undefined;
+    }
+  } else if (url && url !== "about:blank") {
+    favicon = `${new URL(url).origin}/favicon.ico`;
+  }
+  return { id: tabId, url, title: await page.title().catch(() => "New tab"), favicon };
 }
 
 async function resultFor(state: BrowserContextState, tabId: string): Promise<BrowserResult> {
@@ -209,17 +221,22 @@ export async function setBrowserViewport(
 export async function performBrowserAction(ownerId: string, chatId: string, action: BrowserAction): Promise<BrowserResult> {
   if (!ownerId || !chatId) throw new Error("Browser actions require an authenticated user and chat");
   const state = await getSession(ownerId, chatId);
-  let tabId = tabIdFor(state, action.tabId);
-  let page = state.tabs.get(tabId)!;
+  let tabId: string;
+  let page: Page;
 
   if (action.action === "new_tab") {
     if (state.tabs.size >= MAX_TABS) throw new Error(`A browser session can have at most ${MAX_TABS} tabs`);
-    tabId = `browser-${Date.now()}`;
+    tabId = `browser-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     page = await state.context.newPage();
     await installRequestGuard(page);
     state.tabs.set(tabId, page);
     state.activeTabId = tabId;
-  } else if (action.action === "close_tab") {
+  } else {
+    tabId = tabIdFor(state, action.tabId);
+    page = state.tabs.get(tabId)!;
+  }
+
+  if (action.action === "close_tab") {
     if (state.tabs.size <= 1) throw new Error("The last browser tab cannot be closed");
     await page.close();
     state.tabs.delete(tabId);

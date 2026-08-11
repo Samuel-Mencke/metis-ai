@@ -27,6 +27,7 @@ export async function POST(req: Request) {
     browserContext?: BrowserContext;
     modelId?: string;
     modelParams?: Array<{ id: string; value: string }>;
+    incognito?: boolean;
   } = {};
   try {
     body = (await req.json()) as {
@@ -34,6 +35,7 @@ export async function POST(req: Request) {
       browserContext?: BrowserContext;
       modelId?: string;
       modelParams?: Array<{ id: string; value: string }>;
+      incognito?: boolean;
     };
   } catch {
     body = {};
@@ -47,6 +49,7 @@ export async function POST(req: Request) {
       id: body.modelId?.trim(),
       params: Array.isArray(body.modelParams) ? body.modelParams : undefined,
     },
+    { incognito: body.incognito === true },
   );
   return Response.json({ chat }, { status: 201 });
 }

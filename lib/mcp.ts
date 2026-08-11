@@ -18,6 +18,7 @@ export type McpContext = {
   chatId?: string;
   userId?: string;
   jobId?: string;
+  incognito?: boolean;
 };
 
 export function getMcpServers(context: McpContext = {}): McpServerMap {
@@ -29,6 +30,7 @@ export function getMcpServers(context: McpContext = {}): McpServerMap {
       MCP_CHAT_ID: context.chatId,
       MCP_USER_ID: context.userId,
       MCP_JOB_ID: context.jobId,
+      MCP_INCOGNITO: context.incognito ? "1" : undefined,
       MCP_AGENT_CWD: agentCwd,
     }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
   );

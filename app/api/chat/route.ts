@@ -33,6 +33,7 @@ type ChatBody = {
   modelParams?: Array<{ id: string; value: string }>;
   attachments?: IncomingAttachment[];
   storedAttachments?: StoredAttachment[];
+  incognito?: boolean;
 };
 
 export async function POST(req: Request) {
@@ -75,8 +76,13 @@ export async function POST(req: Request) {
   }
   const chat = getChat(chatId, ownerId);
   if (!chat) return Response.json({ error: "Chat not found" }, { status: 404 });
+  // The persisted chat is the source of truth. The client flag can be stale
+  // after switching tabs or restoring an in-memory snapshot.
+  if (chat.incognito) {
+    references = [];
+  }
   const resolvedExplicit = resolveReferences(ownerId, chatId, references);
-  const pinnedReferences = getPinnedNotes(ownerId, chatId);
+  const pinnedReferences = chat.incognito ? [] : getPinnedNotes(ownerId, chatId);
   const seenReferences = new Set<string>();
   references = [...pinnedReferences, ...resolvedExplicit].filter((reference) => {
     const key = `${reference.kind}:${reference.id}`;
@@ -142,7 +148,7 @@ export async function POST(req: Request) {
       userId: ownerId,
       message,
       messageId,
-      ...(body.referenceText ? { referenceText: body.referenceText.slice(0, 100_000) } : {}),
+      ...(chat.incognito ? {} : (body.referenceText ? { referenceText: body.referenceText.slice(0, 100_000) } : {})),
       ...(references.length ? { references } : {}),
       ...(body.agentId ? { agentId: body.agentId } : {}),
       ...(requestedModelId ? { modelId: requestedModelId } : {}),
@@ -150,6 +156,7 @@ export async function POST(req: Request) {
       ...((stored.length ? stored : storedAttachments).length
         ? { attachments: stored.length ? stored : storedAttachments }
         : {}),
+      ...(chat.incognito ? { incognito: true } : {}),
     });
   } catch (error) {
     if (error instanceof Error && error.name === "ActiveChatRun") {

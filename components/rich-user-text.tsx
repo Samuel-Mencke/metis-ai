@@ -68,6 +68,11 @@ export function RichUserText({
                 href={part.text}
                 className="underline underline-offset-2 hover:text-primary"
                 onClick={(event) => {
+                  if (event.ctrlKey || event.metaKey) {
+                    event.preventDefault();
+                    window.open(part.text, "_blank", "noopener,noreferrer");
+                    return;
+                  }
                   event.preventDefault();
                   window.dispatchEvent(new CustomEvent("ai-chat:open-browser", { detail: part.text }));
                 }}

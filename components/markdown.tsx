@@ -80,6 +80,11 @@ function MarkdownLink({
           return;
         }
         if (!isWebUrl || !href) return;
+        if (event.ctrlKey || event.metaKey) {
+          event.preventDefault();
+          window.open(href, "_blank", "noopener,noreferrer");
+          return;
+        }
         event.preventDefault();
         window.dispatchEvent(new CustomEvent("ai-chat:open-browser", { detail: href }));
       }}
@@ -169,6 +174,10 @@ function TaskCheckbox({
       checked={value}
       disabled={!interactive}
       contentEditable={false}
+      onPointerDown={(event) => {
+        event.stopPropagation();
+        props.onPointerDown?.(event);
+      }}
       onChange={(event) => {
         setValue(event.currentTarget.checked);
         if (interactive) {

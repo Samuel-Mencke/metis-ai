@@ -136,6 +136,7 @@ export function listChatsForUser(
   ownerId?: string,
   options: { includeArchived?: boolean } = {},
 ): ChatIndexEntry[] {
+  cleanupExpiredIncognitoChats();
   const db = getDatabase();
   const cacheKey = `${ownerId || "*"}:${options.includeArchived ? "all" : "active"}`;
   if (chatIndexCache?.key === cacheKey && chatIndexCache.expiresAt > Date.now()) {
@@ -179,6 +180,7 @@ export function listChatsForUser(
   const result: ChatIndexEntry[] = rows.flatMap((row) => {
       const item = row as Record<string, unknown>;
       const archived = Boolean(item.archived);
+      if (item.incognito) return [];
       if (!options.includeArchived && archived) return [];
       const pendingQuestion = parseJsonField<PendingChatQuestion>(item.pendingQuestion);
       const share = parseJsonField<ChatShare>(item.share);
@@ -284,9 +286,21 @@ export function getChat(id: string, ownerId?: string): Chat | null {
   const updatedAt = (row as { updatedAt?: string } | undefined)?.updatedAt;
   const cached = chatCache.get(id);
   if (cached && cached.updatedAt === updatedAt) {
+    if (cached.chat.incognito && cached.chat.expiresAt && new Date(cached.chat.expiresAt).getTime() <= Date.now()) {
+      getDatabase().prepare("DELETE FROM chats WHERE id = ?").run(id);
+      chatCache.delete(id);
+      chatIndexCache = null;
+      return null;
+    }
     return cached.chat.ownerId && ownerId && cached.chat.ownerId !== ownerId ? null : cached.chat;
   }
   const chat = rowChat(row);
+  if (chat?.incognito && chat.expiresAt && new Date(chat.expiresAt).getTime() <= Date.now()) {
+    getDatabase().prepare("DELETE FROM chats WHERE id = ?").run(id);
+    chatCache.delete(id);
+    chatIndexCache = null;
+    return null;
+  }
   if (chat && updatedAt) chatCache.set(id, { updatedAt, chat });
   return chat && ownerId && chat.ownerId && chat.ownerId !== ownerId ? null : chat;
 }
@@ -416,12 +430,16 @@ export function createChat(
   browserContext?: BrowserContext,
   ownerId?: string,
   model?: { id?: string; params?: Array<{ id: string; value: string }> },
+  options?: { incognito?: boolean },
 ): Chat {
   return transaction(() => {
     const timestamp = now();
     const chat: Chat = {
       id: randomUUID(),
       ...(ownerId ? { ownerId } : {}),
+      ...(options?.incognito
+        ? { incognito: true, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() }
+        : {}),
       title: title.trim() || "New chat",
       ...(model?.id ? { modelId: model.id } : {}),
       ...(model?.params?.length ? { modelParams: model.params } : {}),
@@ -433,6 +451,20 @@ export function createChat(
     saveChatInternal(chat);
     return chat;
   });
+}
+
+export function cleanupExpiredIncognitoChats() {
+  const result = getDatabase().prepare(
+    "DELETE FROM chats WHERE json_extract(data, '$.incognito') = 1 AND json_extract(data, '$.expiresAt') IS NOT NULL AND json_extract(data, '$.expiresAt') <= ?",
+  ).run(now());
+  if (result.changes > 0) {
+    chatIndexCache = null;
+    for (const id of [...chatCache.keys()]) {
+      const chat = chatCache.get(id)?.chat;
+      if (chat?.incognito) chatCache.delete(id);
+    }
+  }
+  return result.changes;
 }
 
 export function saveChat(chat: Chat) {

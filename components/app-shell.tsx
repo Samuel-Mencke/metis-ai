@@ -40,6 +40,8 @@ import {
   FileClock,
   Fullscreen,
   Globe2,
+  Eye,
+  EyeOff,
   Image as ImageIcon,
   KeyRound,
   Link2,
@@ -471,6 +473,7 @@ function withSyncedFlat(parts: MsgPart[], extra: Partial<Msg> = {}): Partial<Msg
 type ChatIndexEntry = {
   id: string;
   title: string;
+  incognito?: boolean;
   keywords?: string[];
   updatedAt: string;
   createdAt: string;
@@ -936,6 +939,7 @@ function ContextUsageCircle({
 type ChatSnapshot = {
   messages: Msg[];
   chatTitle: string;
+  incognito?: boolean;
   updatedAt?: string;
   agentId?: string;
   modelId: string;
@@ -960,13 +964,31 @@ type ChatRuntime = {
 type ActiveDiff = { name: string; path?: string; detail?: string; input?: string; diff?: ToolPart["diff"] };
 type ActiveSubagent = ToolPart;
 type ActiveRawTool = ToolPart;
-type BrowserTab = { id: string; title: string; url: string };
+type BrowserTab = { id: string; title: string; url: string; favicon?: string };
 type BrowserContext = {
   tabs: BrowserTab[];
   activeTabId: string;
   sessionKey: string;
   updatedAt: string;
 };
+
+function BrowserTabIcon({ tab }: { tab: BrowserTab }) {
+  return (
+    <span className="relative size-3.5 shrink-0" aria-hidden="true">
+      <Globe2 className="absolute inset-0 size-3.5 text-muted-foreground" />
+      {tab.favicon ? (
+        <img
+          src={tab.favicon}
+          alt=""
+          className="relative size-3.5 rounded-sm object-contain"
+          onError={(event) => {
+            event.currentTarget.style.display = "none";
+          }}
+        />
+      ) : null}
+    </span>
+  );
+}
 type MonitorGpu = { id: string; name: string; utilizationPercent: number | null; memoryUsedBytes: number | null; memoryTotalBytes: number | null; temperatureC: number | null };
 type MonitorMetric = { timestamp: string; cpuPercent: number; ramUsedBytes: number; ramTotalBytes: number; load: number[]; networkRxBytesPerSecond: number; networkTxBytesPerSecond: number; gpus: MonitorGpu[] };
 type MonitorPayload = { current: MonitorMetric | null; history: MonitorMetric[] };
@@ -1583,6 +1605,8 @@ export default function AppShell() {
   const [hasEarlierMessages, setHasEarlierMessages] = useState(false);
   const [loadingEarlierMessages, setLoadingEarlierMessages] = useState(false);
   const [chatTitle, setChatTitle] = useState("New chat");
+  const [incognito, setIncognito] = useState(false);
+  const [activeChatIncognito, setActiveChatIncognito] = useState(false);
   const [loadingChatId, setLoadingChatId] = useState<string | null>(null);
   const [agentId, setAgentId] = useState<string | undefined>();
   const [modelId, setModelId] = useState("");
@@ -2072,7 +2096,7 @@ export default function AppShell() {
   ]);
 
   useEffect(() => {
-    if (!activeChatId) return;
+    if (!activeChatId || activeChatIncognito) return;
     const browserContext = normalizeBrowserContext(
       {
         tabs: browserTabs,
@@ -2090,10 +2114,10 @@ export default function AppShell() {
       });
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [activeChatId, activeBrowserTabId, browserTabs]);
+  }, [activeChatId, activeChatIncognito, activeBrowserTabId, browserTabs]);
 
   useEffect(() => {
-    if (!activeChatId) return;
+    if (!activeChatId || activeChatIncognito) return;
     const timer = window.setTimeout(() => {
       void fetch(`/api/chats/${activeChatId}`, {
         method: "PATCH",
@@ -2118,6 +2142,7 @@ export default function AppShell() {
     return () => window.clearTimeout(timer);
   }, [
     activeChatId,
+    activeChatIncognito,
     remoteTerminalCwd,
     remoteFileCwd,
     terminalTabs,
@@ -2130,7 +2155,7 @@ export default function AppShell() {
   ]);
 
   useEffect(() => {
-    if (!activeChatId) return;
+    if (!activeChatId || activeChatIncognito) return;
     let disposed = false;
     let controller: AbortController | null = null;
 
@@ -2216,10 +2241,10 @@ export default function AppShell() {
       window.clearInterval(timer);
       controller?.abort();
     };
-  }, [activeChatId]);
+  }, [activeChatId, activeChatIncognito]);
 
   useEffect(() => {
-    if (!activeChatId) {
+    if (!activeChatId || activeChatIncognito) {
       setRecoveryStatus(null);
       setRecoveryJobId(null);
       return;
@@ -2252,11 +2277,11 @@ export default function AppShell() {
     return () => {
       disposed = true;
     };
-  }, [activeChatId]);
+  }, [activeChatId, activeChatIncognito]);
 
   const persistActiveSnapshot = useCallback(() => {
     const id = activeChatIdRef.current;
-    if (!id) return;
+    if (!id || activeChatIncognito) return;
     const s = stateRef.current;
     const cachedMessages = s.messages.slice(-CHAT_MESSAGE_PRELOAD_MAX).map((m) => ({
       ...m,
@@ -2266,6 +2291,7 @@ export default function AppShell() {
     chatCacheRef.current.set(id, {
       messages: cachedMessages,
       chatTitle: s.chatTitle,
+      incognito: false,
       agentId: s.agentId,
       modelId: s.modelId,
       modelParams: s.modelParams,
@@ -2328,7 +2354,7 @@ export default function AppShell() {
         },
       }),
     });
-  }, []);
+  }, [activeChatIncognito]);
 
   const navigateChat = useCallback(
     (id: string | null, replace = false) => {
@@ -3160,6 +3186,8 @@ export default function AppShell() {
     setActiveChatId(id);
     activeChatIdRef.current = id;
     setChatTitle(snap.chatTitle);
+    setActiveChatIncognito(Boolean(snap.incognito));
+    setIncognito(Boolean(snap.incognito));
     setAgentId(snap.agentId);
     setModelId(snap.modelId);
     setModelParams(
@@ -3246,6 +3274,11 @@ export default function AppShell() {
 
       setActiveChatId(null);
       activeChatIdRef.current = null;
+      if (activeChatIncognito && previousChatId) {
+        void fetch(`/api/chats/${previousChatId}`, { method: "DELETE" });
+      }
+      setActiveChatIncognito(false);
+      setIncognito(false);
       setBusy(false);
       setChatTitle("New chat");
       setAgentId(undefined);
@@ -3281,7 +3314,7 @@ export default function AppShell() {
       setMobileNavOpen(false);
       setPaneKey((k) => k + 1);
     },
-    [navigateChat, persistActiveSnapshot],
+    [activeChatIncognito, navigateChat, persistActiveSnapshot],
   );
 
   const loadChat = useCallback(
@@ -3328,7 +3361,13 @@ export default function AppShell() {
       setQuestionCustomActive([]);
 
       const useChatCache = true;
-      if (cached && cached.messages.length > 0 && useChatCache && !opts?.forceReload) {
+      if (
+        cached &&
+        cached.messages.length > 0 &&
+        cached.incognito !== undefined &&
+        useChatCache &&
+        !opts?.forceReload
+      ) {
         if (chatLoadRequestRef.current !== requestId) return false;
         applySnapshot(id, cached);
         setLoadingChatId(null);
@@ -3353,6 +3392,7 @@ export default function AppShell() {
             const next: ChatSnapshot = {
               messages: mergeMessages(cached.messages, mapApiMessages(data.chat.messages, data.chat.runStatus)),
               chatTitle: data.chat.title,
+              incognito: Boolean(data.chat.incognito),
               updatedAt: data.chat.updatedAt,
               agentId: data.chat.agentId,
               modelId: mid,
@@ -3374,6 +3414,8 @@ export default function AppShell() {
               activeChatIdRef.current !== id ||
               chatLoadRequestRef.current !== requestId
             ) return;
+            setActiveChatIncognito(Boolean(next.incognito));
+            setIncognito(Boolean(next.incognito));
             setChatTitle(next.chatTitle);
             setAgentId(next.agentId);
             setModelId(next.modelId);
@@ -3449,6 +3491,7 @@ export default function AppShell() {
       const snap: ChatSnapshot = {
         messages: mapApiMessages(data.chat.messages, data.chat.runStatus),
         chatTitle: data.chat.title,
+        incognito: Boolean(data.chat.incognito),
         updatedAt: data.chat.updatedAt,
         agentId: data.chat.agentId,
         modelId: mid,
@@ -3698,10 +3741,10 @@ export default function AppShell() {
       if (current !== routeChatId) {
         void loadChat(routeChatId, { skipNav: true });
       }
-    } else if (current) {
+    } else if (current && !activeChatIncognito) {
       openDraft({ skipNav: true });
     }
-  }, [authed, routeChatId, loadChat, openDraft]);
+  }, [activeChatIncognito, authed, routeChatId, loadChat, openDraft]);
 
   useEffect(() => {
     if (!authed || !activeChatId || loadingChatId) {
@@ -3799,9 +3842,9 @@ export default function AppShell() {
     const openLinkedUrl = (event: Event) => {
       const url = (event as CustomEvent<unknown>).detail;
       if (typeof url !== "string" || !/^https?:\/\//i.test(url)) return;
-      navigateBrowser(url);
       setWorkspaceTab("browser");
       setWorkspaceOpen(true);
+      openBrowserTab(url);
     };
     const openLinkedReference = async (event: Event) => {
       const reference = (event as CustomEvent<ReferenceItem>).detail;
@@ -4000,7 +4043,7 @@ export default function AppShell() {
 
   // Keep in-memory chat cache warm so switches stay instant
   useEffect(() => {
-    if (!activeChatId) return;
+    if (!activeChatId || activeChatIncognito) return;
     const cachedMessages = messages.slice(-CHAT_MESSAGE_PRELOAD_MAX).map((m) => ({
       ...m,
       streaming: false,
@@ -4009,6 +4052,7 @@ export default function AppShell() {
     chatCacheRef.current.set(activeChatId, {
       messages: cachedMessages,
       chatTitle,
+      incognito: false,
       agentId,
       modelId,
       modelParams,
@@ -4049,6 +4093,7 @@ export default function AppShell() {
     });
   }, [
     activeChatId,
+    activeChatIncognito,
     messages,
     chatTitle,
     agentId,
@@ -4274,6 +4319,24 @@ export default function AppShell() {
     navigateChat(null, true);
   }
 
+  async function toggleIncognito() {
+    if (incognito) {
+      const id = activeChatIdRef.current;
+      if (id && activeChatIncognito) {
+        await fetch(`/api/chats/${id}`, { method: "DELETE" });
+        chatCacheRef.current.delete(id);
+        await openDraft();
+      } else {
+        setIncognito(false);
+      }
+      return;
+    }
+    setIncognito(true);
+    setReferences([]);
+    setReferenceText("");
+    setReferenceMenu(null);
+  }
+
   async function ensureChatId(): Promise<string | null> {
     if (activeChatIdRef.current) return activeChatIdRef.current;
     const browserContext = normalizeBrowserContext(
@@ -4292,16 +4355,19 @@ export default function AppShell() {
         browserContext,
         modelId: stateRef.current.modelId,
         modelParams: stateRef.current.modelParams,
+        incognito,
       }),
     });
     if (!res.ok) return null;
     const data = (await res.json()) as { chat: Chat };
     setActiveChatId(data.chat.id);
     activeChatIdRef.current = data.chat.id;
+    setActiveChatIncognito(Boolean(data.chat.incognito));
     setChatTitle(data.chat.title);
     chatCacheRef.current.set(data.chat.id, {
       messages: stateRef.current.messages,
       chatTitle: data.chat.title,
+      incognito: Boolean(data.chat.incognito),
       agentId: undefined,
       modelId: stateRef.current.modelId,
       modelParams: stateRef.current.modelParams,
@@ -4528,6 +4594,7 @@ export default function AppShell() {
       chatCacheRef.current.set(chatId, {
         messages: nextMessages,
         chatTitle: data.chat.title,
+      incognito: Boolean(data.chat.incognito),
         agentId: data.chat.agentId,
         modelId: nextModelId,
         modelParams,
@@ -5005,7 +5072,7 @@ export default function AppShell() {
     e?.preventDefault();
     const text = (textOverride ?? input).trim();
     const filesToSend = attachmentsOverride ?? pendingFiles;
-    const referencesToSend = referencesOverride ?? references;
+    const referencesToSend = incognito ? [] : (referencesOverride ?? references);
     const storedAttachmentsToSend = storedAttachmentsOverride ?? restoredAttachments;
     const isOverride = textOverride !== undefined;
     const hasComposerContent =
@@ -5013,7 +5080,7 @@ export default function AppShell() {
       filesToSend.length > 0 ||
       storedAttachmentsToSend.length > 0 ||
       referencesToSend.length > 0 ||
-      Boolean((referenceTextOverride ?? referenceText).trim());
+      !incognito && Boolean((referenceTextOverride ?? referenceText).trim());
     if (
       (pendingQuestionIdRef.current && !isOverride) ||
       (!hasComposerContent) ||
@@ -5076,7 +5143,7 @@ export default function AppShell() {
         (localAttachments.length
           ? `Attached ${localAttachments.length} file${localAttachments.length === 1 ? "" : "s"}`
           : ""),
-      ...((referenceTextOverride ?? referenceText).trim()
+      ...(!incognito && (referenceTextOverride ?? referenceText).trim()
         ? { referenceText: (referenceTextOverride ?? referenceText).trim() }
         : {}),
       ...(localAttachments.length ? { attachments: localAttachments } : {}),
@@ -5129,7 +5196,7 @@ export default function AppShell() {
           chatId,
           messageId: userMsg.id,
           message: text,
-          referenceText: (referenceTextOverride ?? referenceText) || undefined,
+          referenceText: !incognito ? ((referenceTextOverride ?? referenceText) || undefined) : undefined,
           references: referencesToSend.length ? referencesToSend : undefined,
           agentId: agentId || undefined,
           modelId,
@@ -5140,6 +5207,7 @@ export default function AppShell() {
           ...(storedAttachmentsToSend.length
             ? { storedAttachments: storedAttachmentsToSend }
             : {}),
+          incognito,
         }),
         signal: ac.signal,
       });
@@ -6824,7 +6892,6 @@ export default function AppShell() {
           type="button"
           className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] text-muted-foreground transition-colors hover:bg-white/[0.03] hover:text-foreground"
           onClick={() => {
-            setDesktopSidebarOpen(false);
             setMobileNavOpen(false);
             setCommandPaletteOpen(true);
           }}
@@ -7074,6 +7141,21 @@ export default function AppShell() {
         onOpenChat={(chatId, messageId) => {
           void openSearchResult(chatId, messageId);
         }}
+        onOpenNotes={() => {
+          setWorkspaceOpen(false);
+          setNotesOpen(true);
+          setFocusedNoteId(null);
+          setMobileNavOpen(false);
+          navigateChat("notes");
+        }}
+        onOpenNote={(noteId) => {
+          setWorkspaceOpen(false);
+          setNotesOpen(true);
+          setFocusedNoteId(null);
+          setMobileNavOpen(false);
+          window.setTimeout(() => setFocusedNoteId(noteId), 0);
+          navigateChat("notes");
+        }}
         onOpenMemories={() => {
           void loadMemories();
           setSettingsOpen(true);
@@ -7208,7 +7290,9 @@ export default function AppShell() {
           ) : (
             <div className="flex-1" />
           )}
-          {!notesOpen && !isDraft && !isEmpty ? (
+          {!notesOpen && !isDraft && activeChatIncognito ? (
+            <span className="px-2 text-xs text-muted-foreground">Incognito</span>
+          ) : !notesOpen && !isDraft && !isEmpty ? (
             <Button
               type="button"
               variant="ghost"
@@ -7220,6 +7304,20 @@ export default function AppShell() {
               disabled={shareBusy}
             >
               <Share2 className="size-4" />
+            </Button>
+          ) : null}
+          {isDraft && !notesOpen ? (
+            <Button
+              type="button"
+              variant={incognito ? "secondary" : "ghost"}
+              size="icon"
+              className="size-8"
+              aria-label={incognito ? "Turn off Incognito" : "Turn on Incognito"}
+              aria-pressed={incognito}
+              title={incognito ? "Turn off Incognito" : "Turn on Incognito"}
+              onClick={() => void toggleIncognito()}
+            >
+              {incognito ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
             </Button>
           ) : null}
           {!notesOpen ? (
@@ -7256,9 +7354,17 @@ export default function AppShell() {
               queuedMessages.length ? "justify-end" : "justify-center",
             )}
           >
-            <h2 className="mb-8 text-2xl font-medium tracking-tight text-foreground/90">
+            <h2 className={cn(
+              "text-2xl font-medium tracking-tight text-foreground/90",
+              incognito ? "mb-2" : "mb-8",
+            )}>
               What&apos;s on your mind?
             </h2>
+            {incognito ? (
+              <p className="mb-8 max-w-md animate-in fade-in slide-in-from-top-1 text-center text-sm leading-relaxed text-muted-foreground duration-500">
+                Incognito mode is active. This chat is temporary and won&apos;t use or save your personal context.
+              </p>
+            ) : null}
             <div ref={composerContainerRef} className="w-full max-w-2xl">{composer}</div>
           </div>
         ) : (
@@ -8026,7 +8132,8 @@ export default function AppShell() {
                       type="button"
                       size="xs"
                       variant={tab.id === activeBrowserTabId ? "secondary" : "ghost"}
-                      className="h-7 max-w-36 shrink-0 truncate text-xs"
+                      className="h-7 min-w-0 max-w-48 shrink-0 justify-start gap-1.5 text-xs"
+                      title={tab.title}
                       onClick={() => {
                         browserInputDirtyRef.current = false;
                         setActiveBrowserTabId(tab.id);
@@ -8035,7 +8142,8 @@ export default function AppShell() {
                         void performBrowserAction("select_tab", { tabId: tab.id });
                       }}
                     >
-                      {tab.title}
+                      <BrowserTabIcon tab={tab} />
+                      <span className="min-w-0 truncate text-left">{tab.title || "New tab"}</span>
                     </Button>
                   ))}
                   <Button type="button" size="icon-xs" variant="ghost" className="size-7 shrink-0" aria-label="New browser tab" onClick={() => openBrowserTab()}>
@@ -8279,6 +8387,7 @@ export default function AppShell() {
                   <EditableMarkdown
                     key={activeWorkspace.id}
                     value={activeWorkspace.content}
+                    interactiveTasks
                     onChange={(nextContent) => {
                       const content = nextContent.slice(0, 100_000);
                       updateWorkspaceDraft(activeWorkspace.id, { content });
@@ -8358,6 +8467,7 @@ export default function AppShell() {
                   <EditableMarkdown
                     key={activeWorkspace.id}
                     value={activeWorkspace.content}
+                    interactiveTasks
                     onChange={(nextContent) => {
                       const content = nextContent.slice(0, 100_000);
                       updateWorkspaceDraft(activeWorkspace.id, { content });

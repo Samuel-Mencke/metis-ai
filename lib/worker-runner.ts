@@ -485,7 +485,12 @@ export async function runQueuedJob(job: AgentJob) {
   const providedAttachments: ProvidedAttachment[] = [];
   const createdWorkspaces: WorkspaceItem[] = [];
   const createdChats: Array<{ id: string; title: string }> = [];
-  const mcpContext = { chatId: job.chatId, userId: job.userId, jobId: job.id };
+  const mcpContext = {
+    chatId: job.chatId,
+    userId: job.userId,
+    jobId: job.id,
+    incognito: Boolean(job.incognito || chat.incognito),
+  };
   const globalModelSettings = getGlobalModelSettings(job.userId);
   const configuredSubagentModel = globalModelSettings.subagentModelEnabled
     ? globalModelSettings.subagentModelId
@@ -612,9 +617,14 @@ export async function runQueuedJob(job: AgentJob) {
     updateJob(job.id, { agentId: agent.agentId, runId: job.id });
     updateChat(job.chatId, { agentId: agent.agentId }, job.userId);
     const prompt = [
-      `Memories:\n${listMemories(job.userId).map((memory) => `- ${memory.content}`).join("\n") || "(none yet)"}`,
-      `Current chat keywords: ${chat.keywords?.join(", ") || "(none)"}`,
-      `Existing workspaces:\n${chat.workspaces?.map((item) => `[${item.type}] ${item.name} (link: workspace://${item.type}/${item.id})\n${item.content}`).join("\n\n") || "(none)"}`,
+      ...(job.incognito || chat.incognito
+        ? ["Incognito mode: do not use or mention personal context, memories, chat metadata, notes, or workspaces. Incognito-only tool restrictions are enforced server-side."]
+        : [
+            `Memories:\n${listMemories(job.userId).map((memory) => `- ${memory.content}`).join("\n") || "(none yet)"}`,
+            `Current chat keywords: ${chat.keywords?.join(", ") || "(none)"}`,
+            `Existing workspaces:\n${chat.workspaces?.map((item) => `[${item.type}] ${item.name} (link: workspace://${item.type}/${item.id})\n${item.content}`).join("\n\n") || "(none)"}`,
+          ]),
+      ...(job.incognito || chat.incognito ? [] : [
       "When referring to an existing or newly created plan/canvas, include its exact Markdown link using workspace://plan/<id> or workspace://canvas/<id>.",
       "When referring to an existing or newly created note, include its exact Markdown link using note://<id>, for example [Note title](note://note-id). Notes must be clickable links, not only bold text.",
       "Use list_notes or search_notes when you need note IDs before linking them.",
@@ -625,6 +635,7 @@ export async function runQueuedJob(job: AgentJob) {
       "When the chat topic is clear or changes, silently call update_chat_keywords with 3-8 concise, non-sensitive search terms using mode=add. Do not mention this metadata maintenance in the main response. Use search_chats when you need to locate an earlier chat by title, keyword, or message content.",
       "Use delete_memory, delete_plan, and delete_canvas only for explicit user requests. Before destructive or external actions, use request_confirmation and continue only when the user chooses Confirm.",
       "Use list_workspaces before editing or deleting a workspace, and use git_status/git_diff to inspect project changes. Browser helpers include browser_extract_text, browser_fill_form, and browser_download.",
+      ]),
       "You can create a follow-up chat by outputting exactly one or more fenced blocks in this format:\n```chat title=\"Short title\"\nMessage to send in the new chat\n```\nThe block creates a new chat for the current user, sends the message there, and starts an agent run. Do not claim a chat was created without outputting this block.",
       "When useful, offer up to five concise follow-up questions at the end using exactly this UI-only format. Use `display text => prompt to insert` when the visible label should differ from the inserted prompt:\n```suggestions\nExplain this in more detail => Explain the database synchronization in more detail, with a concrete example.\nShow me an example\n```\nDo not mention or explain this format outside the block.",
       subagentModelInstruction,
@@ -633,7 +644,7 @@ export async function runQueuedJob(job: AgentJob) {
         ? `Resume the paused agent run. Do not repeat earlier tool calls or user-facing work. Continue only from the saved pause point using this answer/context:\n${job.resumePrompt}`
         : `User message:\n${job.message || "(see attachments)"}`,
       buildAttachmentPrompt(job.chatId, job.attachments, job.userId),
-      job.references?.length
+      !job.incognito && !chat.incognito && job.references?.length
         ? `Selected references:\n${job.references.map((reference) => [
             `- [${reference.kind}] ${reference.label}`,
             reference.detail ? `  Detail: ${reference.detail}` : "",
@@ -641,7 +652,7 @@ export async function runQueuedJob(job: AgentJob) {
             reference.content ? `  Context:\n${reference.content}` : "",
           ].filter(Boolean).join("\n")).join("\n")}`
         : "",
-      job.referenceText ? `Referenced plan:\n${job.referenceText}` : "",
+      !job.incognito && !chat.incognito && job.referenceText ? `Referenced plan:\n${job.referenceText}` : "",
     ].filter(Boolean).join("\n\n");
     let receivedTextDelta = false;
     let cancellationRequested = false;
@@ -893,7 +904,7 @@ export async function runQueuedJob(job: AgentJob) {
     }
     if (text) {
       const chatBlocks = [...text.matchAll(/```chat(?:\s+title=(?:"([^"]+)"|'([^']+)'|([^\s]+)))?\s*\n([\s\S]*?)```/gi)];
-      for (const block of chatBlocks) {
+      for (const block of job.incognito || chat.incognito ? [] : chatBlocks) {
         const message = block[4]?.trim();
         if (!message) continue;
         const title = (block[1] || block[2] || block[3] || message).trim().slice(0, 200);
@@ -996,14 +1007,14 @@ export async function runQueuedJob(job: AgentJob) {
       agentId: agent.agentId,
       ...(resultError ? { error: resultError } : {}),
     });
-    createSnapshot({
+  if (!job.incognito && !chat.incognito) createSnapshot({
       chatId: job.chatId,
       ...(job.userId ? { ownerId: job.userId } : {}),
       checkpoint: "important",
       runStatus: resultError ? "failed" : "completed",
       resumeMarker: { jobId: job.id, runId: job.runId || job.id, safe: true },
       availability: "available",
-    });
+  });
     if (resultError) emit("error", { message: resultError });
     else emit("done", { status: result.status, agentId: agent.agentId });
   } catch (error) {

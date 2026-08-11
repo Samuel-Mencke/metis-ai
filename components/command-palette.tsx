@@ -10,6 +10,7 @@ import {
   Search,
   Settings,
   Sparkles,
+  StickyNote,
   SquarePen,
   Brain,
   X,
@@ -35,11 +36,20 @@ type SearchResult = {
   matchedKeywords?: string[];
 };
 
+type NoteSearchResult = {
+  noteId: string;
+  title: string;
+  content: string;
+  updatedAt: string;
+};
+
 type Props = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onOpenDraft: () => void;
   onOpenChat: (chatId: string, messageId?: string) => void;
+  onOpenNotes: () => void;
+  onOpenNote: (noteId: string) => void;
   onOpenMemories: () => void;
   onOpenSettings: () => void;
   onOpenWorkspace: () => void;
@@ -50,6 +60,7 @@ type Props = {
 
 const commandItems = [
   { id: "new", label: "New chat", hint: "Ctrl/Cmd+N", icon: SquarePen },
+  { id: "notes", label: "Open shared notes", icon: StickyNote },
   { id: "memories", label: "Open memories", icon: Brain },
   { id: "settings", label: "Open settings", icon: Settings },
   { id: "workspace", label: "Toggle workspace", icon: LayoutPanelLeft },
@@ -78,6 +89,8 @@ export function CommandPalette({
   onOpenChange,
   onOpenDraft,
   onOpenChat,
+  onOpenNotes,
+  onOpenNote,
   onOpenMemories,
   onOpenSettings,
   onOpenWorkspace,
@@ -88,6 +101,7 @@ export function CommandPalette({
   const inputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [noteResults, setNoteResults] = useState<NoteSearchResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
 
@@ -102,6 +116,7 @@ export function CommandPalette({
     if (!open) return;
     setQuery("");
     setResults([]);
+    setNoteResults([]);
     setActiveIndex(0);
     const timer = window.setTimeout(() => inputRef.current?.focus(), 0);
     return () => window.clearTimeout(timer);
@@ -111,6 +126,7 @@ export function CommandPalette({
     const normalized = query.trim();
     if (!normalized) {
       setResults([]);
+      setNoteResults([]);
       setLoading(false);
       return;
     }
@@ -118,16 +134,29 @@ export function CommandPalette({
     const timer = window.setTimeout(async () => {
       setLoading(true);
       try {
-        const response = await fetch(`/api/chats/search?q=${encodeURIComponent(normalized)}`, {
-          signal: controller.signal,
-          cache: "no-store",
-        });
-        if (!response.ok) throw new Error("Search failed");
-        const data = (await response.json()) as { results?: SearchResult[] };
-        setResults(data.results || []);
+        const [chatResponse, noteResponse] = await Promise.all([
+          fetch(`/api/chats/search?q=${encodeURIComponent(normalized)}`, {
+            signal: controller.signal,
+            cache: "no-store",
+          }),
+          fetch(`/api/notes?search=${encodeURIComponent(normalized)}`, {
+            signal: controller.signal,
+            cache: "no-store",
+          }),
+        ]);
+        if (!chatResponse.ok) throw new Error("Search failed");
+        const chatData = (await chatResponse.json()) as { results?: SearchResult[] };
+        const noteData = noteResponse.ok
+          ? (await noteResponse.json()) as { notes?: NoteSearchResult[] }
+          : { notes: [] };
+        setResults(chatData.results || []);
+        setNoteResults(noteData.notes || []);
         setActiveIndex(0);
       } catch (error) {
-        if ((error as Error).name !== "AbortError") setResults([]);
+        if ((error as Error).name !== "AbortError") {
+          setResults([]);
+          setNoteResults([]);
+        }
       } finally {
         if (!controller.signal.aborted) setLoading(false);
       }
@@ -141,6 +170,7 @@ export function CommandPalette({
   const runCommand = (id: string) => {
     onOpenChange(false);
     if (id === "new") onOpenDraft();
+    if (id === "notes") onOpenNotes();
     if (id === "memories") onOpenMemories();
     if (id === "settings") onOpenSettings();
     if (id === "workspace") onOpenWorkspace();
@@ -159,8 +189,16 @@ export function CommandPalette({
     if (result) {
       onOpenChange(false);
       onOpenChat(result.chatId, result.messageId);
+      return;
+    }
+    const noteResult = noteResults[activeIndex - commandCount - results.length];
+    if (noteResult) {
+      onOpenChange(false);
+      onOpenNote(noteResult.noteId);
     }
   };
+
+  const resultCount = results.length + noteResults.length;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -182,7 +220,7 @@ export function CommandPalette({
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
               const itemCount = query.trim()
-                ? commandCount + results.length
+                ? commandCount + resultCount
                 : commandCount;
               if (event.key === "ArrowDown") {
                 event.preventDefault();
@@ -288,9 +326,43 @@ export function CommandPalette({
                     <ArrowRight className="mt-1 size-3.5 shrink-0 text-muted-foreground" />
                   </button>
                 ))
-              ) : (
+              ) : results.length === 0 && noteResults.length === 0 ? (
                 <p className="px-2 py-6 text-center text-sm text-muted-foreground">No chats found.</p>
-              )}
+              ) : null}
+              {noteResults.length > 0 ? (
+                <>
+                  <p className="px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    Shared Notes
+                  </p>
+                  {noteResults.map((note, index) => {
+                    const resultIndex = commandCount + results.length + index;
+                    return (
+                      <button
+                        key={note.noteId}
+                        type="button"
+                        className={cn(
+                          "flex w-full items-start gap-3 rounded-md px-2 py-2 text-left",
+                          resultIndex === activeIndex ? "bg-muted" : "hover:bg-muted/60",
+                        )}
+                        onMouseEnter={() => setActiveIndex(resultIndex)}
+                        onClick={() => {
+                          onOpenChange(false);
+                          onOpenNote(note.noteId);
+                        }}
+                      >
+                        <StickyNote className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm">{highlightMatches(note.title, query)}</span>
+                          <span className="mt-0.5 block line-clamp-2 text-xs text-muted-foreground">
+                            {highlightMatches(note.content, query)}
+                          </span>
+                        </span>
+                        <ArrowRight className="mt-1 size-3.5 shrink-0 text-muted-foreground" />
+                      </button>
+                    );
+                  })}
+                </>
+              ) : null}
             </>
           ) : (
             <>

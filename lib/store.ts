@@ -296,6 +296,9 @@ export type TerminalTab = {
 export type Chat = {
   id: string;
   ownerId?: string;
+  /** Incognito chats are temporary and never appear in normal chat indexes. */
+  incognito?: boolean;
+  expiresAt?: string;
   title: string;
   keywords?: string[];
   agentId?: string;
