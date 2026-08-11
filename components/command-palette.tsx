@@ -32,6 +32,7 @@ type SearchResult = {
   messageId?: string;
   role?: "user" | "assistant" | "system";
   snippet: string;
+  matchedKeywords?: string[];
 };
 
 type Props = {
@@ -271,6 +272,18 @@ export function CommandPalette({
                       <span className="mt-0.5 block line-clamp-2 text-xs text-muted-foreground">
                         {highlightMatches(result.snippet, query)}
                       </span>
+                      {result.matchedKeywords?.length ? (
+                        <span className="mt-1 flex flex-wrap gap-1">
+                          {result.matchedKeywords.slice(0, 5).map((keyword) => (
+                            <span
+                              key={keyword}
+                              className="rounded-full border border-border/60 bg-muted/50 px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                            >
+                              {highlightMatches(keyword, query)}
+                            </span>
+                          ))}
+                        </span>
+                      ) : null}
                     </span>
                     <ArrowRight className="mt-1 size-3.5 shrink-0 text-muted-foreground" />
                   </button>

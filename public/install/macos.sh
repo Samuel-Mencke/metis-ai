@@ -9,6 +9,11 @@ ask() {
   read -r -p "$prompt [$default]: " value
   printf '%s' "${value:-$default}"
 }
+default_public_host() {
+  local host
+  host="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
+  printf '%s' "${host:-127.0.0.1}"
+}
 command -v brew >/dev/null 2>&1 || die "Homebrew is required on macOS. Install it from https://brew.sh."
 command -v git >/dev/null 2>&1 || brew install git
 command -v node >/dev/null 2>&1 || brew install node
@@ -28,13 +33,21 @@ fi
 data_dir="$(ask "Data directory" "$install_dir/data")"
 agent_cwd="$(ask "Agent workspace directory" "$HOME")"
 port="$(ask "Web application port" "3100")"
+host_mode="$(ask "Host web application on local network? (y/N)" "n")"
+if [[ "$host_mode" =~ ^([Yy][Ee][Ss]|[Yy]|1|[Tt][Rr][Uu][Ee])$ ]]; then
+  ai_chat_host="0.0.0.0"
+  public_host="$(default_public_host)"
+else
+  ai_chat_host="127.0.0.1"
+  public_host="127.0.0.1"
+fi
 mcp_port="$(ask "MCP gateway port" "8787")"
 username="$(ask "Initial username" "admin")"
 read -r -s -p "Initial password: " password; printf '\n'
 read -r -s -p "Confirm password: " password_confirm; printf '\n'
 [[ ${#password} -ge 8 && "$password" == "$password_confirm" ]] || die "Passwords must match and contain at least 8 characters."
 service_name="$(ask "Service name" "metis-ai")"
-public_url="$(ask "Public URL" "http://127.0.0.1:${port}")"
+public_url="$(ask "Public URL" "http://${public_host}:${port}")"
 node_bin="$(command -v node)"
 node_home="$(dirname "$(dirname "$node_bin")")"
 chat_password="$(openssl rand -hex 32)"
@@ -45,6 +58,7 @@ mkdir -p "$data_dir" "$agent_cwd"
 cat > "$install_dir/.env" <<EOF
 APP_NAME=Metis AI
 PORT=$port
+AI_CHAT_HOST=$ai_chat_host
 CHAT_USERNAME=$username
 CHAT_PASSWORD=$chat_password
 CHAT_DATA_DIR=$data_dir
@@ -99,9 +113,12 @@ curl --fail --silent --show-error --retry 20 --retry-delay 1 "http://127.0.0.1:$
   die "The application did not become healthy. Check launchctl and the service logs."
 
 cat > "$install_dir/.metis-ai-install.json" <<EOF
-{"installDir":"$install_dir","dataDir":"$data_dir","agentCwd":"$agent_cwd","serviceName":"$service_name","os":"macos","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+{"installDir":"$install_dir","dataDir":"$data_dir","agentCwd":"$agent_cwd","serviceName":"$service_name","host":"$ai_chat_host","os":"macos","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 EOF
 chmod 600 "$install_dir/.metis-ai-install.json"
 cp "$install_dir/install/uninstall-macos.sh" "$install_dir/uninstall-macos.sh"
 chmod 700 "$install_dir/uninstall-macos.sh"
+if [[ "$ai_chat_host" == "0.0.0.0" ]]; then
+  printf 'Warning: the web application is reachable on the local network. Use strong credentials and a firewall or trusted TLS reverse proxy.\n'
+fi
 printf '\nMetis AI installed successfully.\nOpen: %s\nUninstall: %s/install/uninstall-macos.sh --install-dir %q --keep-data\n' "$public_url" "$public_url" "$install_dir"

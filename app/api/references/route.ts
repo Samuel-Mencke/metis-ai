@@ -51,7 +51,7 @@ export async function GET(req: Request) {
       kind: "chat",
       id: chat.id,
       label: chat.title || "Untitled chat",
-      detail: `${chat.messages.length} messages`,
+      detail: `${chat.messages.length} messages${chat.keywords?.length ? ` · ${chat.keywords.join(" · ")}` : ""}`,
       chatId: chat.id,
       isCurrentChat: chat.id === currentChatId,
     });

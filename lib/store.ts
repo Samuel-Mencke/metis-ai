@@ -297,6 +297,7 @@ export type Chat = {
   id: string;
   ownerId?: string;
   title: string;
+  keywords?: string[];
   agentId?: string;
   /** Selected provider/model key for this chat. */
   modelId?: string;
@@ -325,6 +326,7 @@ export type ChatIndexEntry = {
   id: string;
   ownerId?: string;
   title: string;
+  keywords?: string[];
   updatedAt: string;
   createdAt: string;
   agentId?: string;

@@ -35,6 +35,7 @@ function classifyTool(name: string): ToolPart["kind"] {
   if (/(todo)/.test(value)) return "todo";
   if (/(note)/.test(value)) return "note";
   if (/(memory|remember)/.test(value)) return "memory";
+  if (/(keyword|chat)/.test(value)) return "mcp";
   if (/(browser|navigate|playwright|webfetch)/.test(value)) return "browser";
   if (value.includes("edit_plan")) return "plan";
   if (value.includes("edit_canvas")) return "canvas";
@@ -312,6 +313,9 @@ function extractWorkspace(value: string) {
     workspaceLink?: string;
     title: string;
     content: string;
+    version?: number;
+    createdAt?: string;
+    updatedAt?: string;
   } | null => {
     if (depth > 8 || candidate == null) return null;
     if (typeof candidate === "string") {
@@ -346,12 +350,21 @@ function extractWorkspace(value: string) {
         .find((item): item is string => typeof item === "string" && item.trim().length > 0);
       const workspaceLink = [parsed.workspaceLink, nested.workspaceLink]
         .find((item): item is string => typeof item === "string" && item.trim().length > 0);
+      const version = [parsed.version, nested.version]
+        .find((item): item is number => typeof item === "number" && Number.isFinite(item));
+      const createdAt = [parsed.createdAt, nested.createdAt]
+        .find((item): item is string => typeof item === "string" && item.trim().length > 0);
+      const updatedAt = [parsed.updatedAt, nested.updatedAt]
+        .find((item): item is string => typeof item === "string" && item.trim().length > 0);
       return {
         type,
         id,
         workspaceLink,
         title: title?.trim() || (type === "canvas" ? "Canvas" : "Plan"),
         content: contentCandidate,
+        ...(version !== undefined ? { version: Math.max(1, Math.floor(version)) } : {}),
+        ...(createdAt ? { createdAt } : {}),
+        ...(updatedAt ? { updatedAt } : {}),
       };
     }
     for (const key of ["value", "content", "text", "result"]) {
@@ -396,19 +409,30 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   });
 }
 
+function markJobError(job: AgentJob, message: string) {
+  updateJob(job.id, { status: "error", error: message });
+  updateChat(job.chatId, {
+    runStatus: "error",
+    runUpdatedAt: new Date().toISOString(),
+    queueMessage: null,
+    badge: "red",
+  }, job.userId);
+  appendRunEvent(job.id, job.chatId, job.userId, "error", { message });
+}
+
 export async function runQueuedJob(job: AgentJob) {
   const chat = getChat(job.chatId, job.userId);
   if (!chat) {
-    updateJob(job.id, { status: "error", error: "Chat not found or access denied." });
+    markJobError(job, "Chat not found or access denied.");
     return;
   }
   const requestedModelId = job.modelId || chat.modelId || "";
   if (!requestedModelId) {
-    updateJob(job.id, { status: "error", error: "No model is selected for this chat." });
+    markJobError(job, "No model is selected for this chat.");
     return;
   }
   if (!isModelAllowed(job.userId, requestedModelId)) {
-    updateJob(job.id, { status: "error", error: "This model is not available for your account." });
+    markJobError(job, "This model is not available for your account.");
     return;
   }
   const modelReference = parseModelKey(requestedModelId);
@@ -424,10 +448,7 @@ export async function runQueuedJob(job: AgentJob) {
     : null;
   const apiKey = cursorCredential?.secret;
   if (!cursorConnection || !apiKey) {
-    updateJob(job.id, {
-      status: "error",
-      error: "No enabled Cursor SDK connection is configured for this user.",
-    });
+    markJobError(job, "No enabled Cursor SDK connection is configured for this user.");
     return;
   }
   const agentCwd = getUserAgentCwd(job.userId);
@@ -435,7 +456,7 @@ export async function runQueuedJob(job: AgentJob) {
   appendMessage(job.chatId, { id: assistantMessageId, role: "assistant", content: "" });
   const emit = (event: string, data: unknown) => {
     const result = appendRunEvent(job.id, job.chatId, job.userId, event, data);
-    const needsAttention = event === "question" || event === "workspace" || event === "canvas";
+    const needsAttention = event === "question" || event === "error";
     if (needsAttention) {
       updateChat(job.chatId, { badge: "red" }, job.userId);
     } else if (event === "done") {
@@ -552,6 +573,7 @@ export async function runQueuedJob(job: AgentJob) {
       content: content.trim().slice(0, 100_000),
       createdAt: timestamp,
       updatedAt: timestamp,
+      version: 1,
     };
     updateChat(job.chatId, {
       workspaces: [
@@ -591,6 +613,7 @@ export async function runQueuedJob(job: AgentJob) {
     updateChat(job.chatId, { agentId: agent.agentId }, job.userId);
     const prompt = [
       `Memories:\n${listMemories(job.userId).map((memory) => `- ${memory.content}`).join("\n") || "(none yet)"}`,
+      `Current chat keywords: ${chat.keywords?.join(", ") || "(none)"}`,
       `Existing workspaces:\n${chat.workspaces?.map((item) => `[${item.type}] ${item.name} (link: workspace://${item.type}/${item.id})\n${item.content}`).join("\n\n") || "(none)"}`,
       "When referring to an existing or newly created plan/canvas, include its exact Markdown link using workspace://plan/<id> or workspace://canvas/<id>.",
       "When referring to an existing or newly created note, include its exact Markdown link using note://<id>, for example [Note title](note://note-id). Notes must be clickable links, not only bold text.",
@@ -599,6 +622,7 @@ export async function runQueuedJob(job: AgentJob) {
       "To create a plan or canvas, call the MCP tools create_plan or create_canvas with title and content. Use an empty content string for a blank workspace, and do not claim creation without a completed tool call.",
       "For memories, use list_memories to retrieve the current user's entries, add_memory only for useful durable facts or preferences, and edit_memory with the exact memory id to change an existing entry. Never claim a memory was changed without a completed tool call.",
       "To edit an existing workspace, call edit_plan or edit_canvas with its exact id and the changed title/content. Do not create a duplicate when the user asked to edit.",
+      "When the chat topic is clear or changes, silently call update_chat_keywords with 3-8 concise, non-sensitive search terms using mode=add. Do not mention this metadata maintenance in the main response. Use search_chats when you need to locate an earlier chat by title, keyword, or message content.",
       "Use delete_memory, delete_plan, and delete_canvas only for explicit user requests. Before destructive or external actions, use request_confirmation and continue only when the user chooses Confirm.",
       "Use list_workspaces before editing or deleting a workspace, and use git_status/git_diff to inspect project changes. Browser helpers include browser_extract_text, browser_fill_form, and browser_download.",
       "You can create a follow-up chat by outputting exactly one or more fenced blocks in this format:\n```chat title=\"Short title\"\nMessage to send in the new chat\n```\nThe block creates a new chat for the current user, sends the message there, and starts an agent run. Do not claim a chat was created without outputting this block.",
@@ -756,8 +780,9 @@ export async function runQueuedJob(job: AgentJob) {
                 type: workspaceType,
                 name: parsedWorkspace.title,
                 content: parsedWorkspace.content,
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
+                createdAt: parsedWorkspace.createdAt || new Date().toISOString(),
+                updatedAt: parsedWorkspace.updatedAt || new Date().toISOString(),
+                version: parsedWorkspace.version || 1,
               }
             : persistWorkspace(workspaceType, parsedWorkspace.content, parsedWorkspace.title);
           if (workspace) {
@@ -964,6 +989,7 @@ export async function runQueuedJob(job: AgentJob) {
       runStatus: resultError ? "error" : "completed",
       runUpdatedAt: new Date().toISOString(),
       queueMessage: null,
+      ...(resultError ? { badge: "red" as const } : {}),
     }, job.userId);
     updateJob(job.id, {
       status: resultError ? "error" : "completed",
@@ -995,7 +1021,8 @@ export async function runQueuedJob(job: AgentJob) {
         runStatus: "error",
         runUpdatedAt: new Date().toISOString(),
         queueMessage: null,
-      });
+        badge: "red",
+      }, job.userId);
       updateJob(job.id, { status: "error", error: message });
       createSnapshot({
         chatId: job.chatId,

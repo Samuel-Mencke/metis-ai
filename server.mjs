@@ -19,8 +19,9 @@ const {
 } = await import("./lib/server-browser.ts");
 
 const port = Number(process.env.PORT || 3100);
+const host = process.env.AI_CHAT_HOST?.trim() || "127.0.0.1";
 const dev = process.env.NODE_ENV !== "production";
-const nextApp = next({ dev, hostname: "127.0.0.1", port });
+const nextApp = next({ dev, hostname: host, port });
 const handle = nextApp.getRequestHandler();
 const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 const browserStreamSubscribers = new Map();
@@ -261,6 +262,7 @@ server.on("upgrade", async (request, socket, head) => {
   }
 });
 
-server.listen(port, "0.0.0.0", () => {
-  console.log(`AI Chat listening on http://127.0.0.1:${port}`);
+server.listen(port, host, () => {
+  const publicUrl = process.env.AI_CHAT_PUBLIC_URL?.trim() || `http://${host}:${port}`;
+  console.log(`AI Chat listening on ${publicUrl} (bound to ${host}:${port})`);
 });

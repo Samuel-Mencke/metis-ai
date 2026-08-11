@@ -80,6 +80,11 @@ home directory, port or public hostname. Review downloaded scripts before
 executing them in security-sensitive environments. The repository source can be
 overridden with `METIS_AI_REPO_URL`.
 
+The installers also ask whether the web application should be reachable on the
+local network. The secure default binds to `127.0.0.1`; choosing the network
+option binds to `0.0.0.0` and requires a strong password plus a firewall or
+trusted TLS reverse proxy.
+
 The scripts are hosted in the repository under `install/`; the website and
 Nginx configuration are not required for installation. Every installer writes
 an installation manifest and a matching uninstaller into
@@ -129,8 +134,10 @@ pnpm build
 pnpm start
 ```
 
-The custom server listens on `0.0.0.0` and defaults to port `3100`. Put it
-behind an authenticated reverse proxy before exposing it to the internet.
+The custom server listens on `AI_CHAT_HOST` (default `127.0.0.1`) and defaults
+to port `3100`. Set `AI_CHAT_HOST=0.0.0.0` only when the app should be
+reachable on the local network, and put it behind an authenticated TLS reverse
+proxy before exposing it beyond a trusted LAN.
 </details>
 
 ## Provider connections

@@ -51,7 +51,7 @@ function runJobInIsolatedProcess(jobId: string) {
         updateChat(job.chatId, {
           runStatus: "error",
           runUpdatedAt: new Date().toISOString(),
-          badge: null,
+          badge: "red",
         }, job.userId);
       }
     };

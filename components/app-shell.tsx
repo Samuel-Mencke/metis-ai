@@ -471,6 +471,7 @@ function withSyncedFlat(parts: MsgPart[], extra: Partial<Msg> = {}): Partial<Msg
 type ChatIndexEntry = {
   id: string;
   title: string;
+  keywords?: string[];
   updatedAt: string;
   createdAt: string;
   agentId?: string;
@@ -593,6 +594,7 @@ type WorkspaceItem = {
   content: string;
   createdAt: string;
   updatedAt: string;
+  version?: number;
 };
 
 type ReferenceKind = "file" | "canvas" | "plan" | "note" | "browser" | "memory" | "chat" | "terminal";
@@ -728,6 +730,7 @@ function workspacesFromChat(chat: Pick<Chat, "workspaces" | "canvas">): Workspac
         content: chat.canvas,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
+        version: 1,
       }]
     : [];
 }
@@ -740,7 +743,18 @@ function mergeWorkspaceItems(current: WorkspaceItem[], workspace: WorkspaceItem)
         item.name.trim().toLowerCase() === workspace.name.trim().toLowerCase()),
   );
   const next = [...current];
-  if (index >= 0) next[index] = workspace;
+  if (index >= 0) {
+    const existing = next[index];
+    const existingVersion = existing.version || 1;
+    const incomingVersion = workspace.version || 1;
+    if (
+      existing.updatedAt > workspace.updatedAt ||
+      (existing.updatedAt === workspace.updatedAt && existingVersion > incomingVersion)
+    ) {
+      return next;
+    }
+    next[index] = workspace;
+  }
   else next.push(workspace);
   return next.slice(-20);
 }
@@ -1791,6 +1805,8 @@ export default function AppShell() {
   const recoveryFingerprintRef = useRef<Map<string, string>>(new Map());
   const seenChatUpdatedAtRef = useRef<Map<string, string>>(new Map());
   const chatListInitializedRef = useRef(false);
+  const workspaceSaveTimersRef = useRef<Map<string, number>>(new Map());
+  const workspaceListSaveTimerRef = useRef<number | null>(null);
   const stateRef = useRef({
     messages,
     chatTitle,
@@ -3904,6 +3920,10 @@ export default function AppShell() {
       if (target?.closest("[data-browser-viewport]")) return;
       if (modifier && key === "f") {
         event.preventDefault();
+        if (notesOpen) {
+          window.dispatchEvent(new Event("ai-chat:focus-notes-search"));
+          return;
+        }
         setFindOpen(true);
         window.setTimeout(() => findInputRef.current?.focus(), 0);
         return;
@@ -3962,7 +3982,7 @@ export default function AppShell() {
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [authed, chats, findMatchCount, findOpen, loadChat, openDraft]);
+  }, [authed, chats, findMatchCount, findOpen, loadChat, notesOpen, openDraft]);
 
   useEffect(() => {
     if (!authed) return;
@@ -4051,18 +4071,6 @@ export default function AppShell() {
     messageOffset,
     hasEarlierMessages,
   ]);
-
-  useEffect(() => {
-    if (!activeChatId || isDraft || loadingChatId) return;
-    const timer = window.setTimeout(() => {
-      void fetch(`/api/chats/${activeChatId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspaces }),
-      });
-    }, 500);
-    return () => window.clearTimeout(timer);
-  }, [activeChatId, workspaces, isDraft, loadingChatId]);
 
   useEffect(() => {
     if (!activeChatId || isDraft || loadingChatId) return;
@@ -5537,7 +5545,6 @@ export default function AppShell() {
           ) {
             if (activeChatIdRef.current !== chatId) continue;
             const workspace = payload.workspace as WorkspaceItem;
-            setAttentionChatIds((current) => current.includes(chatId) ? current : [...current, chatId]);
             setWorkspaces((current) => mergeWorkspaceItems(current, workspace));
             const keepCanvasVisible =
               workspace.type === "plan" && workspaceOpen && workspaceTab === "canvas";
@@ -5583,7 +5590,6 @@ export default function AppShell() {
             }
           } else if (event === "canvas" && typeof payload.canvas === "string") {
             if (activeChatIdRef.current !== chatId) continue;
-            setAttentionChatIds((current) => current.includes(chatId) ? current : [...current, chatId]);
             const now = new Date().toISOString();
             const workspace: WorkspaceItem = {
               id: "canvas-default",
@@ -5643,7 +5649,9 @@ export default function AppShell() {
             typeof payload.message === "string"
           ) {
             const errMsg = payload.message;
-            notifyUser("Agent error", errMsg);
+            setAttentionChatIds((current) => current.includes(chatId) ? current : [...current, chatId]);
+            setChats((current) => current.map((chat) => chat.id === chatId ? { ...chat, badge: "red" } : chat));
+            notifyUser("Agent error", errMsg, chatId);
             setMessages((m) =>
               m.map((x) => {
                 if (x.id !== asstId) return x;
@@ -6035,6 +6043,91 @@ export default function AppShell() {
     setInput((current) => current.replace(`@${reference.label}`, "").replace(/[ \t]{2,}/g, " "));
   }
 
+  async function saveWorkspaceDraft(chatId: string, workspaceId: string) {
+    if (activeChatIdRef.current !== chatId) return;
+    const workspace = stateRef.current.workspaces.find((item) => item.id === workspaceId);
+    if (!workspace) return;
+    try {
+      const response = await fetch("/api/workspaces", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chatId,
+          id: workspace.id,
+          version: workspace.version || 1,
+          title: workspace.name,
+          content: workspace.content,
+        }),
+      });
+      const body = await response.json().catch(() => ({})) as {
+        workspace?: WorkspaceItem;
+        error?: string;
+      };
+      if (response.status === 409 && body.workspace) {
+        setWorkspaces((current) => current.map((item) => item.id === workspaceId ? body.workspace! : item));
+        toast.info("Workspace changed by the agent", {
+          description: "The newer agent version is now shown.",
+        });
+        return;
+      }
+      if (!response.ok || !body.workspace) {
+        throw new Error(body.error || "Could not save workspace.");
+      }
+      setWorkspaces((current) => current.map((item) => item.id === workspaceId ? body.workspace! : item));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not save workspace.");
+    }
+  }
+
+  function scheduleWorkspaceDraftSave(workspaceId: string) {
+    const chatId = activeChatIdRef.current;
+    if (!chatId) return;
+    const existing = workspaceSaveTimersRef.current.get(workspaceId);
+    if (existing) window.clearTimeout(existing);
+    const timer = window.setTimeout(() => {
+      workspaceSaveTimersRef.current.delete(workspaceId);
+      void saveWorkspaceDraft(chatId, workspaceId);
+    }, 500);
+    workspaceSaveTimersRef.current.set(workspaceId, timer);
+  }
+
+  function updateWorkspaceDraft(
+    workspaceId: string,
+    patch: Partial<Pick<WorkspaceItem, "name" | "content">>,
+  ) {
+    setWorkspaces((current) => current.map((item) =>
+      item.id === workspaceId
+        ? { ...item, ...patch, updatedAt: new Date().toISOString() }
+        : item,
+    ));
+    scheduleWorkspaceDraftSave(workspaceId);
+  }
+
+  function saveWorkspaceList(chatId: string, next: WorkspaceItem[]) {
+    void fetch(`/api/chats/${chatId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaces: next }),
+    }).then((response) => {
+      if (!response.ok) throw new Error("Could not save workspaces.");
+    }).catch((error) => {
+      toast.error(error instanceof Error ? error.message : "Could not save workspaces.");
+    });
+  }
+
+  function updateWorkspaceList(next: WorkspaceItem[]) {
+    setWorkspaces(next);
+    const chatId = activeChatIdRef.current;
+    if (!chatId) return;
+    if (workspaceListSaveTimerRef.current) {
+      window.clearTimeout(workspaceListSaveTimerRef.current);
+    }
+    workspaceListSaveTimerRef.current = window.setTimeout(() => {
+      workspaceListSaveTimerRef.current = null;
+      saveWorkspaceList(chatId, next);
+    }, 500);
+  }
+
   function duplicateWorkspace(workspace: WorkspaceItem) {
     const timestamp = new Date().toISOString();
     const baseName = workspace.name.replace(/\s+\(\d+\)$/, "");
@@ -6042,15 +6135,15 @@ export default function AppShell() {
     let copyName = `${baseName} copy`;
     let suffix = 2;
     while (names.has(copyName.toLocaleLowerCase())) copyName = `${baseName} copy ${suffix++}`;
-    const copy = { ...workspace, id: crypto.randomUUID(), name: copyName, createdAt: timestamp, updatedAt: timestamp };
-    setWorkspaces((current) => [...current, copy].slice(-20));
+    const copy = { ...workspace, id: crypto.randomUUID(), name: copyName, createdAt: timestamp, updatedAt: timestamp, version: 1 };
+    updateWorkspaceList([...workspaces, copy].slice(-20));
     setActiveWorkspaceId(copy.id);
     setWorkspaceTab(copy.type);
   }
 
   function deleteWorkspace(workspace: WorkspaceItem) {
     const remaining = workspaces.filter((item) => item.id !== workspace.id);
-    setWorkspaces(remaining);
+    updateWorkspaceList(remaining);
     setActiveWorkspaceId(remaining.find((item) => item.type === workspace.type)?.id ?? null);
   }
 
@@ -8124,11 +8217,7 @@ export default function AppShell() {
                       value={activeWorkspace.name}
                       onChange={(event) => {
                         const name = event.target.value.slice(0, 200);
-                        setWorkspaces((current) => current.map((item) =>
-                          item.id === activeWorkspace.id
-                            ? { ...item, name, updatedAt: new Date().toISOString() }
-                            : item,
-                        ));
+                        updateWorkspaceDraft(activeWorkspace.id, { name });
                       }}
                       aria-label="Plan title"
                       placeholder="Plan title"
@@ -8192,11 +8281,7 @@ export default function AppShell() {
                     value={activeWorkspace.content}
                     onChange={(nextContent) => {
                       const content = nextContent.slice(0, 100_000);
-                      setWorkspaces((current) => current.map((item) =>
-                        item.id === activeWorkspace.id
-                          ? { ...item, content, updatedAt: new Date().toISOString() }
-                          : item,
-                      ));
+                      updateWorkspaceDraft(activeWorkspace.id, { content });
                     }}
                     aria-label="Plan content"
                     placeholder="Write the plan…"
@@ -8211,11 +8296,7 @@ export default function AppShell() {
                       value={activeWorkspace.name}
                       onChange={(event) => {
                         const name = event.target.value.slice(0, 200);
-                        setWorkspaces((current) => current.map((item) =>
-                          item.id === activeWorkspace.id
-                            ? { ...item, name, updatedAt: new Date().toISOString() }
-                            : item,
-                        ));
+                        updateWorkspaceDraft(activeWorkspace.id, { name });
                       }}
                       aria-label="Canvas title"
                       placeholder="Canvas title"
@@ -8279,11 +8360,7 @@ export default function AppShell() {
                     value={activeWorkspace.content}
                     onChange={(nextContent) => {
                       const content = nextContent.slice(0, 100_000);
-                      setWorkspaces((current) => current.map((item) =>
-                        item.id === activeWorkspace.id
-                          ? { ...item, content, updatedAt: new Date().toISOString() }
-                          : item,
-                      ));
+                      updateWorkspaceDraft(activeWorkspace.id, { content });
                     }}
                     aria-label="Canvas content"
                     placeholder="Write notes, requirements, or a working draft…"

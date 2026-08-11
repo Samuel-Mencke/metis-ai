@@ -14,6 +14,13 @@ function Ask([string]$Prompt, [string]$Default) {
   if ([string]::IsNullOrWhiteSpace($value)) { return $Default }
   return $value
 }
+function Get-DefaultPublicHost {
+  $ip = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" } |
+    Select-Object -First 1 -ExpandProperty IPAddress
+  if ($ip) { return $ip }
+  return "127.0.0.1"
+}
 function Require-Command([string]$Name) {
   if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) { throw "$Name is required." }
 }
@@ -54,6 +61,9 @@ if (Test-Path (Join-Path $InstallDir ".git")) {
 $dataDir = Ask "Data directory" (Join-Path $InstallDir "data")
 $agentCwd = Ask "Agent workspace directory" $HOME
 $port = Ask "Web application port" "3100"
+$hostMode = (Ask "Host web application on local network? (y/N)" "n").Trim().ToLowerInvariant()
+$aiChatHost = if (@("y", "yes", "1", "true") -contains $hostMode) { "0.0.0.0" } else { "127.0.0.1" }
+$publicHost = if ($aiChatHost -eq "0.0.0.0") { Get-DefaultPublicHost } else { "127.0.0.1" }
 $mcpPort = Ask "MCP gateway port" "8787"
 $username = Ask "Initial username" "admin"
 $password = Read-Host "Initial password" -AsSecureString
@@ -62,7 +72,7 @@ $passwordPlain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.Int
 $passwordAgainPlain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($passwordAgain))
 if ($passwordPlain.Length -lt 8 -or $passwordPlain -cne $passwordAgainPlain) { throw "Passwords must match and contain at least 8 characters." }
 $serviceName = Ask "Task prefix" "MetisAI"
-$publicUrl = Ask "Public URL" "http://127.0.0.1:$port"
+$publicUrl = Ask "Public URL" "http://$publicHost`:$port"
 $randomHex = { -join (1..32 | ForEach-Object { "{0:x2}" -f (Get-Random -Maximum 256) }) }
 $chatPassword = & $randomHex
 $secretsKey = & $randomHex
@@ -72,6 +82,7 @@ New-Item -ItemType Directory -Force -Path $dataDir, $agentCwd | Out-Null
 @"
 APP_NAME=Metis AI
 PORT=$port
+AI_CHAT_HOST=$aiChatHost
 CHAT_USERNAME=$username
 CHAT_PASSWORD=$chatPassword
 CHAT_DATA_DIR=$dataDir
@@ -151,11 +162,15 @@ $manifest = @{
   dataDir = $dataDir
   agentCwd = $agentCwd
   serviceName = $serviceName
+  host = $aiChatHost
   os = "windows"
   createdAt = [DateTime]::UtcNow.ToString("o")
 } | ConvertTo-Json -Compress
 Set-Content -LiteralPath (Join-Path $InstallDir ".metis-ai-install.json") -Value $manifest -Encoding utf8
 Copy-Item -LiteralPath (Join-Path $InstallDir "install/uninstall.ps1") -Destination (Join-Path $InstallDir "uninstall.ps1") -Force
+if ($aiChatHost -eq "0.0.0.0") {
+  Write-Host "Warning: the web application is reachable on the local network. Use strong credentials and a firewall or trusted TLS reverse proxy."
+}
 Write-Host "`nMetis AI installed successfully."
 Write-Host "Open: $publicUrl"
 Write-Host "Uninstall: $publicUrl/install/uninstall.ps1 -InstallDir `"$InstallDir`" -KeepData"

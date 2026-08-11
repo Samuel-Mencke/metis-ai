@@ -877,6 +877,7 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
         runStatus: "error",
         runUpdatedAt: new Date().toISOString(),
         queueMessage: null,
+        badge: "red",
       }, job.userId);
       updateJob(job.id, { status: "error", error: message });
       emit("error", { message });

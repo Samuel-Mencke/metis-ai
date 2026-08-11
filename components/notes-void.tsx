@@ -60,6 +60,7 @@ export function NotesVoid({
   const [status, setStatus] = useState<"idle" | "loading" | "saving" | "saved" | "offline" | "error">("loading");
   const [error, setError] = useState("");
   const surfaceRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const saveTimers = useRef(new Map<string, number>());
   const loadAbortRef = useRef<AbortController | null>(null);
   const hasInitializedViewRef = useRef(false);
@@ -154,6 +155,14 @@ export function NotesVoid({
     window.addEventListener("ai-chat:notes-updated", refreshFromAgent);
     return () => window.removeEventListener("ai-chat:notes-updated", refreshFromAgent);
   }, [load]);
+
+  useEffect(() => {
+    const focusSearch = () => {
+      if (!compact) searchInputRef.current?.focus();
+    };
+    window.addEventListener("ai-chat:focus-notes-search", focusSearch);
+    return () => window.removeEventListener("ai-chat:focus-notes-search", focusSearch);
+  }, [compact]);
 
   const visibleNotes = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -420,7 +429,7 @@ export function NotesVoid({
       {!compact ? <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border/40 px-2 py-1.5">
         <div className="relative min-w-32 flex-1 sm:max-w-56">
           <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-          <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search notes" className="h-7 pl-7 text-xs" />
+          <Input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search notes" className="h-7 pl-7 text-xs" />
         </div>
         <span className={cn("text-[10px]", status === "error" || status === "offline" ? "text-destructive" : "text-muted-foreground")}>
           {status === "loading" ? "Loading…" : status === "saving" ? "Saving…" : status === "offline" ? "Offline" : status === "error" ? "Error" : status === "saved" ? "Saved" : `${visibleNotes.length} notes`}
@@ -696,6 +705,7 @@ export function NotesVoid({
             <EditableMarkdown
               value={note.content}
               onChange={(value) => scheduleUpdate(note, { content: value })}
+              interactiveTasks
               className="min-h-0 flex-1 cursor-text bg-transparent text-xs text-black [&_.markdown-body]:text-black [&_.markdown-body_p]:my-1 [&_.markdown-body_ul]:my-1 [&_.markdown-body_ol]:my-1"
               placeholder="Write a note…"
               aria-label="Note content"

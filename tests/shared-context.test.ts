@@ -15,6 +15,7 @@ const modulesPromise = Promise.all([
   import("../lib/shared-context"),
   import("../lib/db-questions"),
   import("../app/api/internal/mcp-workspace/route"),
+  import("../app/api/internal/mcp-chat/route"),
 ]);
 let modules!: Awaited<typeof modulesPromise>;
 
@@ -196,4 +197,39 @@ test("workspace creation is persisted, addressable, and idempotent", async () =>
   }));
   const openBody = await open.json() as { workspaceLink?: string };
   assert.equal(openBody.workspaceLink, firstBody.workspaceLink);
+});
+
+test("chat keywords are normalized, persisted, and searchable through MCP", async () => {
+  const { POST } = modules[4];
+  const headers = {
+    "Content-Type": "application/json",
+    Authorization: "Bearer shared-context-test-token",
+    "X-AI-Chat-Id": chatId,
+    "X-AI-Chat-User-Id": "",
+    "X-AI-Chat-Job-Id": "keyword-job",
+  };
+  const update = await POST(new Request("http://localhost/api/internal/mcp-chat", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      keywords: [" React ", "react", "Canvas"],
+    }),
+  }));
+  assert.equal(update.status, 200);
+  const updateBody = await update.json() as { keywords?: string[] };
+  assert.deepEqual(updateBody.keywords, ["React", "Canvas"]);
+  assert.deepEqual(modules[0].getChat(chatId)?.keywords, ["React", "Canvas"]);
+
+  const search = await POST(new Request("http://localhost/api/internal/mcp-chat", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ action: "search", query: "canvas" }),
+  }));
+  assert.equal(search.status, 200);
+  const searchBody = await search.json() as {
+    results?: Array<{ chatId: string; matchedKeywords?: string[] }>;
+  };
+  assert.equal(searchBody.results?.some((result) =>
+    result.chatId === chatId && result.matchedKeywords?.includes("Canvas"),
+  ), true);
 });

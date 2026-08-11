@@ -23,3 +23,15 @@ test("installer sources do not contain this deployment's machine path", () => {
     assert.equal(content.includes(localDomain), false, file);
   }
 });
+
+test("all platform installers expose an explicit network-host option", () => {
+  for (const file of ["linux.sh", "macos.sh", "windows.ps1"]) {
+    const content = readFileSync(path.join(root, "install", file), "utf8");
+    const publicContent = readFileSync(path.join(installerDir, file), "utf8");
+    for (const source of [content, publicContent]) {
+      assert.match(source, /Host web application on local network/);
+      assert.match(source, /AI_CHAT_HOST/);
+      assert.match(source, /0\.0\.0\.0/);
+    }
+  }
+});

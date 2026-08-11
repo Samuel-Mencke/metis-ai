@@ -17,6 +17,11 @@ ask() {
     printf '%s' "$value"
   fi
 }
+default_public_host() {
+  local host
+  host="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  printf '%s' "${host:-127.0.0.1}"
+}
 version_at_least_20() {
   command -v "$1" >/dev/null 2>&1 || return 1
   [[ "$( "$1" -p 'process.versions.node.split(".")[0]' )" -ge 20 ]]
@@ -65,6 +70,14 @@ command -v pnpm >/dev/null 2>&1 || "$node_home/bin/npm" install --global pnpm@9
 data_dir="$(ask "Data directory" "$install_dir/data")"
 agent_cwd="$(ask "Agent workspace directory" "$HOME")"
 port="$(ask "Web application port" "3100")"
+host_mode="$(ask "Host web application on local network? (y/N)" "n")"
+if [[ "$host_mode" =~ ^([Yy][Ee][Ss]|[Yy]|1|[Tt][Rr][Uu][Ee])$ ]]; then
+  ai_chat_host="0.0.0.0"
+  public_host="$(default_public_host)"
+else
+  ai_chat_host="127.0.0.1"
+  public_host="127.0.0.1"
+fi
 mcp_port="$(ask "MCP gateway port" "8787")"
 username="$(ask "Initial username" "admin")"
 read -r -s -p "Initial password: " password; printf '\n'
@@ -74,12 +87,13 @@ read -r -s -p "Confirm password: " password_confirm; printf '\n'
 chat_password="$(openssl rand -hex 32 2>/dev/null || "$node_home/bin/node" -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))')"
 secrets_key="$(openssl rand -hex 32 2>/dev/null || "$node_home/bin/node" -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))')"
 service_name="$(ask "Service name" "metis-ai")"
-public_url="$(ask "Public URL" "http://127.0.0.1:${port}")"
+public_url="$(ask "Public URL" "http://${public_host}:${port}")"
 
 mkdir -p "$data_dir" "$agent_cwd"
 cat > "$install_dir/.env" <<EOF
 APP_NAME=Metis AI
 PORT=$port
+AI_CHAT_HOST=$ai_chat_host
 CHAT_USERNAME=$username
 CHAT_PASSWORD=$chat_password
 CHAT_DATA_DIR=$data_dir
@@ -187,9 +201,12 @@ if command -v curl >/dev/null 2>&1; then
 fi
 
 cat > "$install_dir/.metis-ai-install.json" <<EOF
-{"installDir":"$install_dir","dataDir":"$data_dir","agentCwd":"$agent_cwd","serviceName":"$service_name","os":"linux","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+{"installDir":"$install_dir","dataDir":"$data_dir","agentCwd":"$agent_cwd","serviceName":"$service_name","host":"$ai_chat_host","os":"linux","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 EOF
 chmod 600 "$install_dir/.metis-ai-install.json"
 cp "$install_dir/install/uninstall.sh" "$install_dir/uninstall.sh"
 chmod 700 "$install_dir/uninstall.sh"
+if [[ "$ai_chat_host" == "0.0.0.0" ]]; then
+  printf 'Warning: the web application is reachable on the local network. Use strong credentials and a firewall or trusted TLS reverse proxy.\n'
+fi
 printf '\n%s installed successfully.\nOpen: %s\nUninstall: %s/install/uninstall.sh --install-dir %q --keep-data\n' "$APP_NAME" "$public_url" "$public_url" "$install_dir"

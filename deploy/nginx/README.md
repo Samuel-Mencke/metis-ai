@@ -1,7 +1,9 @@
 # Nginx deployment
 
-The application listens on `127.0.0.1:3100`; Nginx proxies requests to the
-application.
+Set `AI_CHAT_HOST=127.0.0.1` for a localhost-only application and let Nginx
+proxy requests to it. If the application is intentionally installed for LAN
+access, configure `AI_CHAT_HOST=0.0.0.0` and keep the same authenticated TLS
+boundary.
 
 First replace `YOUR_DOMAIN` and `YOUR_PORT` in
 `deploy/nginx/metis-ai.conf.template`, then create the DNS record:
@@ -31,4 +33,5 @@ sudo systemctl reload nginx
 ```
 
 Do not replace or delete configurations for other domains. The Nginx config
-uses the existing application on `127.0.0.1:3100`.
+uses the configured application host on port `3100`; the default is
+`127.0.0.1`.

@@ -7,6 +7,7 @@ import {
   useState,
   type AnchorHTMLAttributes,
   type HTMLAttributes,
+  type InputHTMLAttributes,
 } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -152,18 +153,50 @@ function CodeBlock({
   );
 }
 
-const markdownComponentsWithCode = {
-  ...markdownComponents,
-  code: CodeBlock,
-};
+function TaskCheckbox({
+  interactive,
+  checked,
+  ...props
+}: InputHTMLAttributes<HTMLInputElement> & { interactive?: boolean }) {
+  const [value, setValue] = useState(Boolean(checked));
+  useEffect(() => {
+    setValue(Boolean(checked));
+  }, [checked]);
+  return (
+    <input
+      {...props}
+      type="checkbox"
+      checked={value}
+      disabled={!interactive}
+      contentEditable={false}
+      onChange={(event) => {
+        setValue(event.currentTarget.checked);
+        if (interactive) {
+          event.currentTarget.closest(".editable-markdown")?.dispatchEvent(
+            new InputEvent("input", { bubbles: true, inputType: "insertReplacementText" }),
+          );
+        }
+      }}
+    />
+  );
+}
 
 export const Markdown = memo(function Markdown({
   content,
   streaming = false,
+  interactiveTasks = false,
 }: {
   content: string;
   streaming?: boolean;
+  interactiveTasks?: boolean;
 }) {
+  const markdownComponentsWithCode = {
+    ...markdownComponents,
+    code: CodeBlock,
+    input: (props: InputHTMLAttributes<HTMLInputElement>) => (
+      <TaskCheckbox {...props} interactive={interactiveTasks} />
+    ),
+  };
   if (streaming) {
     const { ready, pending } = splitStreamingMath(content);
     return (

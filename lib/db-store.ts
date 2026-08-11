@@ -23,6 +23,8 @@ import { chatUploadDir, resolveUploadPath } from "@/lib/uploads";
 
 const now = () => new Date().toISOString();
 const chatCache = new Map<string, { updatedAt: string; chat: Chat }>();
+const MAX_CHAT_KEYWORDS = 24;
+const MAX_CHAT_KEYWORD_LENGTH = 80;
 type ChatPageResult = {
   chat: Chat;
   messageOffset: number;
@@ -114,6 +116,22 @@ function parseJsonField<T>(value: unknown): T | undefined {
   }
 }
 
+export function normalizeChatKeywords(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const keywords: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const keyword = item.trim().replace(/\s+/g, " ").slice(0, MAX_CHAT_KEYWORD_LENGTH);
+    const key = keyword.toLocaleLowerCase();
+    if (!keyword || seen.has(key)) continue;
+    seen.add(key);
+    keywords.push(keyword);
+    if (keywords.length >= MAX_CHAT_KEYWORDS) break;
+  }
+  return keywords;
+}
+
 export function listChatsForUser(
   ownerId?: string,
   options: { includeArchived?: boolean } = {},
@@ -128,6 +146,7 @@ export function listChatsForUser(
         `SELECT id, owner_id AS ownerId, created_at AS createdAt, updated_at AS updatedAt,
                 json_extract(data, '$.lastMessageSent') AS lastMessageSent,
                 json_extract(data, '$.title') AS title,
+                json_extract(data, '$.keywords') AS keywords,
                 json_extract(data, '$.agentId') AS agentId,
                 json_extract(data, '$.modelId') AS modelId,
                 json_extract(data, '$.runStatus') AS runStatus,
@@ -144,6 +163,7 @@ export function listChatsForUser(
         `SELECT id, owner_id AS ownerId, created_at AS createdAt, updated_at AS updatedAt,
                 json_extract(data, '$.lastMessageSent') AS lastMessageSent,
                 json_extract(data, '$.title') AS title,
+                json_extract(data, '$.keywords') AS keywords,
                 json_extract(data, '$.agentId') AS agentId,
                 json_extract(data, '$.modelId') AS modelId,
                 json_extract(data, '$.runStatus') AS runStatus,
@@ -162,10 +182,14 @@ export function listChatsForUser(
       if (!options.includeArchived && archived) return [];
       const pendingQuestion = parseJsonField<PendingChatQuestion>(item.pendingQuestion);
       const share = parseJsonField<ChatShare>(item.share);
+      const keywords = normalizeChatKeywords(
+        parseJsonField<unknown>(item.keywords) ?? item.keywords,
+      );
       return [{
         id: String(item.id || ""),
         ownerId: typeof item.ownerId === "string" ? item.ownerId : undefined,
         title: typeof item.title === "string" ? item.title : "New chat",
+        ...(keywords.length ? { keywords } : {}),
         updatedAt: String(item.updatedAt || ""),
         createdAt: String(item.createdAt || ""),
         ...(typeof item.lastMessageSent === "string" ? { lastMessageSent: item.lastMessageSent } : {}),
@@ -196,6 +220,7 @@ export type ChatSearchResult = {
   messageId?: string;
   role?: ChatMessage["role"];
   snippet: string;
+  matchedKeywords?: string[];
 };
 
 export function searchChatsForUser(
@@ -212,12 +237,17 @@ export function searchChatsForUser(
     if (!chat) continue;
 
     const titleIndex = chat.title.toLowerCase().indexOf(normalized);
-    if (titleIndex >= 0) {
+    const matchedKeywords = normalizeChatKeywords(chat.keywords)
+      .filter((keyword) => keyword.toLowerCase().includes(normalized));
+    if (titleIndex >= 0 || matchedKeywords.length > 0) {
       results.push({
         chatId: chat.id,
         chatTitle: chat.title,
         updatedAt: chat.updatedAt,
-        snippet: makeSearchSnippet(chat.title, titleIndex, normalized.length),
+        snippet: titleIndex >= 0
+          ? makeSearchSnippet(chat.title, titleIndex, normalized.length)
+          : `Keywords: ${matchedKeywords.join(" · ")}`,
+        ...(matchedKeywords.length ? { matchedKeywords } : {}),
       });
     }
 
@@ -413,6 +443,7 @@ export function updateChat(
   id: string,
   patch: {
     title?: string;
+    keywords?: string[] | null;
     agentId?: string | null;
     modelId?: string | null;
     modelParams?: Array<{ id: string; value: string }> | null;
@@ -437,6 +468,13 @@ export function updateChat(
     if (!chat) return null;
     const next = { ...chat };
     if (patch.title?.trim()) next.title = patch.title.trim();
+    if (patch.keywords === null) {
+      delete next.keywords;
+    } else if (patch.keywords) {
+      const keywords = normalizeChatKeywords(patch.keywords);
+      if (keywords.length) next.keywords = keywords;
+      else delete next.keywords;
+    }
     if (patch.agentId === null) delete next.agentId;
     else if (patch.agentId !== undefined) next.agentId = patch.agentId.trim() || undefined;
     if (patch.modelId === null) delete next.modelId;
