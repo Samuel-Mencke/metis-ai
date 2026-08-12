@@ -284,6 +284,28 @@ export type ChatSessionState = {
   pinnedNoteIds?: string[];
   unpinnedGlobalNoteIds?: string[];
   filters?: Record<string, string | boolean | number | null>;
+  modeId?: string;
+};
+
+export type ToolPermissionCategory =
+  | "read"
+  | "write"
+  | "terminal"
+  | "browser"
+  | "memory"
+  | "remote"
+  | "plan"
+  | "subagent";
+
+export type AgentMode = {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  instructions: string;
+  allowedCategories: ToolPermissionCategory[];
+  toolOverrides?: Record<string, boolean>;
+  builtIn?: boolean;
 };
 
 export type TerminalTab = {
@@ -381,6 +403,7 @@ export type GlobalModelSettings = {
     askUserTimeout?: boolean;
     voiceInput?: boolean;
   };
+  customModes?: AgentMode[];
 };
 
 function ensureDirs() {

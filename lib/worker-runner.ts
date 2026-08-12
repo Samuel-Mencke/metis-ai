@@ -24,10 +24,31 @@ import {
 import { parseModelKey } from "@/lib/providers/types";
 import { runAlternativeProviderJob } from "@/lib/providers/runner";
 import { createSnapshot } from "@/lib/shared-context";
+import { allModes, modeById } from "@/lib/modes";
+import type { AgentMode, ToolPermissionCategory } from "@/lib/store";
 
 const AGENT_INIT_TIMEOUT_MS = 90_000;
 const AGENT_INACTIVITY_TIMEOUT_MS = 5 * 60_000;
 const AGENT_WAIT_TIMEOUT_MS = 90_000;
+
+function nativeToolsForMode(mode: AgentMode): string[] | undefined {
+  if (mode.id === "agent") return undefined;
+  const tools = new Set<string>(["mcp"]);
+  const categoryTools: Record<ToolPermissionCategory, string[]> = {
+    read: ["read", "grep", "glob", "ls", "readLints", "readTodos"],
+    write: ["edit", "delete", "applyAgentDiff"],
+    terminal: ["shell"],
+    browser: ["webSearch", "webFetch"],
+    memory: ["mcp"],
+    remote: ["mcp"],
+    plan: ["updateTodos", "readTodos"],
+    subagent: ["task"],
+  };
+  for (const category of mode.allowedCategories) {
+    for (const tool of categoryTools[category]) tools.add(tool);
+  }
+  return [...tools];
+}
 
 function classifyTool(name: string): ToolPart["kind"] {
   const value = name.toLowerCase();
@@ -208,7 +229,24 @@ function extractEditMetadata(
       if (position < 0) break;
       reconstructedBefore = `${reconstructedBefore.slice(0, position)}${oldText}${reconstructedBefore.slice(position + newText.length)}`;
     }
-    const originalBefore = previousDiff?.before ?? reconstructedBefore;
+    // A tool_call event can arrive after the SDK has already applied the edit.
+    // In that case the snapshot captured from disk is the *after* state and
+    // produces a misleading +0 -0 diff. Prefer it only when replaying the
+    // declared edit actually produces the recorded result.
+    const previousBefore = previousDiff?.before;
+    const previousReplaysToAfter = (() => {
+      if (typeof previousBefore !== "string") return false;
+      let candidate = previousBefore;
+      for (const edit of edits) {
+        const oldText = edit.oldText as string;
+        const newText = edit.newText as string;
+        const position = candidate.indexOf(oldText);
+        if (position < 0) return false;
+        candidate = `${candidate.slice(0, position)}${newText}${candidate.slice(position + oldText.length)}`;
+      }
+      return candidate === after;
+    })();
+    const originalBefore = previousReplaysToAfter ? previousBefore : reconstructedBefore;
     return { path: rawPath, diff: { before: originalBefore, after, ...diffStats(originalBefore, after) } };
   }
   return { path: rawPath, diff: { before, after, ...diffStats(before, after) } };
@@ -397,6 +435,14 @@ function extractSuggestions(value: string) {
   };
 }
 
+function ensureRecommendationSuggestions(value: string) {
+  if (/```suggestions\s*\n/i.test(value)) return value;
+  if (!/(demo|stub|noch nicht|nicht produktiv|nicht angebunden|nicht konfiguriert|nicht implementiert|mock|placeholder)/i.test(value)) {
+    return value;
+  }
+  return `${value.trim()}\n\n\`\`\`suggestions\nResend anbinden => Resend konfigurieren und eine manuelle E-Mail-Vorschau implementieren.\nEchte Recherche anbinden => Die Demo-Daten durch eine echte Websuche mit Quellen und Fehlerbehandlung ersetzen.\nDatenbank migrieren => Die JSON-Speicherung durch eine persistente Datenbank mit Migration ersetzen.\n\`\`\``;
+}
+
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
@@ -485,13 +531,23 @@ export async function runQueuedJob(job: AgentJob) {
   const providedAttachments: ProvidedAttachment[] = [];
   const createdWorkspaces: WorkspaceItem[] = [];
   const createdChats: Array<{ id: string; title: string }> = [];
+  const globalModelSettings = getGlobalModelSettings(job.userId);
+  const activeMode = modeById(chat.sessionState?.modeId, globalModelSettings.customModes || []);
+  const nativeTools = nativeToolsForMode(activeMode);
+  const availableModes = allModes(globalModelSettings.customModes || [])
+    .map((mode) => `${mode.id} (${mode.name})`)
+    .join(", ");
   const mcpContext = {
     chatId: job.chatId,
     userId: job.userId,
     jobId: job.id,
     incognito: Boolean(job.incognito || chat.incognito),
+    modeId: activeMode.id,
+    modePolicy: JSON.stringify({
+      allowedCategories: activeMode.allowedCategories,
+      toolOverrides: activeMode.toolOverrides || {},
+    }),
   };
-  const globalModelSettings = getGlobalModelSettings(job.userId);
   const configuredSubagentModel = globalModelSettings.subagentModelEnabled
     ? globalModelSettings.subagentModelId
     : undefined;
@@ -604,6 +660,7 @@ export async function runQueuedJob(job: AgentJob) {
           apiKey,
           model,
           local: { cwd: agentCwd, settingSources: ["project"] },
+          ...(nativeTools ? { tools: nativeTools } : {}),
           mcpServers: getMcpServers(mcpContext),
           ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
         }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be resumed within 90 seconds.")
@@ -611,12 +668,21 @@ export async function runQueuedJob(job: AgentJob) {
           apiKey,
           model,
           local: { cwd: agentCwd, settingSources: ["project"] },
+          ...(nativeTools ? { tools: nativeTools } : {}),
           mcpServers: getMcpServers(mcpContext),
           ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
         }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be created within 90 seconds.");
     updateJob(job.id, { agentId: agent.agentId, runId: job.id });
     updateChat(job.chatId, { agentId: agent.agentId }, job.userId);
     const prompt = [
+      `Current agent mode: ${activeMode.name}\n${activeMode.instructions}`,
+      `Available mode IDs for request_mode_change: ${availableModes || "agent (Agent), plan (Plan), ask (Ask)"}. Use the exact ID before the parentheses; never invent values such as "Code". For implementation or file changes, request modeId "agent".`,
+      "Response recommendation rule: when the result is incomplete, uses demo/stub endpoints, or still lacks real integrations, clearly say what is and is not implemented, then always provide 1–3 concise, concrete next-step recommendations in exactly one ```suggestions fenced block so the UI can render clickable actions. End by asking whether to implement the recommended next step. Do not present demo functionality as production-ready.",
+      ...(activeMode.id !== "agent"
+        ? [
+            "Mode transition rule: if the user's request requires a tool category this mode does not allow, you MUST call the request_mode_change MCP tool and ask for confirmation. Do not merely tell the user to switch modes manually. After confirmation, continue the original request in this same run using the newly allowed MCP tools (for example write_file); do not wait for a second user message.",
+          ]
+        : []),
       ...(job.incognito || chat.incognito
         ? ["Incognito mode: do not use or mention personal context, memories, chat metadata, notes, or workspaces. Incognito-only tool restrictions are enforced server-side."]
         : [
@@ -963,7 +1029,7 @@ export async function runQueuedJob(job: AgentJob) {
         .join("\n");
       text = [workspaceLinks, chatLinks].filter(Boolean).join("\n");
     }
-    const extractedSuggestions = extractSuggestions(text);
+    const extractedSuggestions = extractSuggestions(ensureRecommendationSuggestions(text));
     text = extractedSuggestions.text;
     if (extractedSuggestions.suggestions.length) {
       emit("suggestions", { suggestions: extractedSuggestions.suggestions });
@@ -1000,6 +1066,7 @@ export async function runQueuedJob(job: AgentJob) {
       runStatus: resultError ? "error" : "completed",
       runUpdatedAt: new Date().toISOString(),
       queueMessage: null,
+      pendingQuestion: null,
       ...(resultError ? { badge: "red" as const } : {}),
     }, job.userId);
     updateJob(job.id, {

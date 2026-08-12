@@ -572,7 +572,9 @@ const RUN_STATUS_TRANSITIONS: Record<ChatRunStatus, readonly ChatRunStatus[]> = 
   idle: ["idle", "running", "paused", "waiting_for_user", "waiting_input", "cancelled", "interrupted", "completed", "failed", "error"],
   running: ["running", "paused", "waiting_for_user", "waiting_input", "completed", "cancelled", "interrupted", "failed", "error"],
   paused: ["paused", "running", "cancelled", "interrupted", "failed", "error"],
-  waiting_for_user: ["waiting_for_user", "running", "cancelled", "interrupted", "failed", "error"],
+  // The worker may finish immediately after the answer is persisted while
+  // another process still observes the previous durable chat snapshot.
+  waiting_for_user: ["waiting_for_user", "running", "completed", "cancelled", "interrupted", "failed", "error"],
   waiting_input: ["waiting_input", "running", "cancelled", "interrupted", "failed", "error"],
   completed: ["completed", "running", "cancelled"],
   cancelled: ["cancelled", "running"],

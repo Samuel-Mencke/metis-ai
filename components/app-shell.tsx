@@ -51,6 +51,7 @@ import {
   Minimize2,
   MessageSquare,
   MoreHorizontal,
+  SlidersHorizontal,
   Palette,
   ClipboardList,
   GripVertical,
@@ -127,6 +128,7 @@ import { cn } from "@/lib/utils";
 import { modelAttrSummary } from "@/lib/model-label";
 import { clientConfig } from "@/lib/client-config";
 import { modelKey, parseModelKey } from "@/lib/providers/types";
+import type { AgentMode } from "@/lib/store";
 
 type Role = "user" | "assistant" | "system";
 
@@ -545,6 +547,7 @@ type ChatSessionState = {
   activeWorkspaceId?: string | null;
   workspaceOpen?: boolean;
   workspaceWidth?: number;
+  modeId?: string;
 };
 
 type TerminalTab = {
@@ -553,6 +556,17 @@ type TerminalTab = {
   cwd: string;
   sessionId?: string;
 };
+
+function ModeIcon({ mode, className }: { mode: AgentMode; className?: string }) {
+  if (mode.id === "plan") return <ClipboardList className={className} />;
+  if (mode.id === "ask") return <MessageSquare className={className} />;
+  if (mode.id === "agent") return <Bot className={className} />;
+  if (mode.icon === "eye") return <Eye className={className} />;
+  if (mode.icon === "brain") return <Brain className={className} />;
+  if (mode.icon === "terminal") return <Terminal className={className} />;
+  if (mode.icon === "browser") return <Globe2 className={className} />;
+  return <SlidersHorizontal className={className} />;
+}
 
 function normalizeWorkDirectory(value?: string): string {
   const cwd = value?.trim();
@@ -640,6 +654,7 @@ const CHAT_MESSAGE_LOAD_LIMIT = 20;
 const CHAT_MESSAGE_PRELOAD_MAX = CHAT_MESSAGE_LOAD_LIMIT;
 const MODEL_STORAGE_KEY = `${clientConfig.storagePrefix}_model`;
 const PARAMS_STORAGE_KEY = `${clientConfig.storagePrefix}_model_params`;
+const MODE_STORAGE_KEY = `${clientConfig.storagePrefix}_mode`;
 const SIDEBAR_WIDTH_STORAGE_KEY = `${clientConfig.storagePrefix}_sidebar_width`;
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 420;
@@ -854,6 +869,27 @@ function MessageSources({ sources }: { sources: SourceLink[] }) {
 
 function modelDisplayName(model: ModelInfo) {
   return model.displayName;
+}
+
+function McpSupportIndicator({ providerId }: { providerId?: string }) {
+  if (providerId !== "antigravity") return null;
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            className="inline-flex size-4 shrink-0 items-center justify-center rounded-full border border-amber-500/40 text-[10px] font-bold text-amber-500"
+            aria-label="MCP tools are not supported for this provider"
+          >
+            !
+          </span>
+        </TooltipTrigger>
+        <TooltipContent>
+          MCP tools are not supported for this provider. Remote clients and MCP actions are unavailable.
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
 }
 
 function formatTokenCount(value: number) {
@@ -1610,6 +1646,8 @@ export default function AppShell() {
   const [loadingChatId, setLoadingChatId] = useState<string | null>(null);
   const [agentId, setAgentId] = useState<string | undefined>();
   const [modelId, setModelId] = useState("");
+  const [modes, setModes] = useState<AgentMode[]>([]);
+  const [modeId, setModeId] = useState("agent");
   const [defaultModelId, setDefaultModelId] = useState("");
   const [defaultModelParams, setDefaultModelParams] = useState<ModelParamSelection[]>([]);
   const [modelParamsByModel, setModelParamsByModel] = useState<Record<string, ModelParamSelection[]>>({});
@@ -2888,6 +2926,46 @@ export default function AppShell() {
     setMemories(data.memories);
   }, []);
 
+  const loadModes = useCallback(async () => {
+    const res = await fetch("/api/modes", { cache: "no-store" });
+    if (!res.ok) return;
+    const data = (await res.json()) as { modes?: AgentMode[] };
+    const available = data.modes || [];
+    setModes(available);
+    if (!activeChatIdRef.current) {
+      const saved = typeof window !== "undefined" ? localStorage.getItem(MODE_STORAGE_KEY) : null;
+      if (saved && available.some((mode) => mode.id === saved)) setModeId(saved);
+    }
+  }, []);
+
+  async function selectMode(nextModeId: string) {
+    if (!modes.some((mode) => mode.id === nextModeId)) return;
+    setModeId(nextModeId);
+    localStorage.setItem(MODE_STORAGE_KEY, nextModeId);
+    if (!activeChatId) return;
+    const response = await fetch(`/api/chats/${activeChatId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionState: {
+          ...(chatCacheRef.current.get(activeChatId)?.sessionState || {}),
+          modeId: nextModeId,
+        },
+      }),
+    });
+    if (!response.ok) {
+      toast.error("Could not save agent mode");
+      return;
+    }
+    const cached = chatCacheRef.current.get(activeChatId);
+    if (cached) {
+      chatCacheRef.current.set(activeChatId, {
+        ...cached,
+        sessionState: { ...(cached.sessionState || {}), modeId: nextModeId },
+      });
+    }
+  }
+
   const loadModels = useCallback(async () => {
     const res = await fetch("/api/models", { cache: "no-store" });
     if (!res.ok) return;
@@ -3190,6 +3268,9 @@ export default function AppShell() {
     setIncognito(Boolean(snap.incognito));
     setAgentId(snap.agentId);
     setModelId(snap.modelId);
+    const savedModeId = session.modeId || "agent";
+    setModeId(savedModeId);
+    if (typeof window !== "undefined") localStorage.setItem(MODE_STORAGE_KEY, savedModeId);
     setModelParams(
       Object.prototype.hasOwnProperty.call(modelParamsByModel, snap.modelId)
         ? modelParamsByModel[snap.modelId] || []
@@ -3281,6 +3362,7 @@ export default function AppShell() {
       setIncognito(false);
       setBusy(false);
       setChatTitle("New chat");
+      setModeId("agent");
       setAgentId(undefined);
       setModelId(stateRef.current.defaultModelId || "");
       setModelParams(stateRef.current.defaultModelParams);
@@ -3435,6 +3517,7 @@ export default function AppShell() {
             setBrowserUrl(activeTab?.url || "");
             setBrowserInput(activeTab?.url || "");
             const session = next.sessionState || {};
+            setModeId(session.modeId || "agent");
             setActiveWorkspaceId(
               session.activeWorkspaceId && next.workspaces.some((item) => item.id === session.activeWorkspaceId)
                 ? session.activeWorkspaceId
@@ -3725,9 +3808,10 @@ export default function AppShell() {
   useEffect(() => {
     if (!authed) return;
     void loadChats();
+    void loadModes();
     void loadMemories();
     void loadModels();
-  }, [authed, loadChats, loadMemories, loadModels]);
+  }, [authed, loadChats, loadMemories, loadModes, loadModels]);
 
   useEffect(() => {
     if (!authed) return;
@@ -3761,6 +3845,9 @@ export default function AppShell() {
         if (!acceptServerSnapshot(activeChatId, data.chat.updatedAt)) return;
         setMessages((current) => mergeMessages(current, mapApiMessages(data.chat.messages, data.chat.runStatus)));
         if (data.chat.modelId) setModelId(data.chat.modelId);
+        const serverModeId = data.chat.sessionState?.modeId || "agent";
+        setModeId(serverModeId);
+        if (typeof window !== "undefined") localStorage.setItem(MODE_STORAGE_KEY, serverModeId);
         setModelParams(
           data.chat.modelId && Object.prototype.hasOwnProperty.call(modelParamsByModel, data.chat.modelId)
             ? modelParamsByModel[data.chat.modelId] || []
@@ -4356,6 +4443,7 @@ export default function AppShell() {
         modelId: stateRef.current.modelId,
         modelParams: stateRef.current.modelParams,
         incognito,
+        modeId,
       }),
     });
     if (!res.ok) return null;
@@ -5884,6 +5972,7 @@ export default function AppShell() {
   const contextTotal = selectedModel.contextWindow || 128_000;
   const contextEstimated = !latestUsage?.inputTokens;
   const selectedAttrs = modelAttrSummary(selectedModel, modelParams);
+  const selectedMode = modes.find((mode) => mode.id === modeId) || modes[0];
   const providerQueryMatch = normalizedModelSearch.match(/^([a-z0-9_-]+):(.*)$/);
   const providerQuery = providerQueryMatch &&
     availableProviders.some((provider) => provider.value === providerQueryMatch[1])
@@ -5983,6 +6072,7 @@ export default function AppShell() {
             </span>
           ) : null}
         </span>
+        <McpSupportIndicator providerId={model.providerId} />
         <button
           type="button"
           className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
@@ -6689,6 +6779,30 @@ export default function AppShell() {
           </div>
         ) : (
           <div className="group/model flex flex-1 items-center gap-0.5">
+            {selectedMode ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button type="button" variant="ghost" size="sm" className="h-7 max-w-32 gap-1.5 rounded-full px-2 text-xs font-normal hover:text-foreground" title={selectedMode.description}>
+                    <ModeIcon mode={selectedMode} className="size-3.5 shrink-0" />
+                    <span className="truncate">{selectedMode.name}</span>
+                    <ChevronDown className="size-3 shrink-0 opacity-60" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-64">
+                  <div className="px-2 py-1.5 text-[11px] text-muted-foreground">Agent mode</div>
+                  {modes.map((mode) => (
+                    <DropdownMenuItem key={mode.id} onClick={() => void selectMode(mode.id)}>
+                      <ModeIcon mode={mode} className="size-4" />
+                      <span className="min-w-0 flex-1">
+                        <span className="block">{mode.name}</span>
+                        <span className="block truncate text-[11px] text-muted-foreground">{mode.description}</span>
+                      </span>
+                      {mode.id === selectedMode.id ? <Check className="size-3.5" /> : null}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null}
             <DropdownMenu open={modelMenuOpen} onOpenChange={setModelMenuOpen}>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -6709,6 +6823,7 @@ export default function AppShell() {
                       </span>
                     ) : null}
                   </span>
+                  <McpSupportIndicator providerId={selectedModel.providerId} />
                   <ChevronDown className="size-3 shrink-0 opacity-60" />
                 </Button>
               </DropdownMenuTrigger>
@@ -6748,6 +6863,7 @@ export default function AppShell() {
                     >
                       {provider.value === "all" ? null : <ProviderLogo providerId={provider.value} className="size-3" />}
                       {provider.label}
+                      <McpSupportIndicator providerId={provider.value} />
                     </button>
                   ))}
                 </div>
@@ -6781,6 +6897,7 @@ export default function AppShell() {
                         <div className="flex items-center gap-1.5 px-2.5 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                           <ProviderLogo providerId={providerId} className="size-3" />
                           {group.label}
+                          <McpSupportIndicator providerId={providerId} />
                         </div>
                         {group.models.map(renderModelOption)}
                         <div className="py-1">
@@ -8761,6 +8878,7 @@ export default function AppShell() {
         onMemoryDeleted={(id) => setMemories((current) => current.filter((memory) => memory.id !== id))}
         onChatsChanged={() => void loadChats()}
         onModelsChanged={() => void loadModels()}
+        onModesChanged={() => void loadModes()}
         onLogout={() => void logout()}
       />
 

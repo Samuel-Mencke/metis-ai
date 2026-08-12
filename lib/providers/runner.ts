@@ -3,7 +3,7 @@ import { createInterface } from "node:readline";
 import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { streamText, type LanguageModel, type ModelMessage } from "ai";
+import { jsonSchema, stepCountIs, streamText, tool, type LanguageModel, type ModelMessage, type ToolSet } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogle } from "@ai-sdk/google";
 import { createGoogleVertex } from "@ai-sdk/google-vertex";
@@ -39,6 +39,8 @@ import {
 } from "@/lib/providers/oauth";
 import { runOfficialAntigravityJob } from "@/lib/providers/official-antigravity";
 import type { AgentJob } from "@/lib/jobs";
+import { getMcpServers } from "@/lib/mcp";
+import { allModes, modeById } from "@/lib/modes";
 
 type Usage = {
   inputTokens?: number;
@@ -62,6 +64,79 @@ type ProviderContext = {
   onTool: (tool: ToolPart) => void;
   onStream: (data: Record<string, unknown>) => void;
 };
+
+const remoteToolSchema = jsonSchema<Record<string, unknown>>({
+  type: "object",
+  properties: {
+    target: { type: "string", description: "server or client:<remote-client-id>" },
+    path: { type: "string" },
+    content: { type: "string" },
+    oldText: { type: "string" },
+    newText: { type: "string" },
+    command: { type: "string" },
+    cwd: { type: "string" },
+    timeout: { type: "integer" },
+    client_id: { type: "string" },
+  },
+  additionalProperties: true,
+});
+
+function providerRemoteTools(context: ProviderContext): ToolSet {
+  const mode = modeById(context.chat.sessionState?.modeId);
+  const canWrite = mode.allowedCategories.includes("write");
+  const canRemote = mode.allowedCategories.includes("remote");
+  if (!canRemote) return {};
+  const call = async (action: string, args: Record<string, unknown> = {}) => {
+    const clientId = typeof args.target === "string" && args.target.startsWith("client:")
+      ? args.target.slice("client:".length).trim()
+      : typeof args.client_id === "string" ? args.client_id : "";
+    if (action === "list_remote_clients") {
+      const response = await fetch(
+        process.env.AI_CHAT_INTERNAL_REMOTE_CLIENT_URL || `http://127.0.0.1:${process.env.PORT || "3100"}/api/internal/remote-client`,
+        { headers: { Authorization: `Bearer ${String(process.env.MCP_BEARER_TOKEN || "")}`, "X-AI-Chat-User-Id": String(context.job.userId || "") } },
+      );
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || "Failed to list remote clients");
+      return body.clients || [];
+    }
+    if (!clientId) throw new Error("target must be client:<remote-client-id>");
+    const response = await fetch(
+      process.env.AI_CHAT_INTERNAL_REMOTE_CLIENT_URL || `http://127.0.0.1:${process.env.PORT || "3100"}/api/internal/remote-client`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${String(process.env.MCP_BEARER_TOKEN || "")}`,
+          "X-AI-Chat-User-Id": String(context.job.userId || ""),
+        },
+        body: JSON.stringify({ clientId, action, params: args, source: "agent" }),
+      },
+    );
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Remote ${action} failed`);
+    return body.result;
+  };
+  const remoteTool = (
+    description: string,
+    execute: (args: Record<string, unknown>) => Promise<unknown>,
+  ) => tool({
+    description,
+    parameters: remoteToolSchema,
+    execute,
+  } as never) as ToolSet[string];
+  const tools: ToolSet = {
+    list_remote_clients: remoteTool("List all connected remote clients and their status.", () => call("list_remote_clients")),
+    read_file: remoteTool("Read a UTF-8 file from a remote client.", (args) => call("read_file", args)),
+    list_directory: remoteTool("List a directory on a remote client.", (args) => call("list_directory", args)),
+    execute_command: remoteTool("Run a command on a remote client.", (args) => call("execute_command", args)),
+  };
+  if (canWrite) {
+    tools.write_file = remoteTool("Create or overwrite a UTF-8 file on a remote client.", (args) => call("write_file", args));
+    tools.edit_file = remoteTool("Replace oldText with newText in a remote client file.", (args) => call("edit_file", args));
+    tools.delete_file = remoteTool("Delete a file on a remote client.", (args) => call("delete_file", args));
+  }
+  return tools;
+}
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -95,6 +170,8 @@ function providerPrompt(job: AgentJob) {
   return [
     "You are a provider inside a private AI chat application.",
     "Answer the user directly and do not claim to have used tools you were not given.",
+    "Response recommendation rule: when the result is incomplete, uses demo/stub endpoints, or still lacks real integrations, clearly distinguish implemented from missing functionality, then provide 1–3 concise, concrete next-step recommendations and ask whether to implement the recommended next step. Never present demo functionality as production-ready.",
+    "Remote-client tools are available in this run when supported by the provider. Use list_remote_clients first, then target remote operations with target=client:<remote-client-id>; do not use server paths for client files.",
     "When you use browser results, selected references, or other verifiable web sources, cite the exact URL immediately after the sentence it supports using the format [Source: Website title](URL). At the end, put every source used in exactly one fenced block starting with ```sources, with one Markdown link per line. Never invent URLs; if no verifiable source is available, do not create a sources block.",
     memories ? `Durable user memories:\n${memories}` : "",
     references ? `Selected references:\n${references}` : "",
@@ -251,6 +328,8 @@ async function runAiSdk(context: ProviderContext): Promise<ProviderResult> {
     model: aiModel(context.connection.providerKey, context.modelId, context.connection),
     instructions: providerPrompt(context.job),
     messages: modelMessages(context.chat, context.job),
+    tools: providerRemoteTools(context),
+    stopWhen: stepCountIs(20),
     abortSignal: context.signal,
   });
   return {
@@ -287,6 +366,8 @@ async function runOAuthAiSdk(
       model: provider.languageModel(oauthModelId),
       instructions: providerPrompt(context.job),
       messages: modelMessages(context.chat, context.job),
+      tools: providerRemoteTools(context),
+      stopWhen: stepCountIs(20),
       abortSignal: context.signal,
     });
     const usage = await consumeAiStream(result, context);
@@ -428,9 +509,28 @@ async function runCodex(context: ProviderContext): Promise<ProviderResult> {
     ...(context.connection.authType === "api_key" && context.connection.secret
       ? { apiKey: context.connection.secret }
       : {}),
-    ...(codexHome
-      ? { config: { cli_auth_credentials_store: "file" as const } }
-      : {}),
+    config: {
+      ...(codexHome ? { cli_auth_credentials_store: "file" as const } : {}),
+      mcp_servers: {
+        metis_ai: {
+          command: process.execPath,
+          args: [
+            path.join(config.root, "lib", "internal-mcp-server.mjs"),
+          ],
+          env: {
+            MCP_CHAT_ID: context.job.chatId,
+            MCP_USER_ID: context.job.userId || "",
+            MCP_JOB_ID: context.job.id,
+            MCP_MODE_ID: modeById(context.chat.sessionState?.modeId).id,
+            MCP_MODE_POLICY: JSON.stringify({
+              allowedCategories: modeById(context.chat.sessionState?.modeId).allowedCategories,
+              toolOverrides: modeById(context.chat.sessionState?.modeId).toolOverrides || {},
+            }),
+            MCP_AGENT_CWD: config.agentCwd,
+          },
+        },
+      },
+    },
     env,
   });
   const previousId = context.chat.agentId?.startsWith("codex:")
@@ -547,6 +647,16 @@ async function runClaude(context: ProviderContext): Promise<ProviderResult> {
       CLAUDE_AGENT_SDK_CLIENT_APP: "metis-ai",
     }),
     abortController,
+    mcpServers: getMcpServers({
+      chatId: context.job.chatId,
+      userId: context.job.userId,
+      jobId: context.job.id,
+      modeId: modeById(context.chat.sessionState?.modeId).id,
+      modePolicy: JSON.stringify({
+        allowedCategories: modeById(context.chat.sessionState?.modeId).allowedCategories,
+        toolOverrides: modeById(context.chat.sessionState?.modeId).toolOverrides || {},
+      }),
+    }),
   };
   let sessionId: string | undefined;
   let receivedText = false;

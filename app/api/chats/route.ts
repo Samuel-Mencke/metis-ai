@@ -1,5 +1,5 @@
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
-import { createChat, listChatsForUser, type BrowserContext } from "@/lib/db-store";
+import { createChat, listChatsForUser, updateChat, type BrowserContext } from "@/lib/db-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,6 +28,7 @@ export async function POST(req: Request) {
     modelId?: string;
     modelParams?: Array<{ id: string; value: string }>;
     incognito?: boolean;
+    modeId?: string;
   } = {};
   try {
     body = (await req.json()) as {
@@ -36,20 +37,29 @@ export async function POST(req: Request) {
       modelId?: string;
       modelParams?: Array<{ id: string; value: string }>;
       incognito?: boolean;
+      modeId?: string;
     };
   } catch {
     body = {};
   }
 
-  const chat = createChat(
+  const ownerId = await getAuthenticatedUserId(req) ?? undefined;
+  let chat = createChat(
     body.title,
     body.browserContext,
-    await getAuthenticatedUserId(req) ?? undefined,
+    ownerId,
     {
       id: body.modelId?.trim(),
       params: Array.isArray(body.modelParams) ? body.modelParams : undefined,
     },
     { incognito: body.incognito === true },
   );
+  if (body.modeId?.trim()) {
+    chat = updateChat(
+      chat.id,
+      { sessionState: { modeId: body.modeId.trim().slice(0, 80) } },
+      ownerId,
+    ) || chat;
+  }
   return Response.json({ chat }, { status: 201 });
 }

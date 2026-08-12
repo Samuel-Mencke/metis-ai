@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import * as pty from "node-pty";
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { callRemoteGatewayTool } from "@/lib/remote-gateway";
+import { collectRemoteClientEvents, requestRemoteClient } from "@/lib/remote-client-gateway";
 import { config } from "@/lib/config";
 
 export const runtime = "nodejs";
@@ -70,6 +71,17 @@ export async function GET(req: Request) {
   }
   const ownerId = await getAuthenticatedUserId(req) ?? undefined;
   const url = new URL(req.url);
+  const clientId = url.searchParams.get("clientId")?.trim();
+  if (clientId) {
+    const sessionId = url.searchParams.get("sessionId")?.trim() || "";
+    if (!sessionId) return Response.json({ error: "Remote terminal session is required" }, { status: 400 });
+    const cursor = Number(url.searchParams.get("cursor") || 0);
+    const events = await collectRemoteClientEvents(sessionId, 0);
+    const chunks = events
+      .filter((event) => event.event === "stdout" || event.event === "stderr")
+      .map((event, index) => ({ id: cursor + index + 1, data: String(event.data || "") }));
+    return Response.json({ chunks, cursor: cursor + chunks.length });
+  }
   const session = sessionFor(url.searchParams.get("sessionId"), ownerId);
   if (!session) return Response.json({ error: "Terminal session not found" }, { status: 404 });
   session.lastActivity = Date.now();
@@ -94,6 +106,7 @@ export async function POST(req: Request) {
     command?: string;
     timeout?: number;
     sessionId?: string;
+    clientId?: string;
     data?: string;
     cols?: number;
     rows?: number;
@@ -109,6 +122,42 @@ export async function POST(req: Request) {
 
   try {
     cleanupTerminalSessions();
+    if (body.clientId) {
+      const clientId = body.clientId.trim();
+      if (!ownerId) return Response.json({ error: "Account context is required" }, { status: 401 });
+      if (body.action === "pty-create") {
+        const result = await requestRemoteClient({
+          clientId,
+          ownerId,
+          action: "pty_open",
+          approved: true,
+          params: { cwd },
+        });
+        return Response.json(result);
+      }
+      if (body.action === "pty-input") {
+        const result = await requestRemoteClient({
+          clientId,
+          ownerId,
+          action: "pty_input",
+          approved: true,
+          params: { sessionId: body.sessionId, data: body.data || "" },
+        });
+        return Response.json({ result });
+      }
+      if (body.action === "pty-close") {
+        const result = await requestRemoteClient({
+          clientId,
+          ownerId,
+          action: "pty_close",
+          approved: true,
+          params: { sessionId: body.sessionId },
+        });
+        return Response.json(result);
+      }
+      if (body.action === "pty-resize") return Response.json({ ok: true });
+      return Response.json({ error: "Unsupported remote client terminal action" }, { status: 400 });
+    }
     if (body.action === "pty-attach") {
       const session = sessionFor(body.sessionId || null, ownerId);
       if (!session || session.cwd !== cwd) {

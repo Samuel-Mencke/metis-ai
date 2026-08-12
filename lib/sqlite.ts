@@ -331,6 +331,57 @@ export function getDatabase(): DatabaseSync {
     );
     CREATE INDEX IF NOT EXISTS voice_jobs_owner
       ON voice_jobs(owner_id, chat_id, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS remote_clients (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'offline',
+      os TEXT,
+      architecture TEXT,
+      version TEXT,
+      hostname TEXT,
+      address TEXT,
+      capabilities TEXT NOT NULL DEFAULT '[]',
+      policy TEXT NOT NULL DEFAULT '{"mode":"approval_required","allowlist":[]}',
+      last_seen_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      revoked_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS remote_clients_owner
+      ON remote_clients(owner_id, revoked_at, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS remote_client_credentials (
+      id TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL REFERENCES remote_clients(id) ON DELETE CASCADE,
+      secret_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_used_at TEXT,
+      revoked_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS remote_client_credentials_client
+      ON remote_client_credentials(client_id, revoked_at);
+    CREATE TABLE IF NOT EXISTS remote_enrollment_tokens (
+      token_hash TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      used_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS remote_enrollment_tokens_owner
+      ON remote_enrollment_tokens(owner_id, expires_at);
+    CREATE TABLE IF NOT EXISTS remote_audit (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      client_id TEXT REFERENCES remote_clients(id) ON DELETE SET NULL,
+      source TEXT NOT NULL,
+      action TEXT NOT NULL,
+      request_data TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL,
+      error TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS remote_audit_owner
+      ON remote_audit(owner_id, created_at DESC);
   `);
   for (const statement of [
     "ALTER TABLE memories ADD COLUMN owner_id TEXT REFERENCES users(id) ON DELETE CASCADE",

@@ -14,8 +14,10 @@ const modulesPromise = Promise.all([
   import("../lib/db-store"),
   import("../lib/shared-context"),
   import("../lib/db-questions"),
+  import("../lib/remote-clients"),
   import("../app/api/internal/mcp-workspace/route"),
   import("../app/api/internal/mcp-chat/route"),
+  import("../lib/sqlite"),
 ]);
 let modules!: Awaited<typeof modulesPromise>;
 
@@ -102,6 +104,25 @@ test("snapshots survive through the latest-valid record path", () => {
   assert.equal(getLatestSnapshot(chatId)?.availability, "needs_attention");
 });
 
+test("remote client enrollment is one-time and credentials are account-scoped", () => {
+  const remote = modules[3];
+  const ownerId = randomUUID();
+  modules[6].getDatabase().prepare(
+    "INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)",
+  ).run(ownerId, `remote-${ownerId}`, "test", new Date().toISOString());
+  const token = remote.createEnrollmentToken(ownerId);
+  const enrolled = remote.registerRemoteClient(token.token, {
+    name: "Test client",
+    os: "linux",
+    capabilities: ["get_info"],
+  });
+  assert.ok(enrolled?.client);
+  assert.ok(enrolled?.credential);
+  assert.equal(remote.registerRemoteClient(token.token, { name: "Replay" }), null);
+  assert.equal(remote.authenticateRemoteClient(enrolled!.client!.id, enrolled!.credential!)?.ownerId, ownerId);
+  assert.equal(remote.getRemoteClient(enrolled!.client!.id, randomUUID()), null);
+});
+
 test("ask_user answers exactly once and rejects stale versions", async () => {
   const { createPendingQuestion, resolveQuestion } = modules[2];
   const pending = createPendingQuestion(
@@ -158,7 +179,7 @@ test("voice settings normalize provider defaults without retaining secrets", () 
 });
 
 test("workspace creation is persisted, addressable, and idempotent", async () => {
-  const { POST } = modules[3];
+  const { POST } = modules[4];
   const beforePage = modules[0].getChatPage(chatId, undefined, 100, 0);
   assert.equal(beforePage?.chat.workspaces?.length || 0, 0);
   const headers = {
@@ -200,7 +221,7 @@ test("workspace creation is persisted, addressable, and idempotent", async () =>
 });
 
 test("chat keywords are normalized, persisted, and searchable through MCP", async () => {
-  const { POST } = modules[4];
+  const { POST } = modules[5];
   const headers = {
     "Content-Type": "application/json",
     Authorization: "Bearer shared-context-test-token",

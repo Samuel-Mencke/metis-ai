@@ -7,12 +7,15 @@ import {
   Bell,
   Brain,
   Check,
+  CheckCircle2,
   ChevronDown,
   KeyRound,
   Link2,
   Lock,
   MessagesSquare,
   Mic,
+  Monitor,
+  MoreHorizontal,
   PlugZap,
   Plus,
   RefreshCw,
@@ -21,6 +24,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
+import { Apple as AppleLogo, Microsoft as MicrosoftLogo } from "@lobehub/icons";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -51,6 +55,8 @@ import {
 import { cn } from "@/lib/utils";
 import type { MemoryItem } from "@/components/memories-panel";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import type { AgentMode, ToolPermissionCategory } from "@/lib/store";
+import { TOOL_PERMISSION_CATEGORIES } from "@/lib/modes";
 
 type ProviderDefinition = {
   key: string;
@@ -168,6 +174,19 @@ type McpServer = {
   enabled?: boolean;
   configured_env_keys?: string[];
   configured_header_keys?: string[];
+};
+
+type RemoteClient = {
+  id: string;
+  name: string;
+  status: "online" | "offline" | "revoked";
+  os?: string;
+  version?: string;
+  architecture?: string;
+  hostname?: string;
+  lastSeenAt?: string;
+  policy: { mode: "restricted" | "approval_required" | "full_access"; allowlist: string[] };
+  capabilities?: string[];
 };
 
 type ArchivedChat = {
@@ -304,6 +323,7 @@ type Props = {
   onMemoryDeleted: (id: string) => void;
   onChatsChanged: () => void;
   onModelsChanged?: () => void;
+  onModesChanged?: () => void;
   onLogout: () => void;
 };
 
@@ -348,6 +368,7 @@ export function SettingsPanel({
   onMemoryDeleted,
   onChatsChanged,
   onModelsChanged,
+  onModesChanged,
   onLogout,
 }: Props) {
   const [draft, setDraft] = useState("");
@@ -360,6 +381,13 @@ export function SettingsPanel({
   const [mcpLoaded, setMcpLoaded] = useState(false);
   const [mcpDraft, setMcpDraft] = useState<McpDraft>(emptyMcpDraft);
   const [mcpBusy, setMcpBusy] = useState(false);
+  const [remoteClients, setRemoteClients] = useState<RemoteClient[]>([]);
+  const [remoteCommand, setRemoteCommand] = useState("");
+  const [remoteCommands, setRemoteCommands] = useState<{ linux: string; windows: string; macos: string } | null>(null);
+  const [remotePlatform, setRemotePlatform] = useState<"linux" | "windows" | "macos">("linux");
+  const [remotePairStep, setRemotePairStep] = useState<"idle" | "os" | "install" | "finish">("idle");
+  const [remotePairExistingIds, setRemotePairExistingIds] = useState<string[]>([]);
+  const [remoteBusy, setRemoteBusy] = useState(false);
   const [voiceApiKey, setVoiceApiKey] = useState("");
   const [voiceKeyBusy, setVoiceKeyBusy] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<
@@ -380,6 +408,16 @@ export function SettingsPanel({
     location: "",
   });
   const [providerBusy, setProviderBusy] = useState(false);
+  const [customModes, setCustomModes] = useState<AgentMode[]>([]);
+  const [modeDraft, setModeDraft] = useState<AgentMode>({
+    id: "",
+    name: "",
+    description: "",
+    icon: "sliders-horizontal",
+    instructions: "",
+    allowedCategories: ["read"],
+  });
+  const [modeOverridesDraft, setModeOverridesDraft] = useState("{}");
   const [oauthFlow, setOauthFlow] = useState<OAuthFlow | null>(null);
   const [oauthCode, setOauthCode] = useState("");
   const [archivedChats, setArchivedChats] = useState<ArchivedChat[]>([]);
@@ -387,6 +425,137 @@ export function SettingsPanel({
   const [archivedChatsLoaded, setArchivedChatsLoaded] = useState(false);
   const [browserNotificationsAvailable, setBrowserNotificationsAvailable] =
     useState(false);
+  const loadRemoteClients = useCallback(async () => {
+    try {
+      const response = await fetch("/api/remote-clients", { cache: "no-store" });
+      if (!response.ok) throw new Error("Failed to load remote clients");
+      const data = (await response.json()) as { clients?: RemoteClient[] };
+      setRemoteClients(data.clients || []);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to load remote clients");
+    }
+  }, []);
+
+  const createRemoteEnrollment = useCallback(async (platform = remotePlatform) => {
+    setRemoteBusy(true);
+    setRemotePlatform(platform);
+    setRemotePairExistingIds(remoteClients.map((client) => client.id));
+    try {
+      const response = await fetch("/api/remote-clients", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ os: platform }),
+      });
+      const data = (await response.json()) as { command?: string; commands?: { linux?: string; windows?: string; macos?: string }; error?: string };
+      if (!response.ok || !data.command) throw new Error(data.error || "Failed to create enrollment command");
+      setRemoteCommand(data.command);
+      setRemoteCommands({
+        linux: data.commands?.linux || data.command,
+        windows: data.commands?.windows || "",
+        macos: data.commands?.macos || "",
+      });
+      setRemotePairStep("install");
+      await navigator.clipboard?.writeText(data.command);
+      toast.success("Enrollment command copied");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to create enrollment command");
+    } finally {
+      setRemoteBusy(false);
+    }
+  }, [remoteClients, remotePlatform]);
+
+  const copyRemoteCommand = useCallback(async () => {
+    const command = remoteCommands?.[remotePlatform] || remoteCommand;
+    try {
+      await navigator.clipboard.writeText(command);
+      toast.success("Install command copied");
+    } catch {
+      toast.error("Could not copy install command");
+    }
+  }, [remoteCommand, remoteCommands, remotePlatform]);
+
+  const testRemoteConnection = useCallback(async (client: RemoteClient) => {
+    const response = await fetch(`/api/remote-clients/${encodeURIComponent(client.id)}/test`, { method: "POST" });
+    const data = (await response.json()) as { info?: { hostname?: string; os?: string; uptime?: number }; error?: string };
+    if (!response.ok) {
+      toast.error(data.error || "Connection test failed");
+      return;
+    }
+    toast.success(`${data.info?.hostname || client.name} is connected`);
+    await loadRemoteClients();
+  }, [loadRemoteClients]);
+
+  const updateRemotePolicy = useCallback(async (client: RemoteClient, mode: RemoteClient["policy"]["mode"]) => {
+    const response = await fetch(`/api/remote-clients/${encodeURIComponent(client.id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ policy: { ...client.policy, mode } }),
+    });
+    if (!response.ok) {
+      const data = (await response.json().catch(() => ({}))) as { error?: string };
+      throw new Error(data.error || "Failed to update policy");
+    }
+    await loadRemoteClients();
+  }, [loadRemoteClients]);
+
+  const renameRemoteClient = useCallback(async (client: RemoteClient, name: string) => {
+    const nextName = name.trim();
+    if (!nextName || nextName === client.name) return;
+    const response = await fetch(`/api/remote-clients/${encodeURIComponent(client.id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: nextName }),
+    });
+    if (!response.ok) toast.error("Failed to rename remote client");
+    else await loadRemoteClients();
+  }, [loadRemoteClients]);
+
+  const revokeRemoteClient = useCallback(async (client: RemoteClient) => {
+    if (!window.confirm(`Remove ${client.name} from this dashboard? The local client must still be uninstalled separately.`)) return;
+    const response = await fetch(`/api/remote-clients/${encodeURIComponent(client.id)}`, { method: "DELETE" });
+    if (!response.ok) {
+      const data = (await response.json().catch(() => ({}))) as { error?: string };
+      toast.error(data.error || "Failed to revoke client");
+      return;
+    }
+    toast.success("Remote client removed");
+    await loadRemoteClients();
+  }, [loadRemoteClients]);
+
+  useEffect(() => {
+    if (!open || settingsTab !== "remote-clients") return;
+    void loadRemoteClients();
+    const timer = window.setInterval(() => void loadRemoteClients(), 2_000);
+    return () => window.clearInterval(timer);
+  }, [loadRemoteClients, open, settingsTab]);
+  useEffect(() => {
+    if (remotePairStep !== "install") return;
+    let active = true;
+    const checkForConnection = async () => {
+      try {
+        const response = await fetch("/api/remote-clients", { cache: "no-store" });
+        if (!response.ok) return;
+        const data = (await response.json()) as { clients?: RemoteClient[] };
+        if (!active) return;
+        const clients = data.clients || [];
+        setRemoteClients(clients);
+        const knownIds = new Set(remotePairExistingIds);
+        const connectedClient = clients.find((client) => !knownIds.has(client.id) && client.status === "online");
+        if (connectedClient) {
+          setRemotePairStep("finish");
+          toast.success(`${connectedClient.name} connected`);
+        }
+      } catch {
+        // The normal settings refresh will retry while the modal is open.
+      }
+    };
+    void checkForConnection();
+    const timer = window.setInterval(() => void checkForConnection(), 2_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [remotePairExistingIds, remotePairStep]);
   useEffect(() => {
     setBrowserNotificationsAvailable(
       typeof window !== "undefined" && "Notification" in window,
@@ -454,13 +623,21 @@ export function SettingsPanel({
     }
   }, []);
 
+  const loadCustomModes = useCallback(async () => {
+    const response = await fetch("/api/modes", { cache: "no-store" });
+    if (!response.ok) return;
+    const data = (await response.json()) as { modes?: AgentMode[] };
+    setCustomModes((data.modes || []).filter((mode) => !mode.builtIn));
+  }, []);
+
   useEffect(() => {
     if (open) {
       void loadMcpServers();
       void loadArchivedChats();
       void loadProviders();
+      void loadCustomModes();
     }
-  }, [loadArchivedChats, loadMcpServers, loadProviders, open]);
+  }, [loadArchivedChats, loadCustomModes, loadMcpServers, loadProviders, open]);
 
   async function updateArchivedChat(id: string, archived: boolean) {
     const res = await fetch(`/api/chats/${id}`, {
@@ -475,6 +652,42 @@ export function SettingsPanel({
     await loadArchivedChats();
     onChatsChanged();
     toast.success(archived ? "Chat archived" : "Chat restored");
+  }
+
+  async function saveCustomMode() {
+    const payload = {
+      ...modeDraft,
+      id: modeDraft.id || undefined,
+      allowedCategories: modeDraft.allowedCategories,
+      toolOverrides: (() => {
+        try {
+          const parsed = JSON.parse(modeOverridesDraft);
+          return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+        } catch {
+          return {};
+        }
+      })(),
+    };
+    const response = await fetch("/api/modes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      toast.error("Could not save mode");
+      return;
+    }
+    setModeDraft({ id: "", name: "", description: "", icon: "sliders-horizontal", instructions: "", allowedCategories: ["read"] });
+    setModeOverridesDraft("{}");
+    await loadCustomModes();
+    onModesChanged?.();
+    toast.success("Mode saved");
+  }
+
+  async function deleteCustomMode(mode: AgentMode) {
+    await fetch(`/api/modes?id=${encodeURIComponent(mode.id)}`, { method: "DELETE" });
+    await loadCustomModes();
+    onModesChanged?.();
   }
 
   async function deleteArchivedChat(id: string) {
@@ -937,7 +1150,9 @@ export function SettingsPanel({
                 { value: "voice", label: "Voice input" },
                 { value: "archived", label: "Chats" },
                 { value: "providers", label: "Providers" },
+                { value: "modes", label: "Agent modes" },
                 { value: "mcp", label: "MCP Servers" },
+                { value: "remote-clients", label: "Remote Clients" },
                 { value: "memories", label: `Memories (${memories.length})` },
                 { value: "session", label: "Session" },
               ]}
@@ -960,9 +1175,17 @@ export function SettingsPanel({
               <KeyRound data-icon="inline-start" />
               Providers
             </TabsTrigger>
+            <TabsTrigger value="modes" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
+              <Settings2 data-icon="inline-start" />
+              Agent modes
+            </TabsTrigger>
             <TabsTrigger value="mcp" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
               <Server data-icon="inline-start" />
               MCP Servers
+            </TabsTrigger>
+            <TabsTrigger value="remote-clients" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
+              <PlugZap data-icon="inline-start" />
+              Remote Clients
             </TabsTrigger>
             <TabsTrigger value="memories" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
               <Brain data-icon="inline-start" />
@@ -1632,6 +1855,45 @@ export function SettingsPanel({
               </section>
             </TabsContent>
 
+            <TabsContent value="modes" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+              <section className="flex flex-col gap-4">
+                <div>
+                  <h3 className="text-sm font-medium">Agent modes</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">Create reusable modes with custom instructions and server-enforced tool permissions.</p>
+                </div>
+                <div className="space-y-3 rounded-xl border border-border/60 bg-muted/20 p-4">
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <Input value={modeDraft.name} onChange={(event) => setModeDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Mode name" aria-label="Mode name" />
+                    <Input value={modeDraft.icon} onChange={(event) => setModeDraft((current) => ({ ...current, icon: event.target.value }))} placeholder="Icon name" aria-label="Mode icon" />
+                  </div>
+                  <Input value={modeDraft.description} onChange={(event) => setModeDraft((current) => ({ ...current, description: event.target.value }))} placeholder="Short description" aria-label="Mode description" />
+                  <Textarea value={modeDraft.instructions} onChange={(event) => setModeDraft((current) => ({ ...current, instructions: event.target.value }))} placeholder="Custom instructions for this mode" aria-label="Mode instructions" />
+                  <div className="flex flex-wrap gap-1.5">
+                    {TOOL_PERMISSION_CATEGORIES.map((category) => {
+                      const active = modeDraft.allowedCategories.includes(category);
+                      return <Button key={category} type="button" size="xs" variant={active ? "default" : "outline"} onClick={() => setModeDraft((current) => ({ ...current, allowedCategories: active ? current.allowedCategories.filter((item) => item !== category) : [...current.allowedCategories, category as ToolPermissionCategory] }))}>{category}</Button>;
+                    })}
+                  </div>
+                  <Textarea value={modeOverridesDraft} onChange={(event) => setModeOverridesDraft(event.target.value)} placeholder='{"write_file": false}' aria-label="Individual tool overrides" className="min-h-16 font-mono text-xs" />
+                  <p className="text-[11px] text-muted-foreground">Optional individual overrides as JSON, for example {"{"}"write_file": false{"}"}</p>
+                  <div className="flex justify-end">
+                    <Button type="button" onClick={() => void saveCustomMode()} disabled={!modeDraft.name.trim()}>Save mode</Button>
+                  </div>
+                </div>
+                {customModes.length ? (
+                  <div className="divide-y rounded-xl border">
+                    {customModes.map((mode) => (
+                      <div key={mode.id} className="flex items-center gap-3 px-3 py-2.5">
+                        <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{mode.name}</p><p className="truncate text-xs text-muted-foreground">{mode.description || "Custom mode"}</p></div>
+                        <Button type="button" size="xs" variant="ghost" onClick={() => { setModeDraft(mode); setModeOverridesDraft(JSON.stringify(mode.toolOverrides || {}, null, 2)); }}>Edit</Button>
+                        <Button type="button" size="xs" variant="ghost" className="text-destructive" onClick={() => void deleteCustomMode(mode)}>Delete</Button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </section>
+            </TabsContent>
+
             <TabsContent value="mcp" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-4">
                 <div>
@@ -1754,6 +2016,79 @@ export function SettingsPanel({
               </section>
             </TabsContent>
 
+            <TabsContent value="remote-clients" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+              <section className="flex flex-col gap-5">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-medium">Remote Clients</h3>
+                    <p className="mt-1 max-w-2xl text-xs text-muted-foreground">
+                      Clients use an outbound encrypted connection. New clients start in approval mode.
+                    </p>
+                  </div>
+                  <Button type="button" size="sm" onClick={() => setRemotePairStep("os")} disabled={remoteBusy}>
+                    <Plus data-icon="inline-start" />
+                    Add client
+                  </Button>
+                </div>
+                <div className="flex flex-col gap-2">
+                  {remoteClients.length ? remoteClients.map((client) => (
+                    <div key={client.id} className="rounded-lg border bg-card/40 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex min-w-0 items-start gap-2">
+                          {client.os?.toLowerCase().includes("win") ? <MicrosoftLogo className="mt-1 size-4 shrink-0 text-muted-foreground" /> : client.os?.toLowerCase().includes("mac") ? <AppleLogo className="mt-1 size-4 shrink-0 text-muted-foreground" /> : <Server className="mt-1 size-4 shrink-0 text-muted-foreground" />}
+                          <div className="min-w-0">
+                          <Input
+                           key={`${client.id}:${client.name}`}
+                            defaultValue={client.name}
+                            aria-label={`Custom name for ${client.name}`}
+                            className="h-7 max-w-[16rem] border-transparent px-0 text-sm font-medium shadow-none focus-visible:border-input focus-visible:px-2"
+                            onBlur={(event) => void renameRemoteClient(client, event.target.value)}
+                          />
+                          <p className="text-xs text-muted-foreground">
+                            {client.hostname || "Unknown host"} · {client.os || "Unknown OS"} · {client.architecture || "unknown arch"}
+                          </p>
+                          <div className="mt-1.5">
+                            <Badge
+                              variant={client.policy.mode === "full_access" ? "default" : "outline"}
+                              className={client.policy.mode === "full_access"
+                                ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                                : ""}
+                            >
+                              {client.policy.mode === "full_access"
+                                ? "Full access enabled"
+                                : client.policy.mode === "approval_required"
+                                  ? "Approval required"
+                                  : "Restricted"}
+                            </Badge>
+                          </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <span className={`size-2 rounded-full ${client.status === "online" ? "bg-emerald-500" : "bg-muted-foreground/40"}`} title={client.status} />
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild><Button type="button" size="icon-xs" variant="ghost" aria-label={`Manage ${client.name}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem onClick={() => void testRemoteConnection(client)}>Test connection</DropdownMenuItem>
+                              <DropdownMenuItem onClick={() => void updateRemotePolicy(client, client.policy.mode === "full_access" ? "approval_required" : "full_access")}>
+                                {client.policy.mode === "full_access" ? "Disable full access" : "Enable full access"}
+                              </DropdownMenuItem>
+                              <DropdownMenuItem className="text-destructive" onClick={() => void revokeRemoteClient(client)}>Remove client</DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </div>
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+                        <span>{client.status}</span>
+                        {client.version ? <span>v{client.version}</span> : null}
+                        {client.lastSeenAt ? <span>seen {new Date(client.lastSeenAt).toLocaleString()}</span> : null}
+                      </div>
+                    </div>
+                  )) : (
+                    <p className="rounded-lg border border-dashed p-6 text-center text-xs text-muted-foreground">No remote clients enrolled yet.</p>
+                  )}
+                </div>
+              </section>
+            </TabsContent>
             <TabsContent value="memories" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-3">
                 <div>
@@ -1846,6 +2181,75 @@ export function SettingsPanel({
           </div>
         </Tabs>
       </DialogContent>
+      </Dialog>
+      <Dialog open={remotePairStep !== "idle"} onOpenChange={(value) => !value && setRemotePairStep("idle")}>
+        <DialogContent className="box-border w-[calc(100vw_-_2rem)] max-w-[calc(100vw_-_2rem)] gap-0 overflow-x-hidden overflow-y-auto rounded-2xl p-0 sm:w-[min(56rem,calc(100vw_-_2rem))] sm:max-w-[min(56rem,calc(100vw_-_2rem))]">
+          <div className="min-w-0 w-full max-w-full space-y-5 p-6">
+          <DialogHeader>
+            <DialogTitle>Connect a remote client</DialogTitle>
+            <DialogDescription>
+              Pair a device with this account and keep it available for terminal sessions.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground" aria-label="Remote client setup progress">
+            {["Choose OS", "Install", "Connected"].map((label, index) => {
+              const activeIndex = remotePairStep === "os" ? 0 : remotePairStep === "install" ? 1 : 2;
+              const complete = index < activeIndex;
+              return (
+                <div key={label} className="flex min-w-0 flex-1 items-center gap-1.5">
+                  <span className={cn("flex size-5 shrink-0 items-center justify-center rounded-full text-[10px] font-medium", index <= activeIndex ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground")}>
+                    {complete ? <Check className="size-3" /> : index + 1}
+                  </span>
+                  <span className={cn("truncate", index <= activeIndex && "text-foreground")}>{label}</span>
+                  {index < 2 ? <span className="mx-1 h-px flex-1 bg-border" /> : null}
+                </div>
+              );
+            })}
+          </div>
+          {remotePairStep === "os" ? (
+            <div className="grid grid-cols-1 gap-2 pt-1 sm:grid-cols-3">
+              {([
+                ["linux", "Linux", Server],
+                ["windows", "Windows", MicrosoftLogo],
+                ["macos", "macOS", AppleLogo],
+              ] as const).map(([value, label, Icon]) => (
+                <Button key={value} type="button" variant="outline" className="h-24 flex-col gap-2 rounded-xl" onClick={() => void createRemoteEnrollment(value)} disabled={remoteBusy}>
+                  <Icon className="size-8" />
+                  <span>{label}</span>
+                </Button>
+              ))}
+            </div>
+          ) : remotePairStep === "install" ? (
+            <div className="min-w-0 space-y-4 rounded-xl border border-border/60 bg-muted/20 p-4">
+              <div>
+                <p className="flex items-center gap-2 text-sm font-medium"><Monitor className="size-4 text-primary" /> Install the client</p>
+                <p className="mt-1 text-xs text-muted-foreground">Run this command on the device you want to connect.</p>
+              </div>
+              <div className="w-full min-w-0 max-w-full overflow-hidden">
+                <Textarea readOnly value={remoteCommands?.[remotePlatform] || remoteCommand} className="block min-h-32 w-full min-w-0 max-w-full resize-y overflow-auto [field-sizing:fixed] bg-background font-mono text-xs" />
+              </div>
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button type="button" variant="outline" onClick={() => void copyRemoteCommand()}>Copy install command</Button>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-muted-foreground" role="status" aria-live="polite">
+                <RefreshCw className="size-3.5 animate-spin" />
+                Waiting for installation…
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center gap-4 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.06] p-6 text-center">
+              <div className="relative flex size-16 items-center justify-center">
+                <span className="absolute inset-0 rounded-full border border-emerald-500/20 animate-in fade-in zoom-in-75 duration-500" />
+                <span className="relative flex size-12 items-center justify-center rounded-full border-2 border-emerald-500 text-emerald-500 animate-in zoom-in-50 duration-500">
+                  <Check className="size-6 animate-in zoom-in-50 delay-150 duration-500" strokeWidth={3} />
+                </span>
+              </div>
+              <div><p className="text-sm font-medium">Connected</p><p className="mt-1 text-xs text-muted-foreground">The remote client is ready to use. You can close this window.</p></div>
+              <Button type="button" onClick={() => setRemotePairStep("idle")}>Done</Button>
+            </div>
+          )}
+          </div>
+        </DialogContent>
       </Dialog>
       <ConfirmDialog
       open={Boolean(deleteTarget)}

@@ -65,6 +65,30 @@ function writeRollback(filePath: string, content: string, mode?: number) {
   renameSync(temp, filePath);
 }
 
+function recoverBeforeFromEditInput(tool: ToolPart, current: string | undefined, after: string | undefined) {
+  if (typeof current !== "string" || typeof after !== "string" || current !== after || typeof tool.input !== "string") {
+    return undefined;
+  }
+  try {
+    const input = JSON.parse(tool.input) as { edits?: unknown };
+    if (!Array.isArray(input.edits)) return undefined;
+    let recovered = current;
+    for (let index = input.edits.length - 1; index >= 0; index -= 1) {
+      const edit = input.edits[index];
+      if (!edit || typeof edit !== "object") return undefined;
+      const oldText = (edit as { oldText?: unknown }).oldText;
+      const newText = (edit as { newText?: unknown }).newText;
+      if (typeof oldText !== "string" || typeof newText !== "string") return undefined;
+      const position = recovered.indexOf(newText);
+      if (position < 0) return undefined;
+      recovered = `${recovered.slice(0, position)}${oldText}${recovered.slice(position + newText.length)}`;
+    }
+    return recovered !== current ? recovered : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function revertEditTool(tool: ToolPart, agentCwd: string): RevertFileResult {
   const filePath = tool.path ? resolveAgentPath(tool.path, agentCwd) : null;
   const displayPath = tool.path || tool.name;
@@ -72,12 +96,13 @@ export function revertEditTool(tool: ToolPart, agentCwd: string): RevertFileResu
     return { status: "warning", path: displayPath, reason: "path is outside the agent workspace" };
   }
 
-  const before = tool.diff?.before;
+  let before = tool.diff?.before;
   const after = tool.diff?.after;
   if (typeof before !== "string" && typeof after !== "string") {
     return { status: "conflict", path: displayPath, reason: "no complete before/after snapshot" };
   }
   const current = readCurrent(filePath);
+  before = recoverBeforeFromEditInput(tool, current, after) ?? before;
   if (current !== after) {
     return { status: "conflict", path: displayPath, reason: "current file differs from recorded result" };
   }

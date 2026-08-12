@@ -12,6 +12,14 @@ type RemoteTerminalProps = {
   onSessionIdChange: (sessionId: string) => void;
 };
 
+type RemoteClientOption = {
+  id: string;
+  name: string;
+  status: string;
+  os?: string;
+  hostname?: string;
+};
+
 export function RemoteTerminal({ cwd, sessionId, onSessionIdChange }: RemoteTerminalProps) {
   const terminalElementRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<import("@xterm/xterm").Terminal | null>(null);
@@ -20,6 +28,19 @@ export function RemoteTerminal({ cwd, sessionId, onSessionIdChange }: RemoteTerm
   const cursorRef = useRef(0);
   const [starting, setStarting] = useState(true);
   const [error, setError] = useState("");
+  const [clients, setClients] = useState<RemoteClientOption[]>([]);
+  const [target, setTarget] = useState("server");
+
+  useEffect(() => {
+    let disposed = false;
+    void fetch("/api/remote-clients", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : null)
+      .then((data: { clients?: RemoteClientOption[] } | null) => {
+        if (!disposed) setClients(data?.clients?.filter((client) => client.status !== "revoked") || []);
+      })
+      .catch(() => {});
+    return () => { disposed = true; };
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -57,7 +78,8 @@ export function RemoteTerminal({ cwd, sessionId, onSessionIdChange }: RemoteTerm
       fitAddonRef.current = fitAddon;
 
       const size = { cols: terminal.cols, rows: terminal.rows };
-      let response = sessionId
+      const remoteClientId = target === "server" ? undefined : target;
+      let response = sessionId && !remoteClientId
         ? await fetch("/api/remote", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -68,7 +90,7 @@ export function RemoteTerminal({ cwd, sessionId, onSessionIdChange }: RemoteTerm
         response = await fetch("/api/remote", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "pty-create", cwd, ...size }),
+          body: JSON.stringify({ action: "pty-create", clientId: remoteClientId, cwd, ...size }),
         });
       }
       const data = (await response.json()) as { sessionId?: string; error?: string };
@@ -81,21 +103,21 @@ export function RemoteTerminal({ cwd, sessionId, onSessionIdChange }: RemoteTerm
         void fetch("/api/remote", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "pty-input", sessionId: data.sessionId, data: input }),
+          body: JSON.stringify({ action: "pty-input", sessionId: data.sessionId, clientId: remoteClientId, data: input }),
         });
       });
       resizeDisposable = terminal.onResize(({ cols, rows }) => {
         void fetch("/api/remote", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "pty-resize", sessionId: data.sessionId, cols, rows }),
+          body: JSON.stringify({ action: "pty-resize", sessionId: data.sessionId, clientId: remoteClientId, cols, rows }),
         });
       });
 
       const poll = async () => {
         if (disposed) return;
         try {
-          const pollResponse = await fetch(`/api/remote?sessionId=${encodeURIComponent(data.sessionId!)}&cursor=${cursorRef.current}`, { cache: "no-store" });
+          const pollResponse = await fetch(`/api/remote?sessionId=${encodeURIComponent(data.sessionId!)}&cursor=${cursorRef.current}${remoteClientId ? `&clientId=${encodeURIComponent(remoteClientId)}` : ""}`, { cache: "no-store" });
           if (pollResponse.ok) {
             const pollData = (await pollResponse.json()) as { chunks?: Array<{ id: number; data: string }>; cursor?: number };
             for (const chunk of pollData.chunks || []) terminal.write(chunk.data);
@@ -128,17 +150,29 @@ export function RemoteTerminal({ cwd, sessionId, onSessionIdChange }: RemoteTerm
       terminalRef.current = null;
       sessionIdRef.current = null;
     };
-  }, [cwd]);
+    }, [cwd, target]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
       <div className="flex items-center gap-2">
-        <Input
-          value={cwd}
-          readOnly
-          aria-label="Remote working directory"
-          className="h-8 min-w-0 flex-1 font-mono text-xs"
-        />
+        <select
+          value={target}
+          onChange={(event) => {
+            setTarget(event.target.value);
+            cursorRef.current = 0;
+            onSessionIdChange("");
+          }}
+          aria-label="Terminal device"
+          className="h-8 max-w-[15rem] rounded-md border bg-background px-2 text-xs"
+        >
+          <option value="server">Metis AI server</option>
+          {clients.map((client) => (
+            <option key={client.id} value={client.id}>
+              {client.name} · {client.os || "client"} · {client.status}
+            </option>
+          ))}
+        </select>
+        <Input value={cwd} readOnly aria-label="Remote working directory" className="h-8 min-w-0 flex-1 font-mono text-xs" />
         <Button type="button" size="icon-sm" variant="ghost" onClick={() => terminalRef.current?.clear()} aria-label="Clear terminal">
           <RotateCcw className="size-3.5" />
         </Button>

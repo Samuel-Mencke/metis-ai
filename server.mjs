@@ -17,6 +17,10 @@ const {
   performBrowserAction,
   setBrowserViewport,
 } = await import("./lib/server-browser.ts");
+const {
+  authenticateClientMessage,
+  attachRemoteClient,
+} = await import("./lib/remote-client-gateway.ts");
 
 const port = Number(process.env.PORT || 3100);
 const host = process.env.AI_CHAT_HOST?.trim() || "127.0.0.1";
@@ -24,6 +28,7 @@ const dev = process.env.NODE_ENV !== "production";
 const nextApp = next({ dev, hostname: host, port });
 const handle = nextApp.getRequestHandler();
 const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+const remoteClientWebsocketServer = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 const browserStreamSubscribers = new Map();
 
 function streamUrl(request) {
@@ -225,6 +230,29 @@ websocketServer.on("connection", async (socket, request, context, options) => {
   socket.on("close", () => clearTimeout(timer));
 });
 
+remoteClientWebsocketServer.on("connection", (socket, request) => {
+  let authenticated = false;
+  const timer = setTimeout(() => {
+    if (!authenticated) socket.close();
+  }, 10_000);
+  socket.once("message", (raw) => {
+    try {
+      const auth = authenticateClientMessage(JSON.parse(raw.toString()));
+      if (!auth) {
+        socket.close();
+        return;
+      }
+      authenticated = true;
+      clearTimeout(timer);
+      attachRemoteClient(socket, auth.clientId, auth.ownerId, request.socket.remoteAddress);
+      socket.send(JSON.stringify({ type: "authenticated", clientId: auth.clientId }));
+    } catch {
+      socket.close();
+    }
+  });
+  socket.on("error", () => clearTimeout(timer));
+});
+
 await nextApp.prepare();
 const server = http.createServer(async (request, response) => {
   const url = streamUrl(request);
@@ -236,6 +264,12 @@ const server = http.createServer(async (request, response) => {
 });
 server.on("upgrade", async (request, socket, head) => {
   const url = streamUrl(request);
+  if (url.pathname === "/ws/remote-client") {
+    remoteClientWebsocketServer.handleUpgrade(request, socket, head, (client) => {
+      remoteClientWebsocketServer.emit("connection", client, request);
+    });
+    return;
+  }
   if (url.pathname !== "/api/browser/stream") {
     socket.destroy();
     return;
