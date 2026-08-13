@@ -28,6 +28,15 @@ function Refresh-Path {
   $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
     [Environment]::GetEnvironmentVariable("Path", "User")
 }
+function Get-NodeMajor {
+  $node = Get-Command node -ErrorAction SilentlyContinue
+  if (-not $node) { return 0 }
+  try { return [int]((& $node.Source -p "process.versions.node.split('.')[0]")) } catch { return 0 }
+}
+function Confirm-Install([string]$Name) {
+  $answer = Read-Host "$Name is missing or too old. Install/update it automatically now? (Y/n)"
+  return [string]::IsNullOrWhiteSpace($answer) -or $answer -match "^(y|yes)$"
+}
 
 if (-not $SkipRuntimeInstall) {
   if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
@@ -36,13 +45,14 @@ if (-not $SkipRuntimeInstall) {
   if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     winget install --id Git.Git --accept-source-agreements --accept-package-agreements
   }
-  if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    winget install --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements
+  if ((Get-NodeMajor) -lt 20) {
+    if (-not (Confirm-Install "Node.js 20 or newer")) { throw "Node.js 20 or newer is required." }
+    winget install --id OpenJS.NodeJS.LTS --source winget --accept-source-agreements --accept-package-agreements
   }
   Refresh-Path
 }
 Require-Command git
-Require-Command node
+if ((Get-NodeMajor) -lt 20) { throw "Node.js 20 or newer is required." }
 if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
   corepack enable
   corepack prepare pnpm@9 --activate

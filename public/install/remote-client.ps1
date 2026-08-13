@@ -4,7 +4,25 @@ param(
   [string]$InstallDir = "$env:LOCALAPPDATA\MetisAI\RemoteClient"
 )
 $ErrorActionPreference = "Stop"
-if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw "Node.js 20 or newer is required" }
+function Get-NodeMajor {
+  $node = Get-Command node -ErrorAction SilentlyContinue
+  if (-not $node) { return 0 }
+  try { return [int]((& $node.Source -p "process.versions.node.split('.')[0]")) } catch { return 0 }
+}
+function Confirm-Install([string]$Name) {
+  $answer = Read-Host "$Name is missing or too old. Install/update it automatically now? (Y/n)"
+  return [string]::IsNullOrWhiteSpace($answer) -or $answer -match "^(y|yes)$"
+}
+if ((Get-NodeMajor) -lt 20) {
+  if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+    throw "Node.js 20 or newer is required. Install it from https://nodejs.org/ and run this command again (winget was not found)."
+  }
+  if (-not (Confirm-Install "Node.js 20 or newer")) { throw "Node.js 20 or newer is required" }
+  winget install --id OpenJS.NodeJS.LTS --source winget --accept-source-agreements --accept-package-agreements
+  $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+}
+if ((Get-NodeMajor) -lt 20) { throw "Node.js 20 or newer is required after installation" }
+if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { throw "npm is required. Reinstall Node.js 20 or newer from https://nodejs.org/." }
 if (-not (Get-Command Invoke-WebRequest -ErrorAction SilentlyContinue)) { throw "PowerShell web requests are required" }
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $body = @{

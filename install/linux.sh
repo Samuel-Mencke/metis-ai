@@ -7,6 +7,23 @@ NODE_VERSION="${METIS_NODE_VERSION:-22.16.0}"
 DEFAULT_DIR="${METIS_AI_INSTALL_DIR:-$HOME/metis-ai}"
 
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+confirm_install() {
+  local name="$1" answer
+  read -r -p "$name is missing or too old. Install/update it automatically? [Y/n] " answer
+  [[ -z "$answer" || "$answer" =~ ^([Yy][Ee][Ss]|[Yy])$ ]]
+}
+install_system_package() {
+  local package="$1"
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get update && sudo apt-get install -y "$package"
+  elif command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y "$package"
+  elif command -v pacman >/dev/null 2>&1; then
+    sudo pacman -Sy --noconfirm "$package"
+  else
+    return 1
+  fi
+}
 ask() {
   local prompt="$1" default="${2:-}" value
   if [[ -n "$default" ]]; then
@@ -32,6 +49,7 @@ install_node() {
     printf '%s' "$(command -v node)"
     return
   fi
+  confirm_install "Node.js 20 or newer" || die "Node.js 20 or newer is required."
   mkdir -p "$dir"
   case "$(uname -m)" in
     x86_64|amd64) arch=x64 ;;
@@ -41,7 +59,10 @@ install_node() {
   esac
   url="https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${arch}.tar.xz"
   archive="$dir/node.tar.xz"
-  command -v curl >/dev/null 2>&1 || die "curl is required to install Node.js automatically."
+  if ! command -v curl >/dev/null 2>&1; then
+    confirm_install "curl" && install_system_package curl ||
+      die "curl is required to install Node.js automatically."
+  fi
   curl -fsSL "$url" -o "$archive"
   tar -xJf "$archive" -C "$dir"
   mv "$dir/node-v${NODE_VERSION}-linux-${arch}" "$dir/node"
@@ -49,7 +70,10 @@ install_node() {
   printf '%s' "$dir/node/bin/node"
 }
 
-command -v git >/dev/null 2>&1 || die "git is required."
+if ! command -v git >/dev/null 2>&1; then
+  confirm_install "git" && install_system_package git ||
+    die "git is required."
+fi
 install_dir="$(ask "Installation directory" "$DEFAULT_DIR")"
 install_dir="${install_dir/#\~/$HOME}"
 if [[ -e "$install_dir/.git" ]]; then

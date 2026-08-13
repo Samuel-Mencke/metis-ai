@@ -4,6 +4,15 @@ set -Eeuo pipefail
 REPO_URL="${METIS_AI_REPO_URL:-https://github.com/f1shyondrugs/metis-ai.git}"
 DEFAULT_DIR="${METIS_AI_INSTALL_DIR:-$HOME/metis-ai}"
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+confirm_install() {
+  local name="$1" answer
+  read -r -p "$name is missing or too old. Install/update it automatically? [Y/n] " answer
+  [[ -z "$answer" || "$answer" =~ ^([Yy][Ee][Ss]|[Yy])$ ]]
+}
+version_at_least_20() {
+  command -v "$1" >/dev/null 2>&1 &&
+    [[ "$("$1" -p 'process.versions.node.split(".")[0]')" -ge 20 ]]
+}
 usage() {
   cat <<'EOF'
 Usage:
@@ -80,9 +89,13 @@ default_public_host() {
   printf '%s' "${host:-127.0.0.1}"
 }
 command -v brew >/dev/null 2>&1 || die "Homebrew is required on macOS. Install it from https://brew.sh."
-command -v git >/dev/null 2>&1 || brew install git
-command -v node >/dev/null 2>&1 || brew install node
-command -v pnpm >/dev/null 2>&1 || brew install pnpm
+command -v git >/dev/null 2>&1 || { confirm_install "git" && brew install git || die "git is required."; }
+if ! version_at_least_20 node; then
+  confirm_install "Node.js 20 or newer" || die "Node.js 20 or newer is required."
+  if command -v node >/dev/null 2>&1; then brew upgrade node || true; else brew install node; fi
+fi
+version_at_least_20 node || die "Node.js 20 or newer is required after installation."
+command -v pnpm >/dev/null 2>&1 || { confirm_install "pnpm" && brew install pnpm || die "pnpm is required."; }
 
 if [[ -e "$install_dir/.git" ]]; then
   git -C "$install_dir" pull --ff-only
