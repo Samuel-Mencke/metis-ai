@@ -22,7 +22,8 @@ if ((Get-NodeMajor) -lt 20) {
   $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
 }
 if ((Get-NodeMajor) -lt 20) { throw "Node.js 20 or newer is required after installation" }
-if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { throw "npm is required. Reinstall Node.js 20 or newer from https://nodejs.org/." }
+$npmCommand = (Get-Command npm.cmd -ErrorAction SilentlyContinue).Source
+if (-not $npmCommand) { throw "npm is required. Reinstall Node.js 20 or newer from https://nodejs.org/." }
 if (-not (Get-Command Invoke-WebRequest -ErrorAction SilentlyContinue)) { throw "PowerShell web requests are required" }
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $body = @{
@@ -40,8 +41,8 @@ Invoke-WebRequest -Uri "$($Server.TrimEnd('/'))/install/remote-client.mjs" -OutF
 Invoke-WebRequest -Uri "$($Server.TrimEnd('/'))/install/remote-client-uninstall.ps1" -OutFile "$InstallDir\uninstall.ps1"
 Invoke-WebRequest -Uri "$($Server.TrimEnd('/'))/install/remote-client-run.ps1" -OutFile "$InstallDir\run.ps1"
 Push-Location $InstallDir
-npm init -y | Out-Null
-npm install --omit=dev --no-audit --no-fund ws | Out-Null
+& $npmCommand init -y | Out-Null
+& $npmCommand install --omit=dev --no-audit --no-fund ws | Out-Null
 Pop-Location
 $nodePath = (Get-Command node).Source
 $powershellPath = (Get-Command powershell.exe).Source

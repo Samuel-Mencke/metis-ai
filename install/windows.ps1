@@ -53,11 +53,15 @@ if (-not $SkipRuntimeInstall) {
 }
 Require-Command git
 if ((Get-NodeMajor) -lt 20) { throw "Node.js 20 or newer is required." }
-if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
-  corepack enable
-  corepack prepare pnpm@9 --activate
+$pnpmCommand = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
+if (-not $pnpmCommand) {
+  $corepackCommand = (Get-Command corepack.cmd -ErrorAction SilentlyContinue).Source
+  if (-not $corepackCommand) { throw "corepack is required to install pnpm." }
+  & $corepackCommand enable
+  & $corepackCommand prepare pnpm@9 --activate
+  $pnpmCommand = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
 }
-Require-Command pnpm
+if (-not $pnpmCommand) { throw "pnpm is required." }
 
 if (Test-Path (Join-Path $InstallDir ".git")) {
   git -C $InstallDir pull --ff-only
@@ -113,12 +117,12 @@ MCP_ENABLE_OPTIONAL_SERVERS=false
 
 Push-Location $InstallDir
 try {
-  pnpm install --frozen-lockfile
+  & $pnpmCommand install --frozen-lockfile
   $env:METIS_AI_BOOTSTRAP_USERNAME = $username
   $env:METIS_AI_BOOTSTRAP_PASSWORD = $passwordPlain
   $env:METIS_AI_BOOTSTRAP_OPTIONAL = "1"
-  pnpm exec tsx scripts/bootstrap-user.ts
-  pnpm build
+  & $pnpmCommand exec tsx scripts/bootstrap-user.ts
+  & $pnpmCommand build
 } finally {
   Pop-Location
   Remove-Item Env:METIS_AI_BOOTSTRAP_USERNAME -ErrorAction SilentlyContinue
