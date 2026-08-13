@@ -8,9 +8,9 @@ import {
 import path from "node:path";
 import { getAgentCwd } from "@/lib/mcp";
 
-export const MAX_ATTACHMENTS = 8;
-export const MAX_FILE_BYTES = 12 * 1024 * 1024;
-export const MAX_TOTAL_BYTES = 32 * 1024 * 1024;
+export const MAX_ATTACHMENTS = 10;
+export const MAX_FILE_BYTES = 50 * 1024 * 1024;
+export const MAX_TOTAL_BYTES = 500 * 1024 * 1024;
 
 const IMAGE_MIME = new Set([
   "image/png",

@@ -50,6 +50,30 @@ function nativeToolsForMode(mode: AgentMode): string[] | undefined {
   return [...tools];
 }
 
+const PERSISTED_CONTEXT_MAX_CHARS = 120_000;
+
+function persistedConversationContext(
+  chat: { messages: Array<{ id: string; role: string; content: string; createdAt?: string }> },
+  currentMessageId?: string,
+) {
+  const messages = chat.messages
+    .filter((message) =>
+      message.id !== currentMessageId &&
+      (message.role === "user" || message.role === "assistant") &&
+      message.content.trim(),
+    )
+    .map((message) => {
+      const speaker = message.role === "user" ? "User" : "Assistant";
+      const timestamp = message.createdAt ? ` (${message.createdAt})` : "";
+      return `${speaker}${timestamp}:\n${message.content.trim()}`;
+    });
+
+  if (!messages.length) return "";
+  const context = messages.join("\n\n");
+  if (context.length <= PERSISTED_CONTEXT_MAX_CHARS) return context;
+  return `[Earlier persisted messages truncated to fit the model context]\n${context.slice(-PERSISTED_CONTEXT_MAX_CHARS)}`;
+}
+
 function classifyTool(name: string): ToolPart["kind"] {
   const value = name.toLowerCase();
   if (/(subagent|delegate|agent|task)/.test(value)) return "subagent";
@@ -706,6 +730,19 @@ export async function runQueuedJob(job: AgentJob) {
       "When useful, offer up to five concise follow-up questions at the end using exactly this UI-only format. Use `display text => prompt to insert` when the visible label should differ from the inserted prompt:\n```suggestions\nExplain this in more detail => Explain the database synchronization in more detail, with a concrete example.\nShow me an example\n```\nDo not mention or explain this format outside the block.",
       subagentModelInstruction,
       `Your private AI workspace is:\n${agentCwd}\nUse this directory as the working directory for project files and commands. Do not use another user's workspace.`,
+      ...(job.incognito || chat.incognito
+        ? []
+        : (() => {
+            const persistedContext = persistedConversationContext(chat, job.messageId);
+            return persistedContext
+              ? [
+                  "Persisted conversation context:\n" +
+                    "This transcript comes from durable chat storage and must remain available after service or agent restarts. " +
+                    "Use it as the authoritative prior conversation. Do not ask the user to repeat information that is already present here.\n\n" +
+                    persistedContext,
+                ]
+              : [];
+          })()),
       job.resumePrompt
         ? `Resume the paused agent run. Do not repeat earlier tool calls or user-facing work. Continue only from the saved pause point using this answer/context:\n${job.resumePrompt}`
         : `User message:\n${job.message || "(see attachments)"}`,

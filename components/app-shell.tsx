@@ -291,7 +291,9 @@ type PersistedQueuedMessage = {
   references?: ReferenceItem[];
 };
 
-const MAX_PENDING_FILES = 8;
+const MAX_PENDING_FILES = 10;
+const MAX_PENDING_FILE_BYTES = 50 * 1024 * 1024;
+const MAX_PENDING_TOTAL_BYTES = 500 * 1024 * 1024;
 const FILE_ACCEPT =
   "image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.webm,.mp4,.mov,.m4v,.mp3,.wav,.ogg,.m4a,.txt,.md,.json,.csv,.ts,.tsx,.js,.jsx,.py,.go,.rs,.java,.c,.cpp,.h,.css,.html,.xml,.yaml,.yml,.toml,.zip";
 
@@ -1439,6 +1441,7 @@ function AttachmentViewer({
       : attachment?.previewUrl;
   const textFile = Boolean(attachment && isTextAttachment(attachment.mimeType, attachment.name));
   const officeFile = Boolean(attachment && isOfficeAttachment(attachment.mimeType, attachment.name));
+  const pdfFile = attachment?.mimeType === "application/pdf";
   const officePreviewAvailable = officeFile && Boolean(attachment?.storedName && active?.chatId);
   const url = officePreviewAvailable && fileUrl ? `${fileUrl}/preview` : fileUrl;
 
@@ -1488,6 +1491,8 @@ function AttachmentViewer({
         <div className="min-h-0 flex-1 max-h-[calc(100dvh-7rem)] overflow-auto sm:max-h-[78vh]">
           {!attachment || !url ? (
             <p className="text-sm text-muted-foreground">Preview unavailable.</p>
+          ) : pdfFile ? (
+            <p className="text-sm text-muted-foreground">PDF previews are not available.</p>
           ) : attachment.mimeType.startsWith("image/") ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={url} alt={attachment.name} className="mx-auto max-h-[70vh] max-w-full object-contain" />
@@ -1495,8 +1500,6 @@ function AttachmentViewer({
             <video src={url} controls className="mx-auto max-h-[70vh] max-w-full" />
           ) : attachment.mimeType.startsWith("audio/") ? (
             <audio src={url} controls className="w-full" />
-          ) : attachment.mimeType === "application/pdf" ? (
-            <iframe src={url} title={attachment.name} className="h-[70vh] w-full rounded-lg border" />
           ) : textFile || officePreviewAvailable ? (
             textError ? (
               <p className="text-sm text-destructive">Could not load text file: {textError}</p>
@@ -1602,7 +1605,7 @@ function FileShareEmbed({
             </span>
             <span className="min-w-0">
               <span className="block text-sm font-medium">PDF file</span>
-              <span className="block text-xs text-muted-foreground">Click to open the preview.</span>
+              <span className="block text-xs text-muted-foreground">PDF previews are not available.</span>
             </span>
           </div>
         ) : textFile || officeFile ? (
@@ -4858,7 +4861,22 @@ export default function AppShell() {
       if (list.length > room) {
         toast.error(`Max ${MAX_PENDING_FILES} files`);
       }
-      const next = list.slice(0, room).map((file) => {
+      const sizeValid = list.filter((file) => file.size <= MAX_PENDING_FILE_BYTES);
+      if (sizeValid.length < list.length) {
+        toast.error("Each file must be 50 MB or smaller");
+      }
+      const currentTotal = prev.reduce((total, pending) => total + pending.file.size, 0);
+      let remainingBytes = MAX_PENDING_TOTAL_BYTES - currentTotal;
+      const nextFiles: File[] = [];
+      for (const file of sizeValid.slice(0, room)) {
+        if (file.size > remainingBytes) break;
+        nextFiles.push(file);
+        remainingBytes -= file.size;
+      }
+      if (nextFiles.length < Math.min(sizeValid.length, room)) {
+        toast.error("Attachments may not exceed 500 MB total");
+      }
+      const next = nextFiles.map((file) => {
         return {
           id: `pf-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
           file,

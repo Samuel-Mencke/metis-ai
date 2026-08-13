@@ -551,7 +551,16 @@ function ShareView() {
             ) : selectedAttachment?.attachment.mimeType.startsWith("audio/") ? (
               <audio src={selectedAttachment.url} controls className="w-full" />
             ) : selectedAttachment?.attachment.mimeType === "application/pdf" ? (
-              <iframe src={selectedAttachment.url} title={selectedAttachment.attachment.name} className="h-[78vh] w-full rounded-lg border" />
+              <div className="flex flex-col items-center gap-3 text-center">
+                <p className="text-sm text-muted-foreground">PDF previews are not available.</p>
+                <a
+                  href={selectedAttachment.url}
+                  download={selectedAttachment.attachment.name}
+                  className="rounded-lg border border-border/60 px-4 py-2 text-sm hover:bg-muted"
+                >
+                  Download {selectedAttachment.attachment.name}
+                </a>
+              </div>
             ) : selectedAttachment ? (
               <a href={selectedAttachment.url} download={selectedAttachment.attachment.name} className="rounded-lg border border-border/60 px-4 py-2 text-sm hover:bg-muted">
                 Download {selectedAttachment.attachment.name}

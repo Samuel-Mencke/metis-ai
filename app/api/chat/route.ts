@@ -4,6 +4,7 @@ import { appendMessage, getChat, titleFromMessage, updateChat } from "@/lib/db-s
 import { isModelAllowed } from "@/lib/model-access";
 import { getPinnedNotes, resolveReferences, type ContextReference } from "@/lib/context";
 import {
+  MAX_ATTACHMENTS,
   resolveUploadPath,
   saveAttachments,
   type IncomingAttachment,
@@ -119,7 +120,7 @@ export async function POST(req: Request) {
           typeof attachment.size === "number" &&
           Boolean(resolveUploadPath(chatId, attachment.storedName, ownerId)),
         )
-        .slice(0, 8)
+        .slice(0, MAX_ATTACHMENTS)
     : [];
   let stored = [];
   try {

@@ -169,7 +169,9 @@ export async function POST(req: Request) {
     if (body.action === "pty-create") {
       const sessionId = randomUUID();
       const shell = process.env.SHELL?.trim() || "/bin/bash";
-      const terminal = pty.spawn(shell, ["--login"], {
+      const shellName = path.basename(shell);
+      const shellArgs = shellName === "bash" || shellName === "zsh" ? ["--login"] : [];
+      const terminal = pty.spawn(shell, shellArgs, {
         name: "xterm-256color",
         cols: Math.max(20, Math.min(Number(body.cols) || 80, 240)),
         rows: Math.max(5, Math.min(Number(body.rows) || 24, 100)),
