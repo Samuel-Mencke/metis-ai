@@ -1596,7 +1596,15 @@ function FileShareEmbed({
         ) : mimeType.startsWith("audio/") ? (
           <audio src={href} controls className="w-full p-3" />
         ) : mimeType === "application/pdf" ? (
-          <iframe src={href} title={name} className="h-72 w-full border-0" />
+          <div className="flex items-center gap-3 bg-muted/30 p-4">
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-secondary/80">
+              <AttachmentIcon mimeType={mimeType} className="size-5 text-muted-foreground" />
+            </span>
+            <span className="min-w-0">
+              <span className="block text-sm font-medium">PDF file</span>
+              <span className="block text-xs text-muted-foreground">Click to open the preview.</span>
+            </span>
+          </div>
         ) : textFile || officeFile ? (
           <pre className="max-h-48 overflow-hidden whitespace-pre-wrap break-words bg-muted/30 p-3 text-xs text-muted-foreground">
             {text === null ? "Loading preview…" : text.slice(0, 4_000) || "Preview unavailable."}
@@ -6596,7 +6604,12 @@ export default function AppShell() {
           accept={FILE_ACCEPT}
           className="hidden"
           onChange={(e) => {
-            if (e.target.files?.length) addPendingFiles(e.target.files);
+            const selectedFiles = e.target.files;
+            if (!selectedFiles?.length) return;
+            if (selectedFiles.length > MAX_PENDING_FILES) {
+              toast.error(`You can select up to ${MAX_PENDING_FILES} files at once`);
+            }
+            addPendingFiles(Array.from(selectedFiles).slice(0, MAX_PENDING_FILES));
           }}
         />
         {pendingFiles.length > 0 ? (
