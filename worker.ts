@@ -3,6 +3,14 @@ import { spawn } from "node:child_process";
 import { appendRunEvent, claimNextJob, getJob, recoverStaleJobs, updateJob } from "@/lib/db-jobs";
 import { appendMessage, getChat, updateChat, upsertMessage } from "@/lib/db-store";
 import { expirePendingQuestions } from "@/lib/db-questions";
+import {
+  claimDueAutomations,
+  failAutomationClaim,
+  finalizeAutomationRunForJob,
+  linkAutomationRunJob,
+  startAutomationRun,
+} from "@/lib/automations";
+import { enqueueJob } from "@/lib/db-jobs";
 
 const pollMs = Number(process.env.AI_CHAT_WORKER_POLL_MS || 500);
 const configuredConcurrency = Number(process.env.AI_CHAT_WORKER_CONCURRENCY || 4);
@@ -96,6 +104,32 @@ function runJobInIsolatedProcess(jobId: string) {
   });
 }
 
+function enqueueDueAutomations() {
+  for (const automation of claimDueAutomations()) {
+    const run = startAutomationRun(automation);
+    try {
+      const job = enqueueJob({
+        chatId: run.chatId,
+        userId: automation.ownerId,
+        message: automation.prompt,
+        messageId: run.messageId,
+        ...(automation.modeId ? { modeId: automation.modeId } : {}),
+        ...(automation.modelId ? { modelId: automation.modelId } : {}),
+        ...(automation.extendedModelId ? { extendedModelId: automation.extendedModelId } : {}),
+        automationId: automation.id,
+        automationRunId: run.id,
+      });
+      linkAutomationRunJob(run.id, job.id);
+    } catch (error) {
+      failAutomationClaim(
+        automation.id,
+        automation.ownerId,
+        error instanceof Error ? error.message : "Could not enqueue automation run.",
+      );
+    }
+  }
+}
+
 process.on("SIGTERM", stop);
 process.on("SIGINT", stop);
 
@@ -105,6 +139,7 @@ async function main() {
   const active = new Set<Promise<void>>();
   let lastQuestionExpiry = 0;
   while (!stopping) {
+    enqueueDueAutomations();
     if (Date.now() - lastQuestionExpiry > 5_000) {
       lastQuestionExpiry = Date.now();
       for (const expired of expirePendingQuestions()) {
@@ -130,7 +165,10 @@ async function main() {
         .catch((error) => {
           console.error(`[ai-chat-worker] job ${job.id} failed`, error);
         })
-        .finally(() => active.delete(task));
+        .finally(() => {
+          finalizeAutomationRunForJob(job.id);
+          active.delete(task);
+        });
       active.add(task);
     }
     if (active.size >= concurrency) {

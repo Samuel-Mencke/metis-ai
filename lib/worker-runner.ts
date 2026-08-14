@@ -556,7 +556,7 @@ export async function runQueuedJob(job: AgentJob) {
   const createdWorkspaces: WorkspaceItem[] = [];
   const createdChats: Array<{ id: string; title: string }> = [];
   const globalModelSettings = getGlobalModelSettings(job.userId);
-  const activeMode = modeById(chat.sessionState?.modeId, globalModelSettings.customModes || []);
+  const activeMode = modeById(job.modeId || chat.sessionState?.modeId, globalModelSettings.customModes || []);
   const nativeTools = nativeToolsForMode(activeMode);
   const availableModes = allModes(globalModelSettings.customModes || [])
     .map((mode) => `${mode.id} (${mode.name})`)
@@ -566,15 +566,15 @@ export async function runQueuedJob(job: AgentJob) {
     userId: job.userId,
     jobId: job.id,
     incognito: Boolean(job.incognito || chat.incognito),
+    automation: Boolean(job.automationId),
     modeId: activeMode.id,
     modePolicy: JSON.stringify({
       allowedCategories: activeMode.allowedCategories,
       toolOverrides: activeMode.toolOverrides || {},
     }),
   };
-  const configuredSubagentModel = globalModelSettings.subagentModelEnabled
-    ? globalModelSettings.subagentModelId
-    : undefined;
+  const configuredSubagentModel = job.extendedModelId ||
+    (globalModelSettings.subagentModelEnabled ? globalModelSettings.subagentModelId : undefined);
   const configuredSubagentModelParams = configuredSubagentModel
     ? globalModelSettings.modelParamsByModel?.[configuredSubagentModel] || []
     : [];
@@ -709,6 +709,10 @@ export async function runQueuedJob(job: AgentJob) {
         : []),
       ...(job.incognito || chat.incognito
         ? ["Incognito mode: do not use or mention personal context, memories, chat metadata, notes, or workspaces. Incognito-only tool restrictions are enforced server-side."]
+        : job.automationId
+          ? [
+              "Automation run: execute autonomously without waiting for the user. Never call ask_user, request_mode_change, wait, subagent_status, or any confirmation/user-approval tool. If information is missing, make a safe reasonable assumption and continue; if the task cannot be completed safely, explain that in the final response.",
+            ]
         : [
             `Memories:\n${listMemories(job.userId).map((memory) => `- ${memory.content}`).join("\n") || "(none yet)"}`,
             `Current chat keywords: ${chat.keywords?.join(", ") || "(none)"}`,
@@ -1024,7 +1028,9 @@ export async function runQueuedJob(job: AgentJob) {
           message: message.slice(0, 100_000),
           messageId,
           agentId: job.agentId,
+          modeId: job.modeId,
           modelId: job.modelId,
+          extendedModelId: job.extendedModelId,
           modelParams: job.modelParams,
         });
         createdChats.push({ id: child.id, title: child.title });

@@ -1,7 +1,10 @@
 import dns from "node:dns/promises";
+import crypto from "node:crypto";
+import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { chromium, type BrowserContext, type Page } from "playwright";
+import { config } from "@/lib/config";
 
 const MAX_SNAPSHOT_LENGTH = 120_000;
 const SESSION_IDLE_MS = 30 * 60 * 1000;
@@ -47,8 +50,10 @@ type BrowserResult = {
   downloadFilename?: string;
 };
 
-let browserPromise: Promise<Browser> | undefined;
+const persistentContexts = new Map<string, Promise<BrowserContext>>();
 const sessions = new Map<string, BrowserContextState>();
+const actionLocks = new Map<string, Promise<void>>();
+const browserProfilesDir = path.join(config.dataDir, "browser-profiles");
 
 function envList(name: string) {
   return (process.env[name] || "")
@@ -103,12 +108,66 @@ async function assertAllowedUrl(rawUrl: string) {
   return url.toString();
 }
 
-async function getBrowser() {
-  browserPromise ??= chromium.launch({ headless: true });
+function ownerHash(ownerId: string) {
+  return crypto.createHash("sha256").update(ownerId).digest("hex");
+}
+
+function profilePath(ownerId: string) {
+  return path.join(browserProfilesDir, ownerHash(ownerId));
+}
+
+function metadataPath(ownerId: string) {
+  return path.join(browserProfilesDir, `${ownerHash(ownerId)}.json`);
+}
+
+function readMetadata(ownerId: string): Record<string, { lastAccess: string }> {
   try {
-    return await browserPromise;
+    const value = JSON.parse(fs.readFileSync(metadataPath(ownerId), "utf8")) as unknown;
+    return value && typeof value === "object" ? value as Record<string, { lastAccess: string }> : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeMetadata(ownerId: string, metadata: Record<string, { lastAccess: string }>) {
+  fs.mkdirSync(browserProfilesDir, { recursive: true, mode: 0o700 });
+  const target = metadataPath(ownerId);
+  const temporary = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(metadata)}\n`, { encoding: "utf8", mode: 0o600 });
+  fs.renameSync(temporary, target);
+  fs.chmodSync(browserProfilesDir, 0o700);
+}
+
+function recordOrigin(ownerId: string, rawUrl: string) {
+  try {
+    const origin = new URL(rawUrl).origin;
+    if (origin === "null" || origin === "about:blank") return;
+    const metadata = readMetadata(ownerId);
+    metadata[origin] = { lastAccess: new Date().toISOString() };
+    writeMetadata(ownerId, metadata);
+  } catch {
+    // Browser navigation validation handles invalid URLs.
+  }
+}
+
+async function getPersistentContext(ownerId: string) {
+  const existing = persistentContexts.get(ownerId);
+  if (existing) return existing;
+  fs.mkdirSync(browserProfilesDir, { recursive: true, mode: 0o700 });
+  const pending = chromium.launchPersistentContext(profilePath(ownerId), {
+    headless: true,
+    viewport: DEFAULT_VIEWPORT,
+  });
+  persistentContexts.set(ownerId, pending);
+  try {
+    const context = await pending;
+    fs.chmodSync(profilePath(ownerId), 0o700);
+    context.on("close", () => {
+      if (persistentContexts.get(ownerId) === pending) persistentContexts.delete(ownerId);
+    });
+    return context;
   } catch (error) {
-    browserPromise = undefined;
+    if (persistentContexts.get(ownerId) === pending) persistentContexts.delete(ownerId);
     throw error;
   }
 }
@@ -125,8 +184,7 @@ async function installRequestGuard(page: Page) {
 }
 
 async function createSession(ownerId: string, chatId: string) {
-  const browser = await getBrowser();
-  const context = await browser.newContext({ viewport: DEFAULT_VIEWPORT });
+  const context = await getPersistentContext(ownerId);
   const page = await context.newPage();
   await installRequestGuard(page);
   const state: BrowserContextState = {
@@ -150,8 +208,7 @@ async function getSession(ownerId: string, chatId: string) {
 }
 
 function tabIdFor(state: BrowserContextState, requested?: string) {
-  const tabId = requested || state.activeTabId;
-  if (!state.tabs.has(tabId)) throw new Error("Browser tab not found");
+  const tabId = requested && state.tabs.has(requested) ? requested : state.activeTabId;
   state.activeTabId = tabId;
   return tabId;
 }
@@ -218,7 +275,7 @@ export async function setBrowserViewport(
   return { width: nextWidth, height: nextHeight };
 }
 
-export async function performBrowserAction(ownerId: string, chatId: string, action: BrowserAction): Promise<BrowserResult> {
+async function performBrowserActionUnlocked(ownerId: string, chatId: string, action: BrowserAction): Promise<BrowserResult> {
   if (!ownerId || !chatId) throw new Error("Browser actions require an authenticated user and chat");
   const state = await getSession(ownerId, chatId);
   let tabId: string;
@@ -248,6 +305,7 @@ export async function performBrowserAction(ownerId: string, chatId: string, acti
   } else if (action.action === "navigate") {
     if (!action.url) throw new Error("A URL is required");
     await page.goto(await assertAllowedUrl(action.url), { waitUntil: "domcontentloaded", timeout: 30_000 });
+    recordOrigin(ownerId, page.url());
   } else if (action.action === "back") {
     await page.goBack({ waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => null);
   } else if (action.action === "forward") {
@@ -289,6 +347,7 @@ export async function performBrowserAction(ownerId: string, chatId: string, acti
     return { ...(await resultFor(state, tabId)), downloadPath: destination, downloadFilename: filename };
   }
 
+  recordOrigin(ownerId, page.url());
   const result = await resultFor(state, tabId);
   if (action.action === "screenshot" || action.action === "navigate" || action.action === "click" || action.action === "type" || action.action === "press" || action.action === "reload" || action.action === "back" || action.action === "forward" || action.action === "select_tab" || action.action === "scroll" || action.action === "resize") {
     result.screenshot = (await page.screenshot({ type: "png" })).toString("base64");
@@ -302,12 +361,122 @@ export async function performBrowserAction(ownerId: string, chatId: string, acti
   return result;
 }
 
+export async function performBrowserAction(ownerId: string, chatId: string, action: BrowserAction): Promise<BrowserResult> {
+  const key = sessionKey(ownerId, chatId);
+  const previous = actionLocks.get(key) || Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const queued = previous.then(() => gate);
+  actionLocks.set(key, queued);
+  await previous;
+  try {
+    return await performBrowserActionUnlocked(ownerId, chatId, action);
+  } finally {
+    release();
+    if (actionLocks.get(key) === queued) actionLocks.delete(key);
+  }
+}
+
 export async function cleanupBrowserSessions() {
   const cutoff = Date.now() - SESSION_IDLE_MS;
-  for (const [key, state] of sessions) {
-    if (state.lastUsed < cutoff) {
-      await state.context.close().catch(() => undefined);
-      sessions.delete(key);
+  const owners = new Set([...sessions.values()].map((state) => state.ownerId));
+  for (const ownerId of owners) {
+    const ownerSessions = [...sessions.entries()].filter(([, state]) => state.ownerId === ownerId);
+    if (!ownerSessions.length || ownerSessions.some(([, state]) => state.lastUsed >= cutoff)) continue;
+    const context = ownerSessions[0][1].context;
+    await context.close().catch(() => undefined);
+    for (const [key] of ownerSessions) sessions.delete(key);
+    persistentContexts.delete(ownerId);
+  }
+}
+
+export type BrowserStorageOrigin = {
+  origin: string;
+  storageTypes: string[];
+  lastAccess?: string;
+  sizeBytes: null;
+};
+
+export async function listBrowserStorage(ownerId: string): Promise<BrowserStorageOrigin[]> {
+  const context = await getPersistentContext(ownerId);
+  const metadata = readMetadata(ownerId);
+  const origins = new Map<string, BrowserStorageOrigin>(
+    Object.entries(metadata).map(([origin, value]) => [origin, {
+      origin,
+      storageTypes: ["persistent profile"],
+      lastAccess: value.lastAccess,
+      sizeBytes: null,
+    }]),
+  );
+  for (const cookie of await context.cookies()) {
+    const hostname = cookie.domain.replace(/^\./, "");
+    const existingOrigin = [...origins.keys()].find((candidate) => {
+      try {
+        return new URL(candidate).hostname === hostname;
+      } catch {
+        return false;
+      }
+    });
+    const origin = existingOrigin || `https://${hostname}`;
+    if (!origins.has(origin)) {
+      origins.set(origin, { origin, storageTypes: ["cookies"], sizeBytes: null });
+    } else if (!origins.get(origin)!.storageTypes.includes("cookies")) {
+      origins.get(origin)!.storageTypes.push("cookies");
     }
   }
+  return [...origins.values()].sort((a, b) => a.origin.localeCompare(b.origin));
+}
+
+async function closeOwnerContext(ownerId: string) {
+  const context = persistentContexts.get(ownerId);
+  if (context) await (await context).close().catch(() => undefined);
+  persistentContexts.delete(ownerId);
+  for (const [key, state] of sessions) {
+    if (state.ownerId === ownerId) sessions.delete(key);
+  }
+}
+
+export async function clearBrowserOrigin(ownerId: string, rawOrigin: string) {
+  const origin = new URL(rawOrigin).origin;
+  if (!["http:", "https:"].includes(new URL(origin).protocol)) throw new Error("Invalid browser origin");
+  const context = await getPersistentContext(ownerId);
+  const cookies = await context.cookies();
+  for (const cookie of cookies) {
+    const cookieOrigin = `https://${cookie.domain.replace(/^\./, "")}`;
+    if (cookieOrigin === origin || cookieOrigin === origin.replace(/^https:/, "http:")) {
+      await context.clearCookies({ name: cookie.name, domain: cookie.domain, path: cookie.path });
+    }
+  }
+  const pages = context.pages();
+  let cleanupPage: Page | undefined;
+  if (!pages.some((page) => page.url().startsWith(`${origin}/`) || page.url() === origin)) {
+    cleanupPage = await context.newPage();
+    await installRequestGuard(cleanupPage);
+    await cleanupPage.goto(await assertAllowedUrl(origin), { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => undefined);
+  }
+  for (const page of [...pages, ...(cleanupPage ? [cleanupPage] : [])]) {
+    if (page.url().startsWith(`${origin}/`) || page.url() === origin) {
+      await page.evaluate(async () => {
+        localStorage.clear();
+        sessionStorage.clear();
+        for (const registration of await navigator.serviceWorker?.getRegistrations?.() || []) await registration.unregister();
+        for (const database of await indexedDB.databases?.() || []) {
+          if (database.name) indexedDB.deleteDatabase(database.name);
+        }
+        if ("caches" in window) {
+          for (const key of await caches.keys()) await caches.delete(key);
+        }
+      }).catch(() => undefined);
+    }
+  }
+  await cleanupPage?.close().catch(() => undefined);
+  const metadata = readMetadata(ownerId);
+  delete metadata[origin];
+  writeMetadata(ownerId, metadata);
+}
+
+export async function clearAllBrowserStorage(ownerId: string) {
+  await closeOwnerContext(ownerId);
+  fs.rmSync(profilePath(ownerId), { recursive: true, force: true });
+  fs.rmSync(metadataPath(ownerId), { force: true });
 }

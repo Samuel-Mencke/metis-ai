@@ -9,6 +9,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  Globe2,
   KeyRound,
   Link2,
   Lock,
@@ -377,6 +378,16 @@ export function SettingsPanel({
     () => new Set(),
   );
   const [settingsTab, setSettingsTab] = useState("general");
+  const [browserStorage, setBrowserStorage] = useState<Array<{
+    origin: string;
+    storageTypes: string[];
+    lastAccess?: string;
+    sizeBytes: null;
+  }>>([]);
+  const [browserStorageLoading, setBrowserStorageLoading] = useState(false);
+  const [browserStorageError, setBrowserStorageError] = useState("");
+  const [browserStorageDeleteTarget, setBrowserStorageDeleteTarget] = useState<string | null>(null);
+  const [browserStorageClearAll, setBrowserStorageClearAll] = useState(false);
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [mcpLoaded, setMcpLoaded] = useState(false);
   const [mcpDraft, setMcpDraft] = useState<McpDraft>(emptyMcpDraft);
@@ -435,6 +446,38 @@ export function SettingsPanel({
       toast.error(error instanceof Error ? error.message : "Failed to load remote clients");
     }
   }, []);
+
+  const loadBrowserStorage = useCallback(async () => {
+    setBrowserStorageLoading(true);
+    setBrowserStorageError("");
+    try {
+      const response = await fetch("/api/browser/storage", { cache: "no-store" });
+      const data = (await response.json()) as { origins?: typeof browserStorage; error?: string };
+      if (!response.ok) throw new Error(data.error || "Could not load browser storage");
+      setBrowserStorage(data.origins || []);
+    } catch (error) {
+      setBrowserStorageError(error instanceof Error ? error.message : "Could not load browser storage");
+    } finally {
+      setBrowserStorageLoading(false);
+    }
+  }, []);
+
+  const clearBrowserStorage = useCallback(async (origin?: string) => {
+    const response = await fetch("/api/browser/storage", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(origin ? { origin } : { all: true }),
+    });
+    const data = (await response.json().catch(() => ({}))) as { error?: string };
+    if (!response.ok) throw new Error(data.error || "Could not clear browser storage");
+    toast.success(origin ? `Browser data cleared for ${origin}` : "All browser data cleared");
+    await loadBrowserStorage();
+  }, [loadBrowserStorage]);
+
+  useEffect(() => {
+    if (!open || settingsTab !== "browser-storage") return;
+    void loadBrowserStorage();
+  }, [loadBrowserStorage, open, settingsTab]);
 
   const createRemoteEnrollment = useCallback(async (platform = remotePlatform) => {
     setRemoteBusy(true);
@@ -1148,6 +1191,7 @@ export function SettingsPanel({
               options={[
                 { value: "general", label: "General" },
                 { value: "voice", label: "Voice input" },
+                { value: "browser-storage", label: "Browser storage" },
                 { value: "archived", label: "Chats" },
                 { value: "providers", label: "Providers" },
                 { value: "modes", label: "Agent modes" },
@@ -1166,6 +1210,10 @@ export function SettingsPanel({
             <TabsTrigger value="voice" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
               <Mic data-icon="inline-start" />
               Voice input
+            </TabsTrigger>
+            <TabsTrigger value="browser-storage" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
+              <Globe2 data-icon="inline-start" />
+              Browser storage
             </TabsTrigger>
             <TabsTrigger value="archived" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
               <MessagesSquare data-icon="inline-start" />
@@ -1201,6 +1249,42 @@ export function SettingsPanel({
           </TabsList>
 
           <div className="min-h-0 min-w-0 overflow-x-hidden overflow-y-auto">
+            <TabsContent value="browser-storage" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+              <section className="flex flex-col gap-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-medium">Embedded browser storage</h3>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Persistent website sessions are stored privately for your account.
+                    </p>
+                  </div>
+                  <Button type="button" variant="destructive" size="sm" onClick={() => setBrowserStorageClearAll(true)} disabled={!browserStorage.length}>
+                    Clear all
+                  </Button>
+                </div>
+                {browserStorageLoading ? <p className="text-xs text-muted-foreground">Loading stored websites…</p> : null}
+                {browserStorageError ? <p className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">{browserStorageError}</p> : null}
+                {!browserStorageLoading && !browserStorageError && !browserStorage.length ? (
+                  <p className="rounded-md border border-border/60 p-4 text-xs text-muted-foreground">No persistent website data stored yet.</p>
+                ) : null}
+                <div className="space-y-2">
+                  {browserStorage.map((item) => (
+                    <div key={item.origin} className="flex items-center justify-between gap-3 rounded-md border border-border/60 p-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm">{item.origin}</p>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {item.storageTypes.join(" · ")}
+                          {item.sizeBytes === null ? " · size unavailable" : ` · ${item.sizeBytes} bytes`}
+                        </p>
+                      </div>
+                      <Button type="button" variant="outline" size="sm" onClick={() => setBrowserStorageDeleteTarget(item.origin)}>
+                        Clear
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </TabsContent>
             <TabsContent value="general" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-4">
                 <div>
@@ -2267,6 +2351,29 @@ export function SettingsPanel({
           ? deleteMcpServer(deleteTarget.item)
           : deleteProviderConnection(deleteTarget.item);
       }}
+      />
+      <ConfirmDialog
+        open={Boolean(browserStorageDeleteTarget)}
+        onOpenChange={(open) => !open && setBrowserStorageDeleteTarget(null)}
+        title="Clear website data?"
+        description={browserStorageDeleteTarget ? `All persistent browser data for “${browserStorageDeleteTarget}” will be removed.` : ""}
+        confirmLabel="Clear data"
+        onConfirm={async () => {
+          if (!browserStorageDeleteTarget) return;
+          await clearBrowserStorage(browserStorageDeleteTarget);
+          setBrowserStorageDeleteTarget(null);
+        }}
+      />
+      <ConfirmDialog
+        open={browserStorageClearAll}
+        onOpenChange={setBrowserStorageClearAll}
+        title="Clear all browser data?"
+        description="This logs you out of every website in the embedded browser and cannot be undone."
+        confirmLabel="Clear everything"
+        onConfirm={async () => {
+          await clearBrowserStorage();
+          setBrowserStorageClearAll(false);
+        }}
       />
     </>
   );

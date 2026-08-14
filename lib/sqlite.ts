@@ -254,6 +254,44 @@ export function getDatabase(): DatabaseSync {
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS jobs_status_created ON jobs(status, updated_at);
+    CREATE TABLE IF NOT EXISTS automations (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      mode_id TEXT,
+      model_id TEXT,
+      extended_model_id TEXT,
+      schedule_kind TEXT NOT NULL CHECK (schedule_kind IN ('once', 'interval')),
+      schedule_value TEXT NOT NULL,
+      timezone TEXT NOT NULL DEFAULT 'UTC',
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused', 'completed', 'error')),
+      next_run_at TEXT,
+      last_run_at TEXT,
+      last_error TEXT,
+      claimed_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS automations_due
+      ON automations(status, next_run_at, claimed_at);
+    CREATE INDEX IF NOT EXISTS automations_owner
+      ON automations(owner_id, status, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS automation_runs (
+      id TEXT PRIMARY KEY,
+      automation_id TEXT NOT NULL REFERENCES automations(id) ON DELETE CASCADE,
+      job_id TEXT,
+      chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+      status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'error', 'cancelled')),
+      started_at TEXT,
+      completed_at TEXT,
+      result_preview TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS automation_runs_automation
+      ON automation_runs(automation_id, created_at DESC);
     CREATE TABLE IF NOT EXISTS run_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -393,6 +431,9 @@ export function getDatabase(): DatabaseSync {
     "ALTER TABLE pending_questions ADD COLUMN expires_at TEXT",
     "ALTER TABLE pending_questions ADD COLUMN status TEXT NOT NULL DEFAULT 'waiting_for_user'",
     "ALTER TABLE pending_questions ADD COLUMN heartbeat_at TEXT",
+    "ALTER TABLE automations ADD COLUMN mode_id TEXT",
+    "ALTER TABLE automations ADD COLUMN model_id TEXT",
+    "ALTER TABLE automations ADD COLUMN extended_model_id TEXT",
   ]) {
     try {
       database.exec(statement);

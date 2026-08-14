@@ -19,6 +19,7 @@ export type McpContext = {
   userId?: string;
   jobId?: string;
   incognito?: boolean;
+  automation?: boolean;
   modeId?: string;
   modePolicy?: string;
 };
@@ -33,6 +34,7 @@ export function getMcpServers(context: McpContext = {}): McpServerMap {
       MCP_USER_ID: context.userId,
       MCP_JOB_ID: context.jobId,
       MCP_INCOGNITO: context.incognito ? "1" : undefined,
+      MCP_AUTOMATION: context.automation ? "1" : undefined,
       MCP_MODE_ID: context.modeId,
       MCP_MODE_POLICY: context.modePolicy,
       MCP_AGENT_CWD: agentCwd,

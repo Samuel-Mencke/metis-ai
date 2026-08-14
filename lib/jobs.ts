@@ -31,9 +31,13 @@ export type AgentJob = {
     content?: string;
   }>;
   agentId?: string;
+  modeId?: string;
   modelId?: string;
+  extendedModelId?: string;
   modelParams?: Array<{ id: string; value: string }>;
   attachments?: StoredAttachment[];
+  automationId?: string;
+  automationRunId?: string;
   resumePrompt?: string;
   resumeRequestedAt?: string;
   runId?: string;

@@ -184,6 +184,7 @@ websocketServer.on("connection", async (socket, request, context, options) => {
       const result = await performSharedBrowserAction(context.userId, context.chatId, {
         action: message.action,
         tabId: message.tabId || tabId,
+        url: message.url,
         selector: message.selector,
         text: message.text,
         key: message.key,

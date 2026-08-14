@@ -17,6 +17,7 @@ import {
   ArrowUp,
   ArrowDown,
   Activity,
+  CalendarClock,
   Cpu,
   Gauge,
   MemoryStick,
@@ -80,6 +81,7 @@ import { Markdown, StreamingMarkdown } from "@/components/markdown";
 import { RichComposerInput } from "@/components/rich-composer-input";
 import { RemoteFileEditor } from "@/components/remote-file-editor";
 import { RemoteTerminal } from "@/components/remote-terminal";
+import { AutomationsPanel } from "@/components/automations-panel";
 import { NotesVoid } from "@/components/notes-void";
 import { VoiceInput } from "@/components/voice-input";
 import { SubagentChatView } from "@/components/subagent-chat-view";
@@ -1425,6 +1427,16 @@ function ChatLoadingSkeleton() {
   );
 }
 
+function WorkspaceLoadingSkeleton() {
+  return (
+    <div className="flex min-h-0 flex-1 items-center justify-center" role="status" aria-label="Loading workspace">
+      <div className="flex items-center justify-center text-muted-foreground">
+        <LoaderCircle className="size-5 animate-spin" />
+      </div>
+    </div>
+  );
+}
+
 function AttachmentViewer({
   active,
   onOpenChange,
@@ -1681,6 +1693,7 @@ export default function AppShell() {
   const [workspaceMounted, setWorkspaceMounted] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState<"canvas" | "plan" | "terminal" | "files" | "browser" | "monitor">("canvas");
   const [notesOpen, setNotesOpen] = useState(false);
+  const [automationsOpen, setAutomationsOpen] = useState(false);
   const [focusedNoteId, setFocusedNoteId] = useState<string | null>(null);
   const [browserFullscreen, setBrowserFullscreen] = useState(false);
   const [remoteTerminalCwd, setRemoteTerminalCwd] = useState(clientConfig.defaultCwd);
@@ -2519,6 +2532,7 @@ export default function AppShell() {
   }, [subagentOutputs]);
 
   function sendBrowserStreamAction(action: string, extra: Record<string, unknown> = {}) {
+    if (loadingChatId || !activeChatId) return false;
     const socket = browserSocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
     socket.send(JSON.stringify({ type: "action", action, tabId: activeBrowserTabId, ...extra }));
@@ -2536,7 +2550,9 @@ export default function AppShell() {
   }
 
   async function performBrowserAction(action: string, extra: Record<string, unknown> = {}) {
-    if (!activeChatId) return null;
+    const chatId = activeChatId;
+    const tabId = activeBrowserTabId;
+    if (!chatId || loadingChatId) return null;
     const navigationVersion = browserNavigationVersionRef.current;
     setBrowserLoading(true);
     setBrowserError("");
@@ -2544,10 +2560,11 @@ export default function AppShell() {
       const response = await fetch("/api/browser", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chatId: activeChatId, action, tabId: activeBrowserTabId, ...extra }),
+        body: JSON.stringify({ chatId, action, tabId, ...extra }),
       });
       const data = await response.json() as { error?: string; screenshot?: string; url?: string; tabId?: string; tabs?: BrowserTab[]; viewport?: { width: number; height: number } };
       if (!response.ok) throw new Error(data.error || "Browser action failed");
+      if (activeChatIdRef.current !== chatId) return null;
       if (data.screenshot) showBrowserScreenshot(`data:image/png;base64,${data.screenshot}`);
       if (data.tabs) setBrowserTabs(data.tabs);
       if (data.tabId) setActiveBrowserTabId(data.tabId);
@@ -2580,7 +2597,10 @@ export default function AppShell() {
     if (!rawUrl) return;
     const nextUrl = /^[a-z][a-z\d+.-]*:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
     browserNavigationVersionRef.current += 1;
-    void performBrowserAction("navigate", { url: nextUrl });
+    setBrowserError("");
+    if (!sendBrowserStreamAction("navigate", { url: nextUrl })) {
+      void performBrowserAction("navigate", { url: nextUrl });
+    }
   }
 
   function resizeBrowser() {
@@ -2598,6 +2618,14 @@ export default function AppShell() {
       if (url) void performBrowserAction("navigate", { url, tabId: result.tabId });
       else void performBrowserAction("screenshot", { tabId: result.tabId });
     });
+  }
+
+  function closeBrowserTab(tabId: string) {
+    if (browserTabs.length <= 1) return;
+    browserInputDirtyRef.current = false;
+    if (!sendBrowserStreamAction("close_tab", { tabId })) {
+      void performBrowserAction("close_tab", { tabId });
+    }
   }
 
   function openBrowserUrlInNewTab() {
@@ -2640,7 +2668,7 @@ export default function AppShell() {
   }
 
   useEffect(() => {
-    if (workspaceTab !== "browser" || !activeChatId) return;
+    if (workspaceTab !== "browser" || !activeChatId || loadingChatId) return;
     let reconnectTimer: number | null = null;
     let disposed = false;
     const connect = () => {
@@ -2700,7 +2728,7 @@ export default function AppShell() {
     connect();
     let fallbackRequestPending = false;
     const fallbackTimer = window.setInterval(() => {
-      if (!browserRealtime || !activeChatId) return;
+      if (!browserRealtime || !activeChatId || loadingChatId) return;
       const socket = browserSocketRef.current;
       const frameIsFresh = Date.now() - browserLastFrameAtRef.current < 2500;
       if (socket?.readyState === WebSocket.OPEN && frameIsFresh) return;
@@ -2748,7 +2776,7 @@ export default function AppShell() {
     };
   // The stream intentionally follows the active browser tab.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceTab, activeChatId, activeBrowserTabId, browserRealtime, browserFps, browserDefaultViewport]);
+  }, [workspaceTab, activeChatId, activeBrowserTabId, browserRealtime, browserFps, browserDefaultViewport, loadingChatId]);
 
   useEffect(() => {
     if (workspaceTab !== "monitor") return;
@@ -3349,6 +3377,7 @@ export default function AppShell() {
   const openDraft = useCallback(
     (opts?: { skipNav?: boolean }) => {
       setNotesOpen(false);
+      setAutomationsOpen(false);
       const previousChatId = activeChatIdRef.current;
       persistActiveSnapshot();
       setBusy(Boolean(previousChatId && runtimeRef.current.has(previousChatId)));
@@ -3413,6 +3442,7 @@ export default function AppShell() {
   const loadChat = useCallback(
     async (id: string, opts?: { skipNav?: boolean; forceReload?: boolean }) => {
       setNotesOpen(false);
+      setAutomationsOpen(false);
       const alreadyActive = activeChatIdRef.current === id;
       if (!alreadyActive) persistActiveSnapshot();
       activeChatIdRef.current = id;
@@ -3436,6 +3466,12 @@ export default function AppShell() {
       }
 
       setLoadingChatId(id);
+      setBrowserError("");
+      browserInputDirtyRef.current = false;
+      setBrowserTabs([{ id: "browser-1", title: "New tab", url: "" }]);
+      setActiveBrowserTabId("browser-1");
+      setBrowserUrl("");
+      setBrowserInput("");
       setActiveChatId(id);
       activeChatIdRef.current = id;
       setMessages([]);
@@ -7058,6 +7094,7 @@ export default function AppShell() {
           )}
           onClick={() => {
             setNotesOpen(true);
+            setAutomationsOpen(false);
             setWorkspaceOpen(false);
             setMobileNavOpen(false);
             navigateChat("notes");
@@ -7065,6 +7102,24 @@ export default function AppShell() {
         >
           <StickyNote className="size-3.5 shrink-0 opacity-60" />
           <span className="min-w-0 truncate">Shared notes</span>
+        </button>
+        <button
+          type="button"
+          className={cn(
+            "flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors",
+            automationsOpen
+              ? "text-foreground"
+              : "text-muted-foreground hover:bg-white/[0.03] hover:text-foreground",
+          )}
+          onClick={() => {
+            setAutomationsOpen(true);
+            setNotesOpen(false);
+            setWorkspaceOpen(false);
+            setMobileNavOpen(false);
+          }}
+        >
+          <CalendarClock className="size-3.5 shrink-0 opacity-60" />
+          <span className="min-w-0 truncate">Automations</span>
         </button>
         <p className="px-2.5 pb-1 pt-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
           Chats
@@ -7424,7 +7479,11 @@ export default function AppShell() {
           >
             <PanelLeft className="size-4" />
           </Button>
-          {notesOpen ? (
+          {automationsOpen ? (
+            <p className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-center text-sm font-medium text-foreground md:text-left">
+              Automations
+            </p>
+          ) : notesOpen ? (
             <p className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-center text-sm font-medium text-foreground md:text-left">
               Shared Notes
             </p>
@@ -7488,8 +7547,18 @@ export default function AppShell() {
           key={paneKey}
           className="relative flex min-h-0 flex-1 flex-col animate-in fade-in duration-200"
         >
-        {!notesOpen && activeChatId ? <NotesVoid chatId={activeChatId} pinnedOnly compact /> : null}
-        {notesOpen ? (
+        {!notesOpen && !automationsOpen && activeChatId ? <NotesVoid chatId={activeChatId} pinnedOnly compact /> : null}
+        {automationsOpen ? (
+          <div className="h-full min-h-0 flex-1 p-3 sm:p-5">
+            <AutomationsPanel
+              activeChatId={activeChatId}
+              models={models}
+              modes={modes}
+              selectedModelId={modelId}
+              onOpenChat={(chatId) => void loadChat(chatId)}
+            />
+          </div>
+        ) : notesOpen ? (
           <div className="h-full min-h-0 flex-1 p-3 sm:p-5">
             <NotesVoid chatId={notesOpen ? null : activeChatId} focusNoteId={focusedNoteId} />
           </div>
@@ -8243,7 +8312,7 @@ export default function AppShell() {
                   )}
                   aria-label={tab === "plan" ? "Plans" : tab === "canvas" ? "Canvas" : tab[0].toUpperCase() + tab.slice(1)}
                 >
-                  {tab === "canvas" ? <Palette className="size-4 shrink-0" /> : tab === "plan" ? <ClipboardList className="size-4 shrink-0" /> : tab === "files" ? <FileCode2 className="size-4 shrink-0" /> : tab === "terminal" ? <Terminal className="size-4 shrink-0" /> : tab === "browser" ? <Globe2 className="size-4 shrink-0" /> : <Activity className="size-4 shrink-0" />}
+                  {tab === "canvas" ? <Palette className="size-4 shrink-0" /> : tab === "plan" ? <ClipboardList className="size-4 shrink-0" /> : tab === "files" ? <FileCode2 className="size-4 shrink-0" /> : tab === "terminal" ? <Terminal className="size-4 shrink-0" /> : tab === "browser" ? <Globe2 className="size-4 shrink-0" /> : tab === "monitor" ? <Activity className="size-4 shrink-0" /> : <CalendarClock className="size-4 shrink-0" />}
                   <span className={cn(
                     "overflow-hidden whitespace-nowrap text-xs transition-[max-width,opacity,transform] duration-300",
                     workspaceTab === tab
@@ -8271,28 +8340,48 @@ export default function AppShell() {
             </Button>
           </div>
           <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden p-2.5">
-            {workspaceTab === "browser" ? (
+            {loadingChatId === activeChatId ? (
+              <WorkspaceLoadingSkeleton />
+            ) : workspaceTab === "browser" ? (
               <>
                 <div className="flex items-center gap-1 overflow-x-auto">
                   {browserTabs.map((tab) => (
-                    <Button
-                      key={tab.id}
-                      type="button"
-                      size="xs"
-                      variant={tab.id === activeBrowserTabId ? "secondary" : "ghost"}
-                      className="h-7 min-w-0 max-w-48 shrink-0 justify-start gap-1.5 text-xs"
-                      title={tab.title}
-                      onClick={() => {
-                        browserInputDirtyRef.current = false;
-                        setActiveBrowserTabId(tab.id);
-                        setBrowserUrl(tab.url);
-                        setBrowserInput(tab.url);
-                        void performBrowserAction("select_tab", { tabId: tab.id });
-                      }}
-                    >
-                      <BrowserTabIcon tab={tab} />
-                      <span className="min-w-0 truncate text-left">{tab.title || "New tab"}</span>
-                    </Button>
+                    <div key={tab.id} className={cn(
+                      "flex h-7 max-w-48 shrink-0 items-center rounded-md text-xs",
+                      tab.id === activeBrowserTabId ? "bg-secondary text-secondary-foreground" : "text-muted-foreground hover:bg-muted/60",
+                    )}>
+                      <Button
+                        type="button"
+                        size="xs"
+                        variant="ghost"
+                        className="h-7 min-w-0 flex-1 justify-start gap-1.5 px-2 text-xs"
+                        title={tab.title}
+                        onClick={() => {
+                          browserInputDirtyRef.current = false;
+                          setActiveBrowserTabId(tab.id);
+                          setBrowserUrl(tab.url);
+                          setBrowserInput(tab.url);
+                          if (!sendBrowserStreamAction("select_tab", { tabId: tab.id })) {
+                            void performBrowserAction("select_tab", { tabId: tab.id });
+                          }
+                        }}
+                      >
+                        <BrowserTabIcon tab={tab} />
+                        <span className="min-w-0 truncate text-left">{tab.title || "New tab"}</span>
+                      </Button>
+                      <Button
+                        type="button"
+                        size="icon-xs"
+                        variant="ghost"
+                        className="mr-0.5 size-6 shrink-0"
+                        aria-label={`Close ${tab.title || "browser tab"}`}
+                        title="Close tab"
+                        disabled={browserTabs.length <= 1}
+                        onClick={() => closeBrowserTab(tab.id)}
+                      >
+                        <X className="size-3" />
+                      </Button>
+                    </div>
                   ))}
                   <Button type="button" size="icon-xs" variant="ghost" className="size-7 shrink-0" aria-label="New browser tab" onClick={() => openBrowserTab()}>
                     <Plus className="size-3.5" />

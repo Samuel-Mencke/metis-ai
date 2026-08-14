@@ -26,6 +26,9 @@ export async function POST(req: Request) {
   const chatId = req.headers.get("x-ai-chat-id")?.trim() || "";
   const userId = req.headers.get("x-ai-chat-user-id")?.trim() || undefined;
   const jobId = req.headers.get("x-ai-chat-job-id")?.trim() || "";
+  if (req.headers.get("x-ai-chat-automation") === "1") {
+    return Response.json({ error: "User questions are unavailable during automation runs." }, { status: 403 });
+  }
   const chat = chatId ? getChat(chatId, userId) : null;
   if (!chat || !jobId) return Response.json({ error: "Invalid chat context" }, { status: 400 });
 
