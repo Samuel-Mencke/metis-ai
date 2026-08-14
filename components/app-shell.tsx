@@ -1657,6 +1657,7 @@ export default function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const routeChatId = searchParams.get("c");
+  const routeView = searchParams.get("view");
   const [authed, setAuthed] = useState<boolean | null>(null);
   const authedRef = useRef<boolean | null>(null);
   const [username, setUsername] = useState(clientConfig.username);
@@ -3474,6 +3475,11 @@ export default function AppShell() {
       setActiveChatId(null);
       activeChatIdRef.current = null;
       if (activeChatIncognito && previousChatId) {
+        void fetch("/api/browser", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "close", chatId: previousChatId }),
+        }).catch(() => undefined);
         void fetch(`/api/chats/${previousChatId}`, { method: "DELETE" });
       }
       setActiveChatIncognito(false);
@@ -3952,19 +3958,27 @@ export default function AppShell() {
   useEffect(() => {
     if (!authed) return;
     const current = activeChatIdRef.current;
-    if (routeChatId === "notes") {
+    if (routeChatId === "automations" || routeView === "automations") {
+      setAutomationsOpen(true);
+      setNotesOpen(false);
+      setWorkspaceOpen(false);
+      setMobileNavOpen(false);
+      if (current) openDraft({ skipNav: true });
+    } else if (routeChatId === "notes") {
       setNotesOpen(true);
+      setAutomationsOpen(false);
       setWorkspaceOpen(false);
       setMobileNavOpen(false);
     } else if (routeChatId) {
       setNotesOpen(false);
+      setAutomationsOpen(false);
       if (current !== routeChatId) {
         void loadChat(routeChatId, { skipNav: true });
       }
     } else if (current && !activeChatIncognito) {
       openDraft({ skipNav: true });
     }
-  }, [activeChatIncognito, authed, routeChatId, loadChat, openDraft]);
+  }, [activeChatIncognito, authed, routeChatId, routeView, loadChat, openDraft]);
 
   useEffect(() => {
     if (!authed || !activeChatId || loadingChatId) {
@@ -7201,10 +7215,12 @@ export default function AppShell() {
               : "text-muted-foreground hover:bg-white/[0.03] hover:text-foreground",
           )}
           onClick={() => {
+            openDraft({ skipNav: true });
             setAutomationsOpen(true);
             setNotesOpen(false);
             setWorkspaceOpen(false);
             setMobileNavOpen(false);
+            router.push("/?c=automations", { scroll: false });
           }}
         >
           <CalendarClock className="size-3.5 shrink-0 opacity-60" />
