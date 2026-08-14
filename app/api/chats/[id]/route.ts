@@ -45,6 +45,7 @@ export async function PATCH(req: Request, { params }: Params) {
   const ownerId = user.id;
   let body: {
     title?: string;
+    titleSource?: "default" | "user" | "agent";
     keywords?: string[] | null;
     agentId?: string | null;
     modelId?: string | null;
@@ -63,6 +64,7 @@ export async function PATCH(req: Request, { params }: Params) {
   try {
     body = (await req.json()) as {
       title?: string;
+      titleSource?: "default" | "user" | "agent";
       keywords?: string[] | null;
       agentId?: string | null;
       modelId?: string | null;

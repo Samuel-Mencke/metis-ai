@@ -2,6 +2,7 @@ import {
   getChat,
   normalizeChatKeywords,
   searchChatsForUser,
+  titleFromMessage,
   updateChat,
 } from "@/lib/db-store";
 import { bearerTokenMatches } from "@/lib/security";
@@ -23,7 +24,7 @@ export async function POST(req: Request) {
   if (!chat || !jobId) return Response.json({ error: "Invalid chat context" }, { status: 400 });
 
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
-  const action = body.action === "search" ? "search" : "update";
+  const action = body.action === "search" ? "search" : body.action === "title" ? "title" : "update";
   if (action === "search") {
     const query = typeof body.query === "string" ? body.query.trim().slice(0, 200) : "";
     if (!query) return Response.json({ results: [] });
@@ -31,6 +32,31 @@ export async function POST(req: Request) {
     const limit = Math.min(30, Math.max(1, requestedLimit));
     return Response.json({
       results: searchChatsForUser(query, userId, limit),
+      actor: "agent",
+      jobId,
+    });
+  }
+
+  if (action === "title") {
+    const title = typeof body.title === "string" ? body.title.trim().slice(0, 200) : "";
+    if (!title) return Response.json({ error: "title must not be empty" }, { status: 400 });
+    const inferredSource = chat.titleSource || (() => {
+      const firstUserMessage = chat.messages.find((message) => message.role === "user");
+      return firstUserMessage && chat.title !== titleFromMessage(firstUserMessage.content)
+        ? "user"
+        : "default";
+    })();
+    const source = inferredSource;
+    if (source !== "default" && body.approved !== true) {
+      return Response.json({ requiresApproval: true, title, titleSource: source, actor: "agent", jobId });
+    }
+    const updated = updateChat(chatId, { title, titleSource: "agent" }, userId);
+    if (!updated) return Response.json({ error: "Chat not found" }, { status: 404 });
+    return Response.json({
+      chatId,
+      title: updated.title,
+      titleSource: updated.titleSource || "agent",
+      updated: true,
       actor: "agent",
       jobId,
     });

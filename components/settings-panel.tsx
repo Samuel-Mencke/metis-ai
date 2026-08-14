@@ -304,6 +304,16 @@ type Props = {
     browserViewportWidth?: number;
     browserViewportHeight?: number;
   }) => void;
+  compressionEnabled: boolean;
+  compressionMode: "lite" | "standard" | "aggressive" | "ultra" | "rtk" | "stacked";
+  compressionToolResults: boolean;
+  compressionChatHistory: boolean;
+  onCompressionSettingsChange: (settings: {
+    enabled?: boolean;
+    mode?: "lite" | "standard" | "aggressive" | "ultra" | "rtk" | "stacked";
+    compressToolResults?: boolean;
+    compressChatHistory?: boolean;
+  }) => void;
   models: ModelInfo[];
   modelId: string;
   onModelIdChange: (modelId: string) => void;
@@ -349,6 +359,11 @@ export function SettingsPanel({
   browserViewportWidth,
   browserViewportHeight,
   onBrowserSettingsChange,
+  compressionEnabled,
+  compressionMode,
+  compressionToolResults,
+  compressionChatHistory,
+  onCompressionSettingsChange,
   models,
   modelId,
   onModelIdChange,
@@ -388,6 +403,14 @@ export function SettingsPanel({
   const [browserStorageError, setBrowserStorageError] = useState("");
   const [browserStorageDeleteTarget, setBrowserStorageDeleteTarget] = useState<string | null>(null);
   const [browserStorageClearAll, setBrowserStorageClearAll] = useState(false);
+  const [compressionPreview, setCompressionPreview] = useState("");
+  const [compressionPreviewResult, setCompressionPreviewResult] = useState<{
+    text: string;
+    inputChars: number;
+    outputChars: number;
+    savingsPercent: number;
+  } | null>(null);
+  const [compressionPreviewBusy, setCompressionPreviewBusy] = useState(false);
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [mcpLoaded, setMcpLoaded] = useState(false);
   const [mcpDraft, setMcpDraft] = useState<McpDraft>(emptyMcpDraft);
@@ -1192,6 +1215,7 @@ export function SettingsPanel({
                 { value: "general", label: "General" },
                 { value: "voice", label: "Voice input" },
                 { value: "browser-storage", label: "Browser storage" },
+                { value: "compression", label: "Token compression" },
                 { value: "archived", label: "Chats" },
                 { value: "providers", label: "Providers" },
                 { value: "modes", label: "Agent modes" },
@@ -1214,6 +1238,10 @@ export function SettingsPanel({
             <TabsTrigger value="browser-storage" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
               <Globe2 data-icon="inline-start" />
               Browser storage
+            </TabsTrigger>
+            <TabsTrigger value="compression" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
+              <Settings2 data-icon="inline-start" />
+              Token compression
             </TabsTrigger>
             <TabsTrigger value="archived" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
               <MessagesSquare data-icon="inline-start" />
@@ -1249,6 +1277,95 @@ export function SettingsPanel({
           </TabsList>
 
           <div className="min-h-0 min-w-0 overflow-x-hidden overflow-y-auto">
+            <TabsContent value="compression" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+              <section className="flex flex-col gap-5">
+                <div>
+                  <h3 className="text-sm font-medium">Token compression</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Reduce noisy tool output and redundant context before it reaches the model.
+                  </p>
+                </div>
+                <div className="flex items-center justify-between gap-4 rounded-lg border border-border/60 p-4">
+                  <div>
+                    <p className="text-sm font-medium">Enable compression</p>
+                    <p className="mt-1 text-xs text-muted-foreground">Disabled by default and isolated per user.</p>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={compressionEnabled ? "default" : "outline"}
+                    aria-pressed={compressionEnabled}
+                    onClick={() => onCompressionSettingsChange({ enabled: !compressionEnabled })}
+                  >
+                    {compressionEnabled ? "On" : "Off"}
+                  </Button>
+                </div>
+                <label className="flex flex-col gap-2 text-xs font-medium">
+                  Mode
+                  <select
+                    value={compressionMode}
+                    disabled={!compressionEnabled}
+                    onChange={(event) => onCompressionSettingsChange({ mode: event.target.value as typeof compressionMode })}
+                    className="h-9 rounded-md border border-input bg-background px-3 text-sm font-normal"
+                  >
+                    <option value="lite">Lite — low risk cleanup</option>
+                    <option value="standard">Standard — prose condensation</option>
+                    <option value="aggressive">Aggressive — stronger compression</option>
+                    <option value="rtk">RTK — terminal and tool output</option>
+                    <option value="stacked">Stacked — RTK + Caveman (recommended)</option>
+                    <option value="ultra">Ultra — maximum context recovery</option>
+                  </select>
+                </label>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <Button type="button" variant={compressionToolResults ? "secondary" : "outline"} disabled={!compressionEnabled} onClick={() => onCompressionSettingsChange({ compressToolResults: !compressionToolResults })}>
+                    Tool results: {compressionToolResults ? "On" : "Off"}
+                  </Button>
+                  <Button type="button" variant={compressionChatHistory ? "secondary" : "outline"} disabled={!compressionEnabled} onClick={() => onCompressionSettingsChange({ compressChatHistory: !compressionChatHistory })}>
+                    Chat history: {compressionChatHistory ? "On" : "Off"}
+                  </Button>
+                </div>
+                <div className="space-y-3 rounded-lg border border-border/60 p-4">
+                  <div>
+                    <p className="text-sm font-medium">Preview</p>
+                    <p className="mt-1 text-xs text-muted-foreground">The sample is sent only for this preview and is never stored.</p>
+                  </div>
+                  <Textarea value={compressionPreview} onChange={(event) => setCompressionPreview(event.target.value)} placeholder="Paste a terminal log or verbose context sample…" rows={6} />
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={!compressionPreview.trim() || compressionPreviewBusy}
+                    onClick={async () => {
+                      setCompressionPreviewBusy(true);
+                      try {
+                        const response = await fetch("/api/compression/preview", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ text: compressionPreview, mode: compressionMode }),
+                        });
+                        const data = await response.json() as typeof compressionPreviewResult & { error?: string };
+                        if (!response.ok) throw new Error(data.error || "Preview failed");
+                        setCompressionPreviewResult(data);
+                      } catch (error) {
+                        toast.error(error instanceof Error ? error.message : "Preview failed");
+                      } finally {
+                        setCompressionPreviewBusy(false);
+                      }
+                    }}
+                  >
+                    {compressionPreviewBusy ? "Analyzing…" : "Analyze preview"}
+                  </Button>
+                  {compressionPreviewResult ? (
+                    <div className="rounded-md bg-muted/40 p-3 text-xs">
+                      <p>{compressionPreviewResult.inputChars} → {compressionPreviewResult.outputChars} characters ({compressionPreviewResult.savingsPercent}% reduced)</p>
+                      <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap text-muted-foreground">{compressionPreviewResult.text}</pre>
+                    </div>
+                  ) : null}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Aggressive and ultra modes can remove wording. Code blocks, URLs, paths and structured data are protected where possible.
+                </p>
+              </section>
+            </TabsContent>
             <TabsContent value="browser-storage" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-4">
                 <div className="flex items-start justify-between gap-3">

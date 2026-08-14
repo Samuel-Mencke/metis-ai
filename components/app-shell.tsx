@@ -518,6 +518,7 @@ type Chat = ChatIndexEntry & {
     referenceText?: string;
     thinking?: string;
     tools?: ToolPart[];
+    parts?: MsgPart[];
     suggestions?: Array<string | Suggestion>;
     runMetadata?: RunMetadata;
     references?: ReferenceItem[];
@@ -838,8 +839,14 @@ function extractMessageSources(message: Msg): SourceLink[] {
   return [...sources.values()].slice(0, 12);
 }
 
-function stripSourceBlocks(content: string) {
-  return content.replace(/```sources\s*[\s\S]*?```/gi, "").replace(/\n{3,}/g, "\n\n").trim();
+function stripAssistantControlBlocks(content: string) {
+  return content
+    .replace(/```sources\s*[\s\S]*?```/gi, "")
+    .replace(/```suggestions\s*[\s\S]*?```/gi, "")
+    .replace(/```chat(?:\s+[^\n]*)?\s*[\s\S]*?```/gi, "")
+    .replace(/```(?:plan|canvas)(?:\s+[^\n]*)?\s*[\s\S]*?```/gi, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function MessageSources({ sources }: { sources: SourceLink[] }) {
@@ -1368,12 +1375,13 @@ function mapApiMessages(
       thinking: m.thinking,
       thinkingDone: Boolean(m.thinking),
       tools: m.tools,
+      parts: m.parts as MsgPart[] | undefined,
       references: m.references,
       suggestions: normalizeSuggestions(m.suggestions),
       runMetadata: m.runMetadata,
       attachments: m.attachments,
     };
-    return { ...base, parts: partsFromFlat(base) };
+    return { ...base, parts: base.parts ?? partsFromFlat(base) };
   });
 }
 
@@ -1660,6 +1668,27 @@ export default function AppShell() {
   const [chatsLoaded, setChatsLoaded] = useState(false);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
+  const [expandedUserMessages, setExpandedUserMessages] = useState<Set<string>>(new Set());
+  const [fullyExpandedUserMessages, setFullyExpandedUserMessages] = useState<Set<string>>(new Set());
+  const [replyModifierHeld, setReplyModifierHeld] = useState(false);
+
+  useEffect(() => {
+    const updateModifier = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Control" || event.key === "Meta") setReplyModifierHeld(true);
+    };
+    const clearModifier = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Control" || event.key === "Meta") setReplyModifierHeld(false);
+    };
+    const clearOnBlur = () => setReplyModifierHeld(false);
+    window.addEventListener("keydown", updateModifier);
+    window.addEventListener("keyup", clearModifier);
+    window.addEventListener("blur", clearOnBlur);
+    return () => {
+      window.removeEventListener("keydown", updateModifier);
+      window.removeEventListener("keyup", clearModifier);
+      window.removeEventListener("blur", clearOnBlur);
+    };
+  }, []);
   const [messageOffset, setMessageOffset] = useState(0);
   const [hasEarlierMessages, setHasEarlierMessages] = useState(false);
   const [loadingEarlierMessages, setLoadingEarlierMessages] = useState(false);
@@ -1695,7 +1724,8 @@ export default function AppShell() {
   const [notesOpen, setNotesOpen] = useState(false);
   const [automationsOpen, setAutomationsOpen] = useState(false);
   const [focusedNoteId, setFocusedNoteId] = useState<string | null>(null);
-  const [browserFullscreen, setBrowserFullscreen] = useState(false);
+  const [workspaceFullscreen, setWorkspaceFullscreen] = useState(false);
+  const workspaceAutoCollapsedSidebarRef = useRef(false);
   const [remoteTerminalCwd, setRemoteTerminalCwd] = useState(clientConfig.defaultCwd);
   const [remoteFileCwd, setRemoteFileCwd] = useState(clientConfig.defaultCwd);
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
@@ -1712,6 +1742,10 @@ export default function AppShell() {
   const [browserWidthInput, setBrowserWidthInput] = useState("1280");
   const [browserHeightInput, setBrowserHeightInput] = useState("800");
   const [browserRealtime, setBrowserRealtime] = useState(true);
+  const [compressionEnabled, setCompressionEnabled] = useState(false);
+  const [compressionMode, setCompressionMode] = useState<"lite" | "standard" | "aggressive" | "ultra" | "rtk" | "stacked">("stacked");
+  const [compressionToolResults, setCompressionToolResults] = useState(true);
+  const [compressionChatHistory, setCompressionChatHistory] = useState(true);
   const [browserFps, setBrowserFps] = useState(10);
   const [browserDefaultViewport, setBrowserDefaultViewport] = useState({ width: 1280, height: 800 });
   const [voiceInputEnabled, setVoiceInputEnabled] = useState(true);
@@ -1809,10 +1843,6 @@ export default function AppShell() {
     return () => window.clearTimeout(timer);
   }, [workspaceOpen]);
 
-  useEffect(() => {
-    if (workspaceTab !== "browser") setBrowserFullscreen(false);
-  }, [workspaceTab]);
-
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chatLogsOpen, setChatLogsOpen] = useState(false);
@@ -1823,6 +1853,7 @@ export default function AppShell() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
   const [desktopSidebarMounted, setDesktopSidebarMounted] = useState(true);
+
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [findOpen, setFindOpen] = useState(false);
@@ -1843,6 +1874,24 @@ export default function AppShell() {
       ? Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, saved))
       : 240;
   });
+
+  useEffect(() => {
+    if (typeof window === "undefined" || window.innerWidth < 768) return;
+    const syncSidebarForWorkspace = () => {
+      const needsSpace = workspaceOpen && !workspaceFullscreen &&
+        window.innerWidth < sidebarWidth + workspaceWidth + 640;
+      if (needsSpace && desktopSidebarOpen) {
+        workspaceAutoCollapsedSidebarRef.current = true;
+        setDesktopSidebarOpen(false);
+      } else if (!workspaceOpen && workspaceAutoCollapsedSidebarRef.current) {
+        workspaceAutoCollapsedSidebarRef.current = false;
+        setDesktopSidebarOpen(true);
+      }
+    };
+    syncSidebarForWorkspace();
+    window.addEventListener("resize", syncSidebarForWorkspace);
+    return () => window.removeEventListener("resize", syncSidebarForWorkspace);
+  }, [desktopSidebarOpen, sidebarWidth, workspaceFullscreen, workspaceOpen, workspaceWidth]);
 
   useEffect(() => {
     if (desktopSidebarOpen) {
@@ -3066,6 +3115,12 @@ export default function AppShell() {
           browserFps?: number;
           browserViewportWidth?: number;
           browserViewportHeight?: number;
+          compression?: {
+            enabled?: boolean;
+            mode?: "lite" | "standard" | "aggressive" | "ultra" | "rtk" | "stacked";
+            compressToolResults?: boolean;
+            compressChatHistory?: boolean;
+          };
           voiceInput?: {
             enabled?: boolean;
             maxDurationSeconds?: number;
@@ -3109,6 +3164,12 @@ export default function AppShell() {
         }
         if (typeof settings.browserRealtime === "boolean") {
           setBrowserRealtime(settings.browserRealtime);
+        }
+        if (settings.compression) {
+          setCompressionEnabled(Boolean(settings.compression.enabled));
+          if (settings.compression.mode) setCompressionMode(settings.compression.mode);
+          if (typeof settings.compression.compressToolResults === "boolean") setCompressionToolResults(settings.compression.compressToolResults);
+          if (typeof settings.compression.compressChatHistory === "boolean") setCompressionChatHistory(settings.compression.compressChatHistory);
         }
         if (typeof settings.browserFps === "number") {
           setBrowserFps(Math.max(1, Math.min(30, Math.round(settings.browserFps))));
@@ -3241,6 +3302,23 @@ export default function AppShell() {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(next),
+    });
+  }
+
+  function updateCompressionSettings(next: {
+    enabled?: boolean;
+    mode?: "lite" | "standard" | "aggressive" | "ultra" | "rtk" | "stacked";
+    compressToolResults?: boolean;
+    compressChatHistory?: boolean;
+  }) {
+    if (next.enabled !== undefined) setCompressionEnabled(next.enabled);
+    if (next.mode !== undefined) setCompressionMode(next.mode);
+    if (next.compressToolResults !== undefined) setCompressionToolResults(next.compressToolResults);
+    if (next.compressChatHistory !== undefined) setCompressionChatHistory(next.compressChatHistory);
+    void fetch("/api/preferences", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ compression: next }),
     });
   }
 
@@ -3444,6 +3522,17 @@ export default function AppShell() {
       setNotesOpen(false);
       setAutomationsOpen(false);
       const alreadyActive = activeChatIdRef.current === id;
+      const previousChatId = activeChatIdRef.current;
+      if (!alreadyActive && activeChatIncognito && previousChatId) {
+        await fetch("/api/browser", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "close", chatId: previousChatId }),
+        }).catch(() => undefined);
+        await fetch(`/api/chats/${previousChatId}`, { method: "DELETE" }).catch(() => undefined);
+        setActiveChatIncognito(false);
+        setIncognito(false);
+      }
       if (!alreadyActive) persistActiveSnapshot();
       activeChatIdRef.current = id;
       stickToBottomRef.current = true;
@@ -3654,7 +3743,7 @@ export default function AppShell() {
         }
       }
     },
-    [acceptServerSnapshot, applySnapshot, clearUnread, modelParamsByModel, navigateChat, persistActiveSnapshot],
+    [acceptServerSnapshot, activeChatIncognito, applySnapshot, clearUnread, modelParamsByModel, navigateChat, persistActiveSnapshot],
   );
 
   const loadEarlierMessages = useCallback(async () => {
@@ -4545,7 +4634,7 @@ export default function AppShell() {
     const res = await fetch(`/api/chats/${renameChatId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title }),
+      body: JSON.stringify({ title, titleSource: "user" }),
     });
     if (!res.ok) {
       toast.error("Rename failed");
@@ -7429,10 +7518,10 @@ export default function AppShell() {
       {desktopSidebarMounted ? (
         <aside
           className={cn(
-            "relative hidden shrink-0 overflow-hidden border-r border-border/40 md:block",
+            "relative hidden shrink-0 overflow-hidden border-r border-border/40 transition-[width] duration-200 md:block",
             desktopSidebarOpen ? "sidebar-panel-enter" : "sidebar-panel-exit",
           )}
-          style={{ width: `${sidebarWidth}px` }}
+          style={{ width: desktopSidebarOpen ? `${sidebarWidth}px` : "0px" }}
         >
           {sidebar()}
           <SidebarResizeHandle
@@ -7748,9 +7837,53 @@ export default function AppShell() {
                             </div>
                           ) : null}
                           {m.content ? (
-                            <div className="whitespace-pre-wrap">
-                              <RichUserText content={m.content} references={m.references} />
-                            </div>
+                            (() => {
+                              const userMessageLineCount = m.content.split(/\r?\n/).length;
+                              const longUserMessage = userMessageLineCount > 12 || m.content.length > 1_500;
+                              const expanded = expandedUserMessages.has(m.id);
+                              const fullyExpanded = fullyExpandedUserMessages.has(m.id);
+                              return (
+                                <div className={cn("relative", longUserMessage && !fullyExpanded && "group")}>
+                                  <div
+                                    className={cn(
+                                      "overflow-hidden transition-[max-height] duration-300 ease-out",
+                                      longUserMessage && !fullyExpanded && (expanded ? "max-h-[28rem]" : "max-h-56"),
+                                    )}
+                                  >
+                                    <div className="whitespace-pre-wrap">
+                                      <RichUserText content={m.content} references={m.references} />
+                                    </div>
+                                  </div>
+                                  {longUserMessage && !fullyExpanded ? (
+                                    <div className="pointer-events-none absolute inset-x-0 bottom-0 flex translate-y-1/2 justify-center bg-gradient-to-t from-secondary/80 via-secondary/65 to-transparent pb-1 pt-8">
+                                      <Button
+                                        type="button"
+                                        size="xs"
+                                        variant="secondary"
+                                        className="pointer-events-auto border border-border/50 bg-background/90 px-2.5 text-[11px] opacity-0 shadow-sm transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+                                        onClick={() => {
+                                          if (expanded) {
+                                            setFullyExpandedUserMessages((current) => {
+                                              const next = new Set(current);
+                                              next.add(m.id);
+                                              return next;
+                                            });
+                                          } else {
+                                            setExpandedUserMessages((current) => {
+                                              const next = new Set(current);
+                                              next.add(m.id);
+                                              return next;
+                                            });
+                                          }
+                                        }}
+                                      >
+                                        {expanded ? "Show full message" : "Expand"}
+                                      </Button>
+                                    </div>
+                                  ) : null}
+                                </div>
+                              );
+                            })()
                           ) : null}
                         </div>
                         )}
@@ -7883,7 +8016,7 @@ export default function AppShell() {
                               />
                             );
                           }
-                          const displayContent = stripSourceBlocks(part.content);
+                          const displayContent = stripAssistantControlBlocks(part.content);
                           return (
                             <div
                               key={`text-${pi}`}
@@ -7952,12 +8085,26 @@ export default function AppShell() {
                             aria-label={`Use suggestion: ${suggestion.label}`}
                             title="Use suggestion"
                             disabled={busy}
-                            onClick={() => {
-                              setInput(suggestion.prompt);
+                            onClick={(event) => {
+                              const nextInput = event.ctrlKey || event.metaKey
+                                ? input.trim()
+                                  ? `${input.trim()}\n${suggestion.prompt}`
+                                  : suggestion.prompt
+                                : suggestion.prompt;
+                              setInput(nextInput);
                               window.setTimeout(() => {
                                 const editor = textareaRef.current;
                                 if (!editor) return;
                                 editor.focus();
+                                if (event.ctrlKey || event.metaKey) {
+                                  const selection = window.getSelection();
+                                  const range = document.createRange();
+                                  range.selectNodeContents(editor);
+                                  range.collapse(false);
+                                  selection?.removeAllRanges();
+                                  selection?.addRange(range);
+                                  return;
+                                }
                                 const selection = window.getSelection();
                                 const range = document.createRange();
                                 range.selectNodeContents(editor);
@@ -7966,7 +8113,7 @@ export default function AppShell() {
                               }, 0);
                             }}
                           >
-                            <Reply className="size-3.5 shrink-0" />
+                            {replyModifierHeld ? <Plus className="size-3.5 shrink-0" /> : <Reply className="size-3.5 shrink-0" />}
                             <span>{suggestion.label}</span>
                           </Button>
                         ))}
@@ -8271,19 +8418,19 @@ export default function AppShell() {
         </div>
       </div>
 
-      {!notesOpen && workspaceMounted && browserFullscreen && workspaceTab === "browser" ? (
+      {!notesOpen && workspaceMounted && workspaceFullscreen ? (
         <div className="fixed inset-0 z-40 bg-background/55 backdrop-blur-[2px]" aria-hidden="true" />
       ) : null}
       {!notesOpen && workspaceMounted ? (
         <aside
           className={cn(
             "workspace-surface relative flex min-h-0 w-full shrink-0 flex-col overflow-hidden border-l border-border/30 bg-background/95 max-md:absolute max-md:inset-0 max-md:z-30 max-md:!w-full",
-            browserFullscreen && workspaceTab === "browser" && "fixed inset-[1%] z-50 !w-auto rounded-xl border border-border shadow-2xl ring-1 ring-foreground/10",
+            workspaceFullscreen && "fixed inset-[1%] z-50 !w-auto rounded-xl border border-border shadow-2xl ring-1 ring-foreground/10",
             workspaceOpen ? "workspace-panel-enter" : "workspace-panel-exit",
           )}
-          style={browserFullscreen && workspaceTab === "browser" ? undefined : { width: `min(100%, ${workspaceWidth}px)` }}
+          style={workspaceFullscreen ? undefined : { width: `min(100%, ${workspaceWidth}px)` }}
         >
-          {browserFullscreen && workspaceTab === "browser" ? null : (
+          {workspaceFullscreen ? null : (
             <WorkspaceResizeHandle width={workspaceWidth} onWidthChange={setWorkspaceWidth} />
           )}
           <div className="flex shrink-0 items-center gap-1 border-b border-border/30 px-2 py-1.5">
@@ -8296,7 +8443,7 @@ export default function AppShell() {
                   variant={workspaceTab === tab ? "secondary" : "ghost"}
                   onClick={() => {
                     if (workspaceTab === tab) {
-                      setBrowserFullscreen(false);
+                      setWorkspaceFullscreen(false);
                       setWorkspaceOpen(false);
                       return;
                     }
@@ -8329,10 +8476,21 @@ export default function AppShell() {
               size="icon-sm"
               variant="ghost"
               className="size-8 shrink-0"
+              aria-label={workspaceFullscreen ? "Exit workspace fullscreen" : "Open workspace fullscreen"}
+              title={workspaceFullscreen ? "Exit workspace fullscreen" : "Open workspace fullscreen"}
+              onClick={() => setWorkspaceFullscreen((current) => !current)}
+            >
+              {workspaceFullscreen ? <Minimize2 className="size-4" /> : <Fullscreen className="size-4" />}
+            </Button>
+            <Button
+              type="button"
+              size="icon-sm"
+              variant="ghost"
+              className="size-8 shrink-0"
               aria-label="Close workspace"
               title="Close workspace"
               onClick={() => {
-                setBrowserFullscreen(false);
+                setWorkspaceFullscreen(false);
                 setWorkspaceOpen(false);
               }}
             >
@@ -8400,8 +8558,8 @@ export default function AppShell() {
                 <div className="flex shrink-0 items-center gap-1">
                   <Button type="button" size="icon-xs" variant="ghost" aria-label="Back" title="Back" onClick={() => void performBrowserAction("back")}><ArrowLeft className="size-3.5" /></Button>
                   <Button type="button" size="icon-xs" variant="ghost" aria-label="Reload" title="Reload" onClick={() => void performBrowserAction("reload")}><RotateCcw className="size-3.5" /></Button>
-                  <Button type="button" size="icon-xs" variant="ghost" aria-label={browserFullscreen ? "Exit browser fullscreen" : "Open browser fullscreen"} title={browserFullscreen ? "Exit browser fullscreen" : "Open browser fullscreen"} onClick={() => setBrowserFullscreen((current) => !current)}>
-                    {browserFullscreen ? <Minimize2 className="size-3.5" /> : <Fullscreen className="size-3.5" />}
+                  <Button type="button" size="icon-xs" variant="ghost" aria-label={workspaceFullscreen ? "Exit workspace fullscreen" : "Open workspace fullscreen"} title={workspaceFullscreen ? "Exit workspace fullscreen" : "Open workspace fullscreen"} onClick={() => setWorkspaceFullscreen((current) => !current)}>
+                    {workspaceFullscreen ? <Minimize2 className="size-3.5" /> : <Fullscreen className="size-3.5" />}
                   </Button>
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
@@ -8975,6 +9133,11 @@ export default function AppShell() {
         browserViewportWidth={browserDefaultViewport.width}
         browserViewportHeight={browserDefaultViewport.height}
         onBrowserSettingsChange={updateBrowserSettings}
+        compressionEnabled={compressionEnabled}
+        compressionMode={compressionMode}
+        compressionToolResults={compressionToolResults}
+        compressionChatHistory={compressionChatHistory}
+        onCompressionSettingsChange={updateCompressionSettings}
         models={models}
         modelId={defaultModelId}
         onModelIdChange={updateDefaultModel}

@@ -53,6 +53,7 @@ type BrowserResult = {
 const persistentContexts = new Map<string, Promise<BrowserContext>>();
 const sessions = new Map<string, BrowserContextState>();
 const actionLocks = new Map<string, Promise<void>>();
+const allowedAddressCache = new Map<string, { expiresAt: number }>();
 const browserProfilesDir = path.join(config.dataDir, "browser-profiles");
 
 function envList(name: string) {
@@ -101,9 +102,13 @@ async function assertAllowedUrl(rawUrl: string) {
   }
   if (isLocalhost(hostname)) return url.toString();
 
-  const addresses = await dns.lookup(hostname, { all: true });
-  if (!addresses.length || addresses.some(({ address }) => isPrivateAddress(address))) {
-    throw new Error("Browser target resolves to a private or unavailable network address");
+  const cached = allowedAddressCache.get(hostname);
+  if (!cached || cached.expiresAt <= Date.now()) {
+    const addresses = await dns.lookup(hostname, { all: true });
+    if (!addresses.length || addresses.some(({ address }) => isPrivateAddress(address))) {
+      throw new Error("Browser target resolves to a private or unavailable network address");
+    }
+    allowedAddressCache.set(hostname, { expiresAt: Date.now() + 60_000 });
   }
   return url.toString();
 }
@@ -304,6 +309,7 @@ async function performBrowserActionUnlocked(ownerId: string, chatId: string, act
     state.activeTabId = tabId;
   } else if (action.action === "navigate") {
     if (!action.url) throw new Error("A URL is required");
+    await page.evaluate(() => window.stop()).catch(() => undefined);
     await page.goto(await assertAllowedUrl(action.url), { waitUntil: "domcontentloaded", timeout: 30_000 });
     recordOrigin(ownerId, page.url());
   } else if (action.action === "back") {
@@ -313,7 +319,7 @@ async function performBrowserActionUnlocked(ownerId: string, chatId: string, act
   } else if (action.action === "reload") {
     await page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
   } else if (action.action === "click") {
-    if (action.selector) await page.locator(action.selector).first().click({ timeout: 15_000 });
+    if (action.selector) await page.locator(action.selector).first().click({ timeout: 15_000, noWaitAfter: true });
     else if (Number.isFinite(action.x) && Number.isFinite(action.y)) await page.mouse.click(action.x!, action.y!);
     else throw new Error("A selector or x/y coordinates are required for click");
   } else if (action.action === "type") {
@@ -375,6 +381,14 @@ export async function performBrowserAction(ownerId: string, chatId: string, acti
     release();
     if (actionLocks.get(key) === queued) actionLocks.delete(key);
   }
+}
+
+export async function closeBrowserSession(ownerId: string, chatId: string) {
+  const key = sessionKey(ownerId, chatId);
+  const state = sessions.get(key);
+  if (!state) return;
+  sessions.delete(key);
+  await Promise.all([...state.tabs.values()].map((page) => page.close().catch(() => undefined)));
 }
 
 export async function cleanupBrowserSessions() {

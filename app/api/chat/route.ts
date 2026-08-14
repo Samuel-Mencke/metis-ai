@@ -140,7 +140,10 @@ export async function POST(req: Request) {
       : {}),
   });
   if (chat.title === "New chat" || !chat.title.trim()) {
-    updateChat(chatId, { title: titleFromMessage(message || `Attached ${stored.length} files`) }, ownerId);
+    updateChat(chatId, {
+      title: titleFromMessage(message || `Attached ${stored.length} files`),
+      titleSource: "default",
+    }, ownerId);
   }
   let job;
   try {

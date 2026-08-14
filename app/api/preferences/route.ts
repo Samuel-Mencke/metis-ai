@@ -5,6 +5,7 @@ import {
   type GlobalModelSettings,
 } from "@/lib/db-store";
 import { normalizeVoiceSettings } from "@/lib/shared-context";
+import type { CompressionMode } from "@/lib/compression";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,6 +37,7 @@ export async function PATCH(req: Request) {
     browserViewportHeight?: unknown;
     voiceInput?: unknown;
     featureFlags?: unknown;
+    compression?: unknown;
   };
   const userId = (await getAuthenticatedUserId(req)) ?? undefined;
   const current = getGlobalModelSettings(userId);
@@ -129,6 +131,22 @@ export async function PATCH(req: Request) {
             .filter(([key, value]) => ["plans", "notes", "recovery", "askUserTimeout", "voiceInput"].includes(key) && typeof value === "boolean"),
         )
       : undefined;
+  const compression =
+    body.compression && typeof body.compression === "object" && !Array.isArray(body.compression)
+      ? (() => {
+          const value = body.compression as Record<string, unknown>;
+          const modes = new Set(["lite", "standard", "aggressive", "ultra", "rtk", "stacked"]);
+          const mode = typeof value.mode === "string" && modes.has(value.mode)
+            ? value.mode as CompressionMode
+            : undefined;
+          return {
+            ...(typeof value.enabled === "boolean" ? { enabled: value.enabled } : {}),
+            ...(mode ? { mode } : {}),
+            ...(typeof value.compressToolResults === "boolean" ? { compressToolResults: value.compressToolResults } : {}),
+            ...(typeof value.compressChatHistory === "boolean" ? { compressChatHistory: value.compressChatHistory } : {}),
+          };
+        })()
+      : undefined;
   return Response.json({
     settings: saveGlobalModelSettings(
       {
@@ -148,6 +166,7 @@ export async function PATCH(req: Request) {
         ...(browserViewportHeight !== undefined ? { browserViewportHeight } : {}),
         ...(voiceInput !== undefined ? { voiceInput } : {}),
         ...(featureFlags !== undefined ? { featureFlags } : {}),
+        ...(compression !== undefined ? { compression: { ...current.compression, ...compression } } : {}),
       },
       userId,
     ),

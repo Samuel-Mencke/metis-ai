@@ -22,6 +22,9 @@ export type McpContext = {
   automation?: boolean;
   modeId?: string;
   modePolicy?: string;
+  compressionEnabled?: boolean;
+  compressionMode?: string;
+  compressionToolResults?: boolean;
 };
 
 export function getMcpServers(context: McpContext = {}): McpServerMap {
@@ -37,6 +40,9 @@ export function getMcpServers(context: McpContext = {}): McpServerMap {
       MCP_AUTOMATION: context.automation ? "1" : undefined,
       MCP_MODE_ID: context.modeId,
       MCP_MODE_POLICY: context.modePolicy,
+      MCP_COMPRESSION_ENABLED: context.compressionEnabled ? "1" : undefined,
+      MCP_COMPRESSION_MODE: context.compressionMode,
+      MCP_COMPRESSION_TOOL_RESULTS: context.compressionToolResults === false ? "0" : "1",
       MCP_AGENT_CWD: agentCwd,
     }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
   );

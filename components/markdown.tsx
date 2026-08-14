@@ -18,7 +18,7 @@ import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
 import { normalizeMath, splitStreamingMath } from "@/lib/math";
 import { LinkPreview } from "@/components/link-preview";
-import { Link2 } from "lucide-react";
+import { ExternalLink, Link2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export { normalizeMath, splitStreamingMath } from "@/lib/math";
@@ -29,6 +29,23 @@ function MarkdownLink({
   ...props
 }: AnchorHTMLAttributes<HTMLAnchorElement>) {
   const isWebUrl = Boolean(href && /^https?:\/\//i.test(href));
+  const [hovered, setHovered] = useState(false);
+  const [modifierHeld, setModifierHeld] = useState(false);
+  useEffect(() => {
+    if (!hovered) return;
+    const updateModifier = (event: KeyboardEvent) => {
+      if (event.key === "Control" || event.key === "Meta") setModifierHeld(true);
+    };
+    const clearModifier = (event: KeyboardEvent) => {
+      if (event.key === "Control" || event.key === "Meta") setModifierHeld(false);
+    };
+    window.addEventListener("keydown", updateModifier);
+    window.addEventListener("keyup", clearModifier);
+    return () => {
+      window.removeEventListener("keydown", updateModifier);
+      window.removeEventListener("keyup", clearModifier);
+    };
+  }, [hovered]);
   const isSubagentUrl = Boolean(href && /^subagent:\/\//i.test(href));
   const workspaceMatch = href?.match(/^workspace:\/\/(plan|canvas)\/([^/?#]+)(?:[?#].*)?$/i);
   const noteMatch = href?.match(/^note:\/\/([^/?#]+)(?:[?#].*)?$/i);
@@ -88,6 +105,16 @@ function MarkdownLink({
         event.preventDefault();
         window.dispatchEvent(new CustomEvent("ai-chat:open-browser", { detail: href }));
       }}
+      onMouseEnter={(event) => {
+        setHovered(true);
+        setModifierHeld(event.ctrlKey || event.metaKey);
+        props.onMouseEnter?.(event);
+      }}
+      onMouseLeave={(event) => {
+        setHovered(false);
+        setModifierHeld(false);
+        props.onMouseLeave?.(event);
+      }}
     >
       {sourceTitle ? (
         <>
@@ -95,6 +122,9 @@ function MarkdownLink({
           {sourceTitle}
         </>
       ) : children}
+      {isWebUrl && hovered && modifierHeld ? (
+        <ExternalLink className="ml-1 inline size-3.5 animate-in fade-in text-muted-foreground" aria-label="Ctrl-click opens in a new tab" />
+      ) : null}
     </a>
   );
   return isWebUrl && href ? <LinkPreview href={href}>{link}</LinkPreview> : link;

@@ -25,7 +25,8 @@ import { parseModelKey } from "@/lib/providers/types";
 import { runAlternativeProviderJob } from "@/lib/providers/runner";
 import { createSnapshot } from "@/lib/shared-context";
 import { allModes, modeById } from "@/lib/modes";
-import type { AgentMode, ToolPermissionCategory } from "@/lib/store";
+import type { AgentMode, MessagePart, ToolPermissionCategory } from "@/lib/store";
+import { compress, type CompressionMode } from "@/lib/compression";
 
 const AGENT_INIT_TIMEOUT_MS = 90_000;
 const AGENT_INACTIVITY_TIMEOUT_MS = 5 * 60_000;
@@ -552,10 +553,16 @@ export async function runQueuedJob(job: AgentJob) {
   let agent: Awaited<ReturnType<typeof Agent.create>> | undefined;
   let text = "";
   const tools: ToolPart[] = [];
+  const parts: MessagePart[] = [];
   const providedAttachments: ProvidedAttachment[] = [];
   const createdWorkspaces: WorkspaceItem[] = [];
   const createdChats: Array<{ id: string; title: string }> = [];
   const globalModelSettings = getGlobalModelSettings(job.userId);
+  const compressionSettings = globalModelSettings.compression;
+  const compressionEnabled = Boolean(compressionSettings?.enabled) && !job.incognito && !chat.incognito;
+  const compressionMode: CompressionMode = compressionSettings?.mode || "stacked";
+  const compressContext = (value: string, enabled: boolean) =>
+    compressionEnabled && enabled ? compress(value, compressionMode).text : value;
   const activeMode = modeById(job.modeId || chat.sessionState?.modeId, globalModelSettings.customModes || []);
   const nativeTools = nativeToolsForMode(activeMode);
   const availableModes = allModes(globalModelSettings.customModes || [])
@@ -572,6 +579,9 @@ export async function runQueuedJob(job: AgentJob) {
       allowedCategories: activeMode.allowedCategories,
       toolOverrides: activeMode.toolOverrides || {},
     }),
+    compressionEnabled,
+    compressionMode,
+    compressionToolResults: Boolean(compressionSettings?.compressToolResults ?? true),
   };
   const configuredSubagentModel = job.extendedModelId ||
     (globalModelSettings.subagentModelEnabled ? globalModelSettings.subagentModelId : undefined);
@@ -611,6 +621,7 @@ export async function runQueuedJob(job: AgentJob) {
       role: "assistant",
       content: text,
       ...(tools.length ? { tools: [...tools] } : {}),
+      ...(parts.length ? { parts: [...parts] } : {}),
       ...(providedAttachments.length ? { attachments: [...providedAttachments] } : {}),
     });
     checkpointDirty = false;
@@ -624,10 +635,12 @@ export async function runQueuedJob(job: AgentJob) {
       return;
     }
     if (checkpointTimer) return;
+    // Chat persistence uses synchronous SQLite writes. Keep live text durable
+    // without blocking the HTTP/WebSocket event loop on every token.
     checkpointTimer = setTimeout(() => {
       checkpointTimer = undefined;
       if (checkpointDirty) checkpointNow();
-    }, 500);
+    }, 1500);
   };
   const persistWorkspace = (type: WorkspaceItem["type"], content: string, name = type === "plan" ? "Plan" : "Canvas") => {
     const current = getChat(job.chatId, job.userId);
@@ -737,7 +750,10 @@ export async function runQueuedJob(job: AgentJob) {
       ...(job.incognito || chat.incognito
         ? []
         : (() => {
-            const persistedContext = persistedConversationContext(chat, job.messageId);
+            const persistedContext = compressContext(
+              persistedConversationContext(chat, job.messageId),
+              Boolean(compressionSettings?.compressChatHistory ?? true),
+            );
             return persistedContext
               ? [
                   "Persisted conversation context:\n" +
@@ -748,7 +764,7 @@ export async function runQueuedJob(job: AgentJob) {
               : [];
           })()),
       job.resumePrompt
-        ? `Resume the paused agent run. Do not repeat earlier tool calls or user-facing work. Continue only from the saved pause point using this answer/context:\n${job.resumePrompt}`
+        ? `Resume the paused agent run. Do not repeat earlier tool calls or user-facing work. Continue only from the saved pause point using this answer/context:\n${compressContext(job.resumePrompt, Boolean(compressionSettings?.compressToolResults ?? true))}`
         : `User message:\n${job.message || "(see attachments)"}`,
       buildAttachmentPrompt(job.chatId, job.attachments, job.userId),
       !job.incognito && !chat.incognito && job.references?.length
@@ -792,6 +808,9 @@ export async function runQueuedJob(job: AgentJob) {
             if (!delta) return;
             receivedTextDelta = true;
             text += delta;
+            const lastPart = parts.at(-1);
+            if (lastPart?.type === "text") lastPart.content += delta;
+            else parts.push({ type: "text", content: delta });
             checkpoint();
             emit("text", { text: delta });
           },
@@ -874,6 +893,13 @@ export async function runQueuedJob(job: AgentJob) {
           tools[existingToolIndex] = { ...tools[existingToolIndex], ...nextTool };
         } else {
           tools.push(nextTool);
+        }
+        const existingPartIndex = parts.findIndex((part) => part.type === "tool" && part.id === toolId);
+        if (existingPartIndex >= 0) {
+          const previousPart = parts[existingPartIndex];
+          if (previousPart.type === "tool") parts[existingPartIndex] = { ...previousPart, ...nextTool };
+        } else {
+          parts.push({ type: "tool", ...nextTool });
         }
         checkpoint(true);
         const toolResultText = typeof toolResult === "string"
@@ -1074,6 +1100,11 @@ export async function runQueuedJob(job: AgentJob) {
     }
     const extractedSuggestions = extractSuggestions(ensureRecommendationSuggestions(text));
     text = extractedSuggestions.text;
+    if (!receivedTextDelta && text) {
+      const lastPart = parts.at(-1);
+      if (lastPart?.type === "text") lastPart.content += text;
+      else parts.push({ type: "text", content: text });
+    }
     if (extractedSuggestions.suggestions.length) {
       emit("suggestions", { suggestions: extractedSuggestions.suggestions });
     }
@@ -1088,6 +1119,7 @@ export async function runQueuedJob(job: AgentJob) {
         ? { suggestions: extractedSuggestions.suggestions }
         : {}),
       ...(tools.length ? { tools } : {}),
+      ...(parts.length ? { parts: [...parts] } : {}),
       ...(providedAttachments.length ? { attachments: providedAttachments } : {}),
       ...(result.status === "finished"
         ? {
@@ -1100,10 +1132,7 @@ export async function runQueuedJob(job: AgentJob) {
           }
         : {}),
     });
-    if (receivedTextDelta) {
-      emit("text-reset", {});
-    }
-    if (text) emit("text", { text });
+    if (!receivedTextDelta && text) emit("text", { text });
     updateChat(job.chatId, {
       agentId: agent.agentId,
       runStatus: resultError ? "error" : "completed",
@@ -1137,6 +1166,7 @@ export async function runQueuedJob(job: AgentJob) {
         content: text,
         errorMessage: message,
         ...(tools.length ? { tools } : {}),
+        ...(parts.length ? { parts: [...parts] } : {}),
       });
       updateChat(job.chatId, {
         runStatus: "error",

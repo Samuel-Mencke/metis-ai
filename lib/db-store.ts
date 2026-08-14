@@ -441,6 +441,7 @@ export function createChat(
         ? { incognito: true, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() }
         : {}),
       title: title.trim() || "New chat",
+      titleSource: "default",
       ...(model?.id ? { modelId: model.id } : {}),
       ...(model?.params?.length ? { modelParams: model.params } : {}),
       messages: [],
@@ -475,6 +476,7 @@ export function updateChat(
   id: string,
   patch: {
     title?: string;
+    titleSource?: "default" | "user" | "agent";
     keywords?: string[] | null;
     agentId?: string | null;
     modelId?: string | null;
@@ -500,6 +502,7 @@ export function updateChat(
     if (!chat) return null;
     const next = { ...chat };
     if (patch.title?.trim()) next.title = patch.title.trim();
+    if (patch.titleSource) next.titleSource = patch.titleSource;
     if (patch.keywords === null) {
       delete next.keywords;
     } else if (patch.keywords) {

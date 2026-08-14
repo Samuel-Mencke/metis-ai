@@ -13,6 +13,7 @@ const { getAuthenticatedUser, passwordMatches } = await import("./lib/auth.ts");
 const { updateChat } = await import("./lib/db-store.ts");
 const {
   captureBrowserFrame,
+  closeBrowserSession,
   cleanupBrowserSessions,
   performBrowserAction,
   setBrowserViewport,
@@ -76,6 +77,10 @@ function persistBrowserContext(userId, chatId, result) {
 
 async function performSharedBrowserAction(userId, chatId, action) {
   await cleanupBrowserSessions();
+  if (action.action === "close") {
+    await closeBrowserSession(userId, chatId);
+    return { closed: true };
+  }
   const result = await performBrowserAction(userId, chatId, action);
   persistBrowserContext(userId, chatId, result);
   const subscribers = browserStreamSubscribers.get(`${userId}:${chatId}`);

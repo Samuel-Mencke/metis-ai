@@ -46,6 +46,7 @@ export type ChatMessage = {
   referenceText?: string;
   thinking?: string;
   tools?: ToolPart[];
+  parts?: MessagePart[];
   suggestions?: Array<string | { label: string; prompt: string }>;
   references?: Array<{
     kind: string;
@@ -76,6 +77,11 @@ export type ChatMessage = {
   };
   createdAt: string;
 };
+
+export type MessagePart =
+  | { type: "thinking"; content: string; done?: boolean; durationMs?: number }
+  | ({ type: "tool" } & ToolPart)
+  | { type: "text"; content: string };
 
 export type WorkspaceItem = {
   id: string;
@@ -322,6 +328,7 @@ export type Chat = {
   incognito?: boolean;
   expiresAt?: string;
   title: string;
+  titleSource?: "default" | "user" | "agent";
   keywords?: string[];
   agentId?: string;
   /** Selected provider/model key for this chat. */
@@ -382,6 +389,12 @@ const MEMORIES_PATH = path.join(DATA_DIR, "memories.json");
 const SETTINGS_PATH = path.join(DATA_DIR, "settings.json");
 
 export type GlobalModelSettings = {
+  compression?: {
+    enabled?: boolean;
+    mode?: "lite" | "standard" | "aggressive" | "ultra" | "rtk" | "stacked";
+    compressToolResults?: boolean;
+    compressChatHistory?: boolean;
+  };
   modelId?: string;
   modelParams?: Array<{ id: string; value: string }>;
   modelParamsByModel?: Record<string, Array<{ id: string; value: string }>>;

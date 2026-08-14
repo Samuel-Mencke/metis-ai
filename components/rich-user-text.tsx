@@ -1,6 +1,8 @@
 "use client";
 
 import { LinkPreview } from "@/components/link-preview";
+import { ExternalLink } from "lucide-react";
+import { useEffect, useState } from "react";
 
 type Reference = {
   kind?: string;
@@ -10,6 +12,54 @@ type Reference = {
   path?: string;
   sessionId?: string;
 };
+
+function RichLink({ href, children }: { href: string; children: string }) {
+  const [hovered, setHovered] = useState(false);
+  const [modifierHeld, setModifierHeld] = useState(false);
+  useEffect(() => {
+    if (!hovered) return;
+    const update = (event: KeyboardEvent) => {
+      if (event.key === "Control" || event.key === "Meta") setModifierHeld(true);
+    };
+    const clear = (event: KeyboardEvent) => {
+      if (event.key === "Control" || event.key === "Meta") setModifierHeld(false);
+    };
+    window.addEventListener("keydown", update);
+    window.addEventListener("keyup", clear);
+    return () => {
+      window.removeEventListener("keydown", update);
+      window.removeEventListener("keyup", clear);
+    };
+  }, [hovered]);
+  return (
+    <a
+      href={href}
+      className="inline-flex items-center underline underline-offset-2 hover:text-primary"
+      onMouseEnter={(event) => {
+        setHovered(true);
+        setModifierHeld(event.ctrlKey || event.metaKey);
+      }}
+      onMouseLeave={() => {
+        setHovered(false);
+        setModifierHeld(false);
+      }}
+      onClick={(event) => {
+        if (event.ctrlKey || event.metaKey) {
+          event.preventDefault();
+          window.open(href, "_blank", "noopener,noreferrer");
+          return;
+        }
+        event.preventDefault();
+        window.dispatchEvent(new CustomEvent("ai-chat:open-browser", { detail: href }));
+      }}
+    >
+      {children}
+      {hovered && modifierHeld ? (
+        <ExternalLink className="ml-1 size-3.5 animate-in fade-in text-muted-foreground" aria-label="Ctrl-click opens in a new tab" />
+      ) : null}
+    </a>
+  );
+}
 
 export function RichUserText({
   content,
@@ -64,21 +114,7 @@ export function RichUserText({
         if (part.kind === "link") {
           return (
             <LinkPreview key={`${part.text}-${index}`} href={part.text}>
-              <a
-                href={part.text}
-                className="underline underline-offset-2 hover:text-primary"
-                onClick={(event) => {
-                  if (event.ctrlKey || event.metaKey) {
-                    event.preventDefault();
-                    window.open(part.text, "_blank", "noopener,noreferrer");
-                    return;
-                  }
-                  event.preventDefault();
-                  window.dispatchEvent(new CustomEvent("ai-chat:open-browser", { detail: part.text }));
-                }}
-              >
-                {part.text}
-              </a>
+              <RichLink href={part.text}>{part.text}</RichLink>
             </LinkPreview>
           );
         }
