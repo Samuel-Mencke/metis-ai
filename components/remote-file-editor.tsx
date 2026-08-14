@@ -310,7 +310,7 @@ export function RemoteFileEditor({ cwd, onCwdChange }: RemoteFileEditorProps) {
             <Button type="button" size="icon-sm" variant="ghost" onClick={() => void createFolder()} aria-label="Create folder"><Folder className="size-3.5" /></Button>
             <Button type="button" size="icon-sm" variant="ghost" disabled={!selectedEntryPath} onClick={() => void renameSelected()} aria-label="Rename entry"><Pencil className="size-3.5" /></Button>
             <Button type="button" size="icon-sm" variant="ghost" disabled={!selectedEntryPath} onClick={() => setDeleteTarget(selectedEntryPath)} aria-label="Delete entry"><Trash2 className="size-3.5" /></Button>
-            {!fullscreen ? <Button type="button" size="sm" variant="outline" disabled={!selectedPath} onClick={() => setFullscreen(true)} aria-label="Open file fullscreen" title="Open file fullscreen"><Fullscreen className="size-3.5" />Vollbild</Button> : null}
+            {!fullscreen ? <Button type="button" size="sm" variant="outline" disabled={!selectedPath} onClick={() => setFullscreen(true)} aria-label="Open file fullscreen" title="Open file fullscreen"><Fullscreen className="size-3.5" />Fullscreen</Button> : null}
             {!fullscreen ? <Button type="button" size="icon-sm" disabled={!selectedPath || saving} onClick={() => void save()} aria-label="Save file" title="Save file">{saving ? <LoaderCircle className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}</Button> : null}
           </div>
           <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-border/40">

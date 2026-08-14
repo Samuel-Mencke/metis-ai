@@ -130,11 +130,11 @@ export function compress(input: string, mode: CompressionMode = "stacked"): Comp
 
 export function compressionModes(): Array<{ value: CompressionMode; label: string; description: string }> {
   return [
-    { value: "lite", label: "Lite", description: "Sehr risikoarme Whitespace- und Duplikatbereinigung." },
-    { value: "standard", label: "Standard", description: "Kondensiert normale Prosa." },
-    { value: "aggressive", label: "Aggressive", description: "Stärkere, potenziell verlustbehaftete Prosa-Kompression." },
-    { value: "rtk", label: "RTK", description: "Optimiert Terminal-, Build-, Test- und Git-Ausgaben." },
-    { value: "stacked", label: "Stacked", description: "RTK und Caveman kombiniert; empfohlen für Coding-Agent-Kontexte." },
-    { value: "ultra", label: "Ultra", description: "Maximale Kompression als letzter Ausweg bei großen Kontexten." },
+    { value: "lite", label: "Lite", description: "Very low-risk whitespace and duplicate cleanup." },
+    { value: "standard", label: "Standard", description: "Condenses regular prose." },
+    { value: "aggressive", label: "Aggressive", description: "Stronger, potentially lossy prose compression." },
+    { value: "rtk", label: "RTK", description: "Optimizes terminal, build, test, and Git output." },
+    { value: "stacked", label: "Stacked", description: "Combines RTK and Caveman; recommended for coding-agent contexts." },
+    { value: "ultra", label: "Ultra", description: "Maximum compression as a last resort for large contexts." },
   ];
 }

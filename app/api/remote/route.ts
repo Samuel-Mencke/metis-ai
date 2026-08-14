@@ -296,7 +296,7 @@ export async function POST(req: Request) {
     return Response.json({ error: "Unknown remote action" }, { status: 400 });
   } catch (error) {
     return Response.json(
-      { error: error instanceof Error ? error.message : "Remote-Aktion fehlgeschlagen" },
+      { error: error instanceof Error ? error.message : "Remote action failed" },
       { status: 502 },
     );
   }

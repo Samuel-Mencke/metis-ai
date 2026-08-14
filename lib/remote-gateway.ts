@@ -12,7 +12,7 @@ export async function callRemoteGatewayTool(
   if (result.isError) {
     throw new Error(
       result.content?.map((item) => item.text).filter(Boolean).join("\n") ||
-        "Interne MCP-Aktion fehlgeschlagen",
+        "Internal MCP action failed",
     );
   }
   const text = result.content?.map((item) => item.text || "").join("\n") || "";

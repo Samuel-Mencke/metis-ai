@@ -20,6 +20,23 @@ type RemoteClientOption = {
   hostname?: string;
 };
 
+async function readRemoteResponse<T>(response: Response): Promise<T> {
+  const body = await response.text();
+  let data: T & { error?: string };
+  try {
+    data = JSON.parse(body) as T & { error?: string };
+  } catch {
+    const contentType = response.headers.get("content-type") || "unknown";
+    const preview = body.replace(/\s+/g, " ").trim().slice(0, 160);
+    throw new Error(
+      `Remote terminal returned a non-JSON response (${response.status}, ${contentType}). ` +
+      `${preview || "Check that the Metis AI server URL and authentication are correct."}`,
+    );
+  }
+  if (!response.ok) throw new Error(data.error || `Remote terminal request failed (${response.status})`);
+  return data;
+}
+
 export function RemoteTerminal({ cwd, sessionId, onSessionIdChange }: RemoteTerminalProps) {
   const terminalElementRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<import("@xterm/xterm").Terminal | null>(null);
@@ -93,8 +110,8 @@ export function RemoteTerminal({ cwd, sessionId, onSessionIdChange }: RemoteTerm
           body: JSON.stringify({ action: "pty-create", clientId: remoteClientId, cwd, ...size }),
         });
       }
-      const data = (await response.json()) as { sessionId?: string; error?: string };
-      if (!response.ok || !data.sessionId) throw new Error(data.error || "Could not start terminal");
+      const data = await readRemoteResponse<{ sessionId?: string }>(response);
+      if (!data.sessionId) throw new Error("Remote terminal did not return a session ID");
       sessionIdRef.current = data.sessionId;
       onSessionIdChange(data.sessionId);
       setStarting(false);
