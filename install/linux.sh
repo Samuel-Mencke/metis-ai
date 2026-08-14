@@ -94,8 +94,9 @@ command -v pnpm >/dev/null 2>&1 || "$node_home/bin/npm" install --global pnpm@9
 data_dir="$(ask "Data directory" "$install_dir/data")"
 agent_cwd="$(ask "Agent workspace directory" "$HOME")"
 port="$(ask "Web application port" "3100")"
-host_mode="$(ask "Host web application on local network? (y/N)" "n")"
-if [[ "$host_mode" =~ ^([Yy][Ee][Ss]|[Yy]|1|[Tt][Rr][Uu][Ee])$ ]]; then
+host_mode="n"
+host_mode="$(ask "Host web application on local network? (y/N)" "$host_mode")"
+if [[ "${host_mode:-n}" =~ ^([Yy][Ee][Ss]|[Yy]|1|[Tt][Rr][Uu][Ee])$ ]]; then
   ai_chat_host="0.0.0.0"
   public_host="$(default_public_host)"
 else
