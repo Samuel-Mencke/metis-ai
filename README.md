@@ -44,6 +44,20 @@ Metis AI includes the following capabilities:
 | **Sharing and recovery** | Share chats and attachments through links, optionally protect them with a password, clone shared chats and revoke access |
 | **Administration** | Provider discovery and testing, model listing, preferences, status checks, recovery flows and configurable security boundaries |
 
+### Tutorial & introduction
+
+The video walks through installation, provider setup, workspaces, notes,
+automations, browser control, voice input, sharing, agent modes, MCP servers,
+remote clients and memories:
+
+<p align="center">
+  <a href="https://youtu.be/UhJVr7-CeOY">
+    <img src="https://img.youtube.com/vi/UhJVr7-CeOY/maxresdefault.jpg" alt="Metis AI tutorial and introduction" width="720">
+  </a>
+</p>
+
+[Watch the tutorial and introduction on YouTube](https://youtu.be/UhJVr7-CeOY)
+
 <p align="center">
   <img src="./public/quick-start.png" alt="Quick start" width="100%">
 </p>

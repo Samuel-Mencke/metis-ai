@@ -573,9 +573,9 @@ function ModeIcon({ mode, className }: { mode: AgentMode; className?: string }) 
   return <SlidersHorizontal className={className} />;
 }
 
-function normalizeWorkDirectory(value?: string): string {
+function normalizeWorkDirectory(value: string | undefined, defaultCwd = clientConfig.defaultCwd): string {
   const cwd = value?.trim();
-  return cwd && cwd !== "workspace" ? cwd : clientConfig.defaultCwd;
+  return cwd && cwd !== "workspace" ? cwd : defaultCwd;
 }
 
 function normalizeWorkspaceTab(value: unknown): NonNullable<ChatSessionState["workspaceTab"]> {
@@ -590,21 +590,21 @@ function normalizeWorkspaceTab(value: unknown): NonNullable<ChatSessionState["wo
       : "canvas";
 }
 
-function normalizeTerminalTabs(session: ChatSessionState): TerminalTab[] {
+function normalizeTerminalTabs(session: ChatSessionState, defaultCwd: string): TerminalTab[] {
   const tabs = (session.terminalTabs || [])
     .filter((tab) => tab && typeof tab.id === "string" && typeof tab.cwd === "string")
     .slice(0, 20)
     .map((tab, index) => ({
       id: tab.id.slice(0, 200),
       title: tab.title?.trim().slice(0, 80) || `Terminal ${index + 1}`,
-      cwd: normalizeWorkDirectory(tab.cwd),
+      cwd: normalizeWorkDirectory(tab.cwd, defaultCwd),
       ...(tab.sessionId ? { sessionId: tab.sessionId.slice(0, 200) } : {}),
     }));
   if (tabs.length) return tabs;
   return [{
     id: "terminal-1",
     title: "Terminal 1",
-    cwd: normalizeWorkDirectory(session.terminalCwd || session.remoteCwd),
+    cwd: normalizeWorkDirectory(session.terminalCwd || session.remoteCwd, defaultCwd),
     ...(session.terminalSessionId ? { sessionId: session.terminalSessionId } : {}),
   }];
 }
@@ -1653,7 +1653,8 @@ function FileShareEmbed({
   );
 }
 
-export default function AppShell() {
+export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
+  const workspaceDefaultCwd = defaultCwd.trim() || clientConfig.defaultCwd;
   const router = useRouter();
   const searchParams = useSearchParams();
   const routeChatId = searchParams.get("c");
@@ -1727,8 +1728,8 @@ export default function AppShell() {
   const [focusedNoteId, setFocusedNoteId] = useState<string | null>(null);
   const [workspaceFullscreen, setWorkspaceFullscreen] = useState(false);
   const workspaceAutoCollapsedSidebarRef = useRef(false);
-  const [remoteTerminalCwd, setRemoteTerminalCwd] = useState(clientConfig.defaultCwd);
-  const [remoteFileCwd, setRemoteFileCwd] = useState(clientConfig.defaultCwd);
+  const [remoteTerminalCwd, setRemoteTerminalCwd] = useState(workspaceDefaultCwd);
+  const [remoteFileCwd, setRemoteFileCwd] = useState(workspaceDefaultCwd);
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
   const [activeTerminalTabId, setActiveTerminalTabId] = useState<string | null>(null);
   const [browserUrl, setBrowserUrl] = useState("");
@@ -2851,7 +2852,7 @@ export default function AppShell() {
     const tab: TerminalTab = {
       id,
       title: `Terminal ${terminalTabs.length + 1}`,
-      cwd: remoteTerminalCwd || clientConfig.defaultCwd,
+      cwd: remoteTerminalCwd || workspaceDefaultCwd,
     };
     setTerminalTabs((current) => [...current, tab].slice(-20));
     setActiveTerminalTabId(id);
@@ -2866,7 +2867,7 @@ export default function AppShell() {
       : activeTerminalTabId;
     setTerminalTabs(nextTabs);
     setActiveTerminalTabId(nextActiveId || nextTabs[0].id);
-    setRemoteTerminalCwd(nextTabs.find((tab) => tab.id === (nextActiveId || nextTabs[0].id))?.cwd || clientConfig.defaultCwd);
+    setRemoteTerminalCwd(nextTabs.find((tab) => tab.id === (nextActiveId || nextTabs[0].id))?.cwd || workspaceDefaultCwd);
   }
 
   function notifyUser(
@@ -3407,15 +3408,15 @@ export default function AppShell() {
         ? Math.min(WORKSPACE_MAX_WIDTH, Math.max(WORKSPACE_MIN_WIDTH, session.workspaceWidth))
         : 380,
     );
-    const loadedTerminalTabs = normalizeTerminalTabs(session);
+    const loadedTerminalTabs = normalizeTerminalTabs(session, workspaceDefaultCwd);
     const loadedActiveTerminalTabId =
       session.activeTerminalTabId && loadedTerminalTabs.some((tab) => tab.id === session.activeTerminalTabId)
         ? session.activeTerminalTabId
         : loadedTerminalTabs[0].id;
     setTerminalTabs(loadedTerminalTabs);
     setActiveTerminalTabId(loadedActiveTerminalTabId);
-    setRemoteTerminalCwd(loadedTerminalTabs.find((tab) => tab.id === loadedActiveTerminalTabId)?.cwd || clientConfig.defaultCwd);
-    setRemoteFileCwd(normalizeWorkDirectory(session.fileCwd || session.remoteCwd));
+    setRemoteTerminalCwd(loadedTerminalTabs.find((tab) => tab.id === loadedActiveTerminalTabId)?.cwd || workspaceDefaultCwd);
+    setRemoteFileCwd(normalizeWorkDirectory(session.fileCwd || session.remoteCwd, workspaceDefaultCwd));
     setInput(session.input || "");
     setReferenceMenu(null);
     setReferences([]);
@@ -3672,15 +3673,15 @@ export default function AppShell() {
                 ? Math.min(WORKSPACE_MAX_WIDTH, Math.max(WORKSPACE_MIN_WIDTH, session.workspaceWidth))
                 : 380,
             );
-            const loadedTerminalTabs = normalizeTerminalTabs(session);
+            const loadedTerminalTabs = normalizeTerminalTabs(session, workspaceDefaultCwd);
             const loadedActiveTerminalTabId =
               session.activeTerminalTabId && loadedTerminalTabs.some((tab) => tab.id === session.activeTerminalTabId)
                 ? session.activeTerminalTabId
                 : loadedTerminalTabs[0].id;
             setTerminalTabs(loadedTerminalTabs);
             setActiveTerminalTabId(loadedActiveTerminalTabId);
-            setRemoteTerminalCwd(loadedTerminalTabs.find((tab) => tab.id === loadedActiveTerminalTabId)?.cwd || clientConfig.defaultCwd);
-            setRemoteFileCwd(normalizeWorkDirectory(session.fileCwd || session.remoteCwd));
+            setRemoteTerminalCwd(loadedTerminalTabs.find((tab) => tab.id === loadedActiveTerminalTabId)?.cwd || workspaceDefaultCwd);
+            setRemoteFileCwd(normalizeWorkDirectory(session.fileCwd || session.remoteCwd, workspaceDefaultCwd));
             setPendingQuestion(next.pendingQuestion ?? null);
             setBusy(
               next.runStatus === "running" ||

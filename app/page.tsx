@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 import AppShell from "@/components/app-shell";
+import { config } from "@/lib/config";
 
 export default function HomePage() {
   return (
@@ -10,7 +11,7 @@ export default function HomePage() {
         </main>
       }
     >
-      <AppShell />
+      <AppShell defaultCwd={config.agentCwd} />
     </Suspense>
   );
 }
