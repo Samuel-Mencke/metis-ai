@@ -64,7 +64,11 @@ function migrateLegacy(db: DatabaseSync) {
     usersPath,
     [],
   );
-  if (!users.length && process.env.CHAT_PASSWORD?.trim()) {
+  if (
+    !users.length &&
+    process.env.CHAT_PASSWORD?.trim() &&
+    !process.env.METIS_AI_BOOTSTRAP_PASSWORD
+  ) {
     users.push({
       id: randomUUID(),
       username: config.chatUsername,
