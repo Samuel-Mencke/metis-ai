@@ -1,19 +1,6 @@
 <div align="center">
-
-<table>
-  <tr>
-    <td align="left" width="25%">
-      <img src="./public/hand-left.png" alt="Left hand" width="180">
-    </td>
-    <td align="center" width="50%">
-      <img src="./public/metis.png" alt="Metis AI" width="640">
-    </td>
-    <td align="right" width="25%">
-      <img src="./public/hand-right.png" alt="Right hand" width="180">
-    </td>
-  </tr>
-</table>
-      <h3>A private, extensible workspace for AI agents</h3>
+<img src="./public/metis.png" alt="Metis AI" width="100%">
+<h3>A private, extensible workspace for AI agents</h3>
 
 Conversations, tools, terminals, browser sessions, memories, workspaces and
 MCP servers — brought together in one self-hosted application.
