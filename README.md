@@ -6,7 +6,7 @@
       <img src="./public/hand-left.png" alt="Left hand" width="180">
     </td>
     <td align="center" width="50%">
-      <h1>Metis AI</h1>
+      <img src="./public/metis.png" alt="Metis AI" width="640">
     </td>
     <td align="right" width="25%">
       <img src="./public/hand-right.png" alt="Right hand" width="180">
@@ -32,26 +32,34 @@ MCP servers — brought together in one self-hosted application.
 > configure and extend themselves — without tying the entire experience to a
 > single model provider.
 
-## Why Metis AI?
+<p align="center">
+  <img src="./public/why-metis.png" alt="Why Metis AI?" width="100%">
+</p>
 
 Most AI interfaces stop at a chat transcript. Metis AI treats a conversation
-as a durable workspace: an agent can use tools, work with files and terminals,
-retain useful memories, operate a browser, and connect to external capabilities
-through MCP.
+as a durable workspace. It combines the agent, its context, the tools it can
+use and the artifacts it creates in one private, self-hosted environment.
 
-### What is included
+### Feature overview
+
+Metis AI includes the following capabilities:
 
 | Area | Capabilities |
 | --- | --- |
-| **Agent conversations** | Streaming responses, tool calls, thinking blocks, run cancellation and durable chat history |
-| **Workspaces** | Plans, canvases, remote files and terminals available alongside a conversation |
-| **Browser control** | Authenticated browser sessions with tabs, actions, viewport control and live streaming |
-| **Memory** | User-managed durable memories that can be reviewed, edited or removed |
-| **Provider freedom** | Multiple official providers, OAuth flows, local models and OpenAI-compatible endpoints |
-| **MCP gateway** | Discover, register and call MCP servers, with workflows and optional platform integrations |
-| **Sharing** | Share chats through links, optionally protected with a password, and revoke them later |
+| **Agent runtime** | Streaming responses, tool calls, thinking blocks, follow-up questions, run cancellation, resume support and durable chat history |
+| **Context and files** | Image and file uploads, previews, references, pinned context and model-aware context limits |
+| **Workspaces** | Plans, canvases, notes, memories, remote files and terminals available alongside a conversation |
+| **Browser control** | Authenticated browser sessions with tabs, navigation, forms, clicks, typing, scrolling, screenshots and viewport control |
+| **Voice** | Speech transcription and realtime voice sessions when compatible credentials are configured |
+| **Provider freedom** | OpenAI, Anthropic, Google, xAI, OpenRouter, Cursor, Codex, Claude Code, Ollama, Vertex/ADC and generic OpenAI-compatible endpoints |
+| **MCP gateway** | Discover, register and call local or remote MCP servers, plus workflows, automations, web/documentation tools and platform integrations |
+| **Remote execution** | Enrolled remote clients with authenticated command execution, testing and file/workspace operations |
+| **Sharing and recovery** | Share chats and attachments through links, optionally protect them with a password, clone shared chats and revoke access |
+| **Administration** | Provider discovery and testing, model listing, preferences, status checks, recovery flows and configurable security boundaries |
 
-## Quick start
+<p align="center">
+  <img src="./public/quick-start.png" alt="Quick start" width="100%">
+</p>
 
 ### One-line installer
 
@@ -151,7 +159,9 @@ Windows) to remove services and application files while retaining chats,
 memories, uploads and encrypted provider credentials. Use `--dry-run` before
 removal when reviewing an existing installation.
 
-### Prerequisites
+<p align="center">
+  <img src="./public/prerequisites.png" alt="Prerequisites" width="100%">
+</p>
 
 - Node.js 22+
 - pnpm 9+
@@ -228,7 +238,9 @@ Antigravity Python path needs:
 python3 -m pip install google-antigravity
 ```
 
-## MCP gateway
+<p align="center">
+  <img src="./public/mcp-gateway.png" alt="MCP gateway" width="100%">
+</p>
 
 The gateway lives behind the public module boundary in
 [`packages/mcp-gateway`](./packages/mcp-gateway/README.md). It connects the
@@ -248,7 +260,9 @@ For a trusted deployment:
 See [`SECURITY.md`](./SECURITY.md) and the gateway
 [`README.md`](./packages/mcp-gateway/README.md) before exposing any endpoint.
 
-## Configuration reference
+<p align="center">
+  <img src="./public/configuration.png" alt="Configuration" width="100%">
+</p>
 
 The complete example is in [`.env.example`](./.env.example). The most useful
 settings are:
@@ -266,7 +280,9 @@ settings are:
 | `MCP_ENABLE_REMOTE_SERVERS` | Enable remote MCP servers | `false` |
 | `MCP_ENABLE_OPTIONAL_SERVERS` | Enable optional integrations | `false` |
 
-## Development
+<p align="center">
+  <img src="./public/development.png" alt="Development" width="100%">
+</p>
 
 ```bash
 pnpm dev                 # Start Next.js in development mode
@@ -281,7 +297,9 @@ Before opening a pull request, run the checks that cover your change. The
 project's contribution expectations are documented in
 [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
-## Project layout
+<p align="center">
+  <img src="./public/project-layout.png" alt="Project layout" width="100%">
+</p>
 
 ```text
 app/                  Next.js routes, pages and API handlers
@@ -293,7 +311,9 @@ tests/                Provider-focused tests
 public/               Static assets and prompt data
 ```
 
-## Security
+<p align="center">
+  <img src="./public/security.png" alt="Security" width="100%">
+</p>
 
 Metis AI can execute powerful operations through agents and MCP servers. Do not
 expose a default installation directly to the public internet. Use strong
@@ -301,6 +321,8 @@ secrets, a trusted proxy, least-privilege MCP configuration and isolated
 working directories. See [`SECURITY.md`](./SECURITY.md) for the reporting
 process and deployment guidance.
 
-## License
+<p align="center">
+  <img src="./public/license.png" alt="License" width="100%">
+</p>
 
 Metis AI is released under the [MIT License](./LICENSE).
