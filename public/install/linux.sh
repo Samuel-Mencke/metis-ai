@@ -10,7 +10,8 @@ die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 confirm_install() {
   local name="$1" answer
   (( non_interactive )) && return 0
-  read -r -p "$name is missing or too old. Install/update it automatically? [Y/n] " answer
+  [[ -r /dev/tty ]] || die "Interactive installation needs a terminal. Use --non-interactive with --password."
+  read -r -p "$name is missing or too old. Install/update it automatically? [Y/n] " answer < /dev/tty
   [[ -z "$answer" || "$answer" =~ ^([Yy][Ee][Ss]|[Yy])$ ]]
 }
 install_system_package() {
@@ -28,10 +29,10 @@ install_system_package() {
 ask() {
   local prompt="$1" default="${2:-}" value
   if [[ -n "$default" ]]; then
-    read -r -p "$prompt [$default]: " value
+    read -r -p "$prompt [$default]: " value < /dev/tty
     printf '%s' "${value:-$default}"
   else
-    read -r -p "$prompt: " value
+    read -r -p "$prompt: " value < /dev/tty
     printf '%s' "$value"
   fi
 }
@@ -96,6 +97,9 @@ if (( non_interactive )); then
   [[ -n "$password" ]] || die "--password is required with --non-interactive."
   ai_chat_host="${ai_chat_host:-127.0.0.1}"
 else
+  if ! { : < /dev/tty; } 2>/dev/null; then
+    die "Interactive installation needs a terminal. Use --non-interactive with --password."
+  fi
   install_dir="$(ask "Installation directory" "$install_dir")"
   install_dir="${install_dir/#\~/$HOME}"
 fi
@@ -167,9 +171,9 @@ if (( ! non_interactive )); then
   fi
   mcp_port="$(ask "MCP gateway port" "8787")"
   username="$(ask "Initial username" "admin")"
-  read -r -s -p "Initial password: " password; printf '\n'
+  read -r -s -p "Initial password: " password < /dev/tty; printf '\n'
   [[ ${#password} -ge 8 ]] || die "Password must contain at least 8 characters."
-  read -r -s -p "Confirm password: " password_confirm; printf '\n'
+  read -r -s -p "Confirm password: " password_confirm < /dev/tty; printf '\n'
   [[ "$password" == "$password_confirm" ]] || die "Passwords do not match."
 else
   data_dir="${data_dir:-$install_dir/data}"
