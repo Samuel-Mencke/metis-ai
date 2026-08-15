@@ -59,6 +59,7 @@ function Get-NodeMajor {
   try { return [int]((& $node.Source -p "process.versions.node.split('.')[0]")) } catch { return 0 }
 }
 function Confirm-Install([string]$Name) {
+  if ($NonInteractive) { return $true }
   $answer = Read-Host "$Name is missing or too old. Install/update it automatically now? (Y/n)"
   return [string]::IsNullOrWhiteSpace($answer) -or $answer -match "^(y|yes)$"
 }

@@ -103,6 +103,36 @@ directory, data directory, agent workspace, ports, bind address, username,
 password, service name and public URL. Use `--help` on Linux/macOS or `-Help`
 on Windows for the complete list.
 
+#### Non-interactive options
+
+The option names are intentionally listed side by side so the same deployment
+configuration can be reproduced on every supported operating system. Linux and
+macOS use Bash options; Windows uses PowerShell named parameters.
+
+| Purpose | Linux | macOS | Windows | Default |
+| --- | --- | --- | --- | --- |
+| Application checkout | `--install-dir DIR` | `--install-dir DIR` | `-InstallDir DIR` | `~/metis-ai` |
+| Runtime data directory | `--data-dir DIR` | `--data-dir DIR` | `-DataDir DIR` | `INSTALL_DIR/data` |
+| Agent workspace | `--agent-cwd DIR` | `--agent-cwd DIR` | `-AgentCwd DIR` | user home |
+| Web port | `--port PORT` | `--port PORT` | `-Port PORT` | `3100` |
+| Bind address | `--host HOST` | `--host HOST` | `-Host HOST` | `127.0.0.1` |
+| MCP gateway port | `--mcp-port PORT` | `--mcp-port PORT` | `-McpPort PORT` | `8787` |
+| Initial login name | `--username NAME` | `--username NAME` | `-Username NAME` | `admin` |
+| Initial login password | `--password PASSWORD` | `--password PASSWORD` | `-Password PASSWORD` | required in non-interactive mode |
+| Password file | `--password-file FILE` | `--password-file FILE` | `-PasswordFile FILE` | unset |
+| Service/task name | `--service-name NAME` | `--service-name NAME` | `-ServiceName NAME` | `metis-ai` / `MetisAI` |
+| Public URL | `--public-url URL` | `--public-url URL` | `-PublicUrl URL` | `http://127.0.0.1:PORT` |
+| No prompts | `--non-interactive` | `--non-interactive` | `-NonInteractive` | off |
+| Skip runtime installation | — | — | `-SkipRuntimeInstall` | off |
+| Show help | `--help` or `-h` | `--help` or `-h` | `-Help` | — |
+
+For Linux and macOS, pass installer arguments after `bash -s --`. For
+PowerShell, download the script first and invoke it with the named parameters.
+`--password-file`/`-PasswordFile` is preferred in automation so a password does
+not appear in the process list. `-SkipRuntimeInstall` only skips Windows'
+automatic Git/Node.js installation; it still verifies that the required tools
+are available.
+
 The installer asks for all machine-specific values instead of assuming a user,
 home directory, port or public hostname. Review downloaded scripts before
 executing them in security-sensitive environments. The repository source can be
