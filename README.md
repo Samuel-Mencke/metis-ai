@@ -11,13 +11,18 @@ MCP servers — brought together in one self-hosted application.
   <a href="https://github.com/f1shyondrugs/metis-ai/issues">Issues</a>
   ·
   <a href="./CONTRIBUTING.md">Contributing</a>
+  ·
+  <a href="https://youtu.be/UhJVr7-CeOY">Tutorial & Introduction</a>
 </p>
 
 </div>
 
+
 > Metis AI is designed for people who want an agent workspace they can run,
 > configure and extend themselves — without tying the entire experience to a
 > single model provider.
+
+
 
 <p align="center">
   <img src="./public/why-metis.png" alt="Why Metis AI?" width="100%">
