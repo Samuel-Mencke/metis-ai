@@ -10,9 +10,9 @@ confirm_install() {
   read -r -p "$name is missing or too old. Install/update it automatically? [Y/n] " answer
   [[ -z "$answer" || "$answer" =~ ^([Yy][Ee][Ss]|[Yy])$ ]]
 }
-version_at_least_20() {
+version_at_least_22() {
   command -v "$1" >/dev/null 2>&1 &&
-    [[ "$("$1" -p 'process.versions.node.split(".")[0]')" -ge 20 ]]
+    [[ "$("$1" -p 'process.versions.node.split(".")[0]')" -ge 22 ]]
 }
 usage() {
   cat <<'EOF'
@@ -91,11 +91,11 @@ default_public_host() {
 }
 command -v brew >/dev/null 2>&1 || die "Homebrew is required on macOS. Install it from https://brew.sh."
 command -v git >/dev/null 2>&1 || { confirm_install "git" && brew install git || die "git is required."; }
-if ! version_at_least_20 node; then
-  confirm_install "Node.js 20 or newer" || die "Node.js 20 or newer is required."
+if ! version_at_least_22 node; then
+  confirm_install "Node.js 22 or newer" || die "Node.js 22 or newer is required."
   if command -v node >/dev/null 2>&1; then brew upgrade node || true; else brew install node; fi
 fi
-version_at_least_20 node || die "Node.js 20 or newer is required after installation."
+version_at_least_22 node || die "Node.js 22 or newer is required after installation."
 command -v pnpm >/dev/null 2>&1 || { confirm_install "pnpm" && brew install pnpm || die "pnpm is required."; }
 
 if [[ -e "$install_dir/.git" ]]; then

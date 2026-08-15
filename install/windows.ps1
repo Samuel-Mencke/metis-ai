@@ -71,14 +71,14 @@ if (-not $SkipRuntimeInstall) {
   if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     winget install --id Git.Git --accept-source-agreements --accept-package-agreements
   }
-  if ((Get-NodeMajor) -lt 20) {
-    if (-not (Confirm-Install "Node.js 20 or newer")) { throw "Node.js 20 or newer is required." }
+  if ((Get-NodeMajor) -lt 22) {
+    if (-not (Confirm-Install "Node.js 22 or newer")) { throw "Node.js 22 or newer is required." }
     winget install --id OpenJS.NodeJS.LTS --source winget --accept-source-agreements --accept-package-agreements
   }
   Refresh-Path
 }
 Require-Command git
-if ((Get-NodeMajor) -lt 20) { throw "Node.js 20 or newer is required." }
+if ((Get-NodeMajor) -lt 22) { throw "Node.js 22 or newer is required." }
 $pnpmCommand = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
 if (-not $pnpmCommand) {
   $corepackCommand = (Get-Command corepack.cmd -ErrorAction SilentlyContinue).Source

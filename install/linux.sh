@@ -108,17 +108,17 @@ default_public_host() {
   host="$(hostname -I 2>/dev/null | awk '{print $1}')"
   printf '%s' "${host:-127.0.0.1}"
 }
-version_at_least_20() {
+version_at_least_22() {
   command -v "$1" >/dev/null 2>&1 || return 1
-  [[ "$( "$1" -p 'process.versions.node.split(".")[0]' )" -ge 20 ]]
+  [[ "$( "$1" -p 'process.versions.node.split(".")[0]' )" -ge 22 ]]
 }
 install_node() {
   local dir="$1/.runtime" arch url archive
-  if version_at_least_20 node; then
+  if version_at_least_22 node; then
     printf '%s' "$(command -v node)"
     return
   fi
-  confirm_install "Node.js 20 or newer" || die "Node.js 20 or newer is required."
+  confirm_install "Node.js 22 or newer" || die "Node.js 22 or newer is required."
   mkdir -p "$dir"
   case "$(uname -m)" in
     x86_64|amd64) arch=x64 ;;

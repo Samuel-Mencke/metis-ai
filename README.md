@@ -153,7 +153,7 @@ removal when reviewing an existing installation.
 
 ### Prerequisites
 
-- Node.js 20+
+- Node.js 22+
 - pnpm 9+
 - A supported AI provider credential, unless you only want to explore the UI
 
