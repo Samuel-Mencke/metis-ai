@@ -1,15 +1,40 @@
 param(
   [string]$InstallDir = "",
   [string]$RepoUrl = $env:METIS_AI_REPO_URL,
-  [switch]$SkipRuntimeInstall
+  [string]$DataDir = "",
+  [string]$AgentCwd = "",
+  [string]$Port = "3100",
+  [Alias("Host")][string]$BindHost = "127.0.0.1",
+  [string]$McpPort = "8787",
+  [string]$Username = "admin",
+  [string]$Password = "",
+  [string]$PasswordFile = "",
+  [string]$ServiceName = "MetisAI",
+  [string]$PublicUrl = "",
+  [switch]$NonInteractive,
+  [switch]$SkipRuntimeInstall,
+  [switch]$Help
 )
 
 $ErrorActionPreference = "Stop"
+if ($Help) {
+  @"
+Usage:
+  windows.ps1                         Guided installation
+  windows.ps1 -NonInteractive -Password P
+
+Options: -InstallDir, -DataDir, -AgentCwd, -Port, -Host, -McpPort,
+         -Username, -Password, -PasswordFile, -ServiceName, -PublicUrl
+         -NonInteractive, -SkipRuntimeInstall
+"@ | Write-Host
+  exit 0
+}
 if (-not $RepoUrl) { $RepoUrl = "https://github.com/f1shyondrugs/metis-ai.git" }
 if (-not $InstallDir) {
   $InstallDir = if ($env:METIS_AI_INSTALL_DIR) { $env:METIS_AI_INSTALL_DIR } else { Join-Path $HOME "metis-ai" }
 }
 function Ask([string]$Prompt, [string]$Default) {
+  if ($NonInteractive) { return $Default }
   $value = Read-Host "$Prompt [$Default]"
   if ([string]::IsNullOrWhiteSpace($value)) { return $Default }
   return $value
@@ -72,21 +97,39 @@ if (Test-Path (Join-Path $InstallDir ".git")) {
   git clone $RepoUrl $InstallDir
 }
 
-$dataDir = Ask "Data directory" (Join-Path $InstallDir "data")
-$agentCwd = Ask "Agent workspace directory" $HOME
-$port = Ask "Web application port" "3100"
-$hostMode = (Ask "Host web application on local network? (y/N)" "n").Trim().ToLowerInvariant()
-$aiChatHost = if (@("y", "yes", "1", "true") -contains $hostMode) { "0.0.0.0" } else { "127.0.0.1" }
+$dataDir = if ($DataDir) { $DataDir } else { Join-Path $InstallDir "data" }
+$agentCwd = if ($AgentCwd) { $AgentCwd } else { $HOME }
+if (-not $NonInteractive) {
+  $dataDir = Ask "Data directory" $dataDir
+  $agentCwd = Ask "Agent workspace directory" $agentCwd
+  $port = Ask "Web application port" $Port
+  $hostMode = (Ask "Host web application on local network? (y/N)" "n").Trim().ToLowerInvariant()
+  $aiChatHost = if (@("y", "yes", "1", "true") -contains $hostMode) { "0.0.0.0" } else { "127.0.0.1" }
+} else {
+  $aiChatHost = $BindHost
+}
 $publicHost = if ($aiChatHost -eq "0.0.0.0") { Get-DefaultPublicHost } else { "127.0.0.1" }
-$mcpPort = Ask "MCP gateway port" "8787"
-$username = Ask "Initial username" "admin"
-$password = Read-Host "Initial password" -AsSecureString
-$passwordAgain = Read-Host "Confirm password" -AsSecureString
-$passwordPlain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($password))
-$passwordAgainPlain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($passwordAgain))
-if ($passwordPlain.Length -lt 8 -or $passwordPlain -cne $passwordAgainPlain) { throw "Passwords must match and contain at least 8 characters." }
-$serviceName = Ask "Task prefix" "MetisAI"
-$publicUrl = Ask "Public URL" "http://$publicHost`:$port"
+$mcpPort = if ($McpPort) { $McpPort } else { "8787" }
+if (-not $NonInteractive) {
+  $mcpPort = Ask "MCP gateway port" $mcpPort
+  $username = Ask "Initial username" $Username
+  $passwordSecure = Read-Host "Initial password" -AsSecureString
+  $passwordAgain = Read-Host "Confirm password" -AsSecureString
+  $passwordPlain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($passwordSecure))
+  $passwordAgainPlain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($passwordAgain))
+  if ($passwordPlain.Length -lt 8 -or $passwordPlain -cne $passwordAgainPlain) { throw "Passwords must match and contain at least 8 characters." }
+  $serviceName = Ask "Task prefix" $ServiceName
+  $publicUrl = Ask "Public URL" "http://$publicHost`:$port"
+} else {
+  if ($PasswordFile) {
+    if (-not (Test-Path -LiteralPath $PasswordFile -PathType Leaf)) { throw "Password file is not readable: $PasswordFile" }
+    $Password = (Get-Content -LiteralPath $PasswordFile -Raw).TrimEnd("`r", "`n")
+  }
+  $passwordPlain = $Password
+  if ([string]::IsNullOrEmpty($passwordPlain) -or $passwordPlain.Length -lt 8) { throw "-Password is required and must contain at least 8 characters with -NonInteractive." }
+  $serviceName = $ServiceName
+  $publicUrl = if ($PublicUrl) { $PublicUrl } else { "http://$publicHost`:$Port" }
+}
 $randomHex = { -join (1..32 | ForEach-Object { "{0:x2}" -f (Get-Random -Maximum 256) }) }
 $chatPassword = & $randomHex
 $secretsKey = & $randomHex

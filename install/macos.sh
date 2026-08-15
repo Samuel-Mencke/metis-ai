@@ -6,6 +6,7 @@ DEFAULT_DIR="${METIS_AI_INSTALL_DIR:-$HOME/metis-ai}"
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 confirm_install() {
   local name="$1" answer
+  (( non_interactive )) && return 0
   read -r -p "$name is missing or too old. Install/update it automatically? [Y/n] " answer
   [[ -z "$answer" || "$answer" =~ ^([Yy][Ee][Ss]|[Yy])$ ]]
 }

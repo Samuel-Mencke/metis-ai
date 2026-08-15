@@ -69,11 +69,14 @@ On macOS:
 curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/macos.sh | bash
 ```
 
-For agents and CI, macOS also supports a prompt-free argument mode. When
+For agents and CI, Linux and macOS support a prompt-free argument mode. When
 piping a script to Bash, use `bash -s --` so the arguments are passed to the
 installer:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/linux.sh |
+  bash -s -- --non-interactive --password 'replace-with-a-strong-password'
+
 curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/macos.sh |
   bash -s -- --non-interactive --password 'replace-with-a-strong-password'
 ```
@@ -86,6 +89,19 @@ On Windows, run:
 ```powershell
 irm https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/windows.ps1 | iex
 ```
+
+For a prompt-free Windows installation, download the script and pass named
+arguments:
+
+```powershell
+irm https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/windows.ps1 -OutFile install.ps1
+.\install.ps1 -NonInteractive -PasswordFile .\metis-password.txt
+```
+
+All three installers accept argument-only configuration for the install
+directory, data directory, agent workspace, ports, bind address, username,
+password, service name and public URL. Use `--help` on Linux/macOS or `-Help`
+on Windows for the complete list.
 
 The installer asks for all machine-specific values instead of assuming a user,
 home directory, port or public hostname. Review downloaded scripts before
