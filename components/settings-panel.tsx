@@ -274,6 +274,8 @@ export type FinishSound = {
 type Props = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  settingsTab: string;
+  onSettingsTabChange: (tab: string) => void;
   memories: MemoryItem[];
   notificationsEnabled: boolean;
   onNotificationsEnabledChange: (enabled: boolean) => void;
@@ -341,6 +343,8 @@ type Props = {
 export function SettingsPanel({
   open,
   onOpenChange,
+  settingsTab,
+  onSettingsTabChange,
   memories,
   notificationsEnabled,
   onNotificationsEnabledChange,
@@ -392,7 +396,6 @@ export function SettingsPanel({
   const [deletingMemoryIds, setDeletingMemoryIds] = useState<Set<string>>(
     () => new Set(),
   );
-  const [settingsTab, setSettingsTab] = useState("general");
   const [browserStorage, setBrowserStorage] = useState<Array<{
     origin: string;
     storageTypes: string[];
@@ -1204,11 +1207,11 @@ export function SettingsPanel({
           </DialogDescription>
         </DialogHeader>
 
-        <Tabs value={settingsTab} onValueChange={setSettingsTab} className="min-h-0 flex-1 gap-0 md:grid md:items-stretch md:grid-cols-[13rem_minmax(0,1fr)]">
+        <Tabs value={settingsTab} onValueChange={onSettingsTabChange} className="min-h-0 flex-1 gap-0 md:grid md:items-stretch md:grid-cols-[13rem_minmax(0,1fr)]">
           <div className="border-b border-border bg-muted/20 p-3 md:hidden">
             <CustomSelect
               value={settingsTab}
-              onValueChange={setSettingsTab}
+              onValueChange={onSettingsTabChange}
               ariaLabel="Settings section"
               className="h-10 w-full"
               options={[

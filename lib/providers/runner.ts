@@ -23,6 +23,7 @@ import {
 import { getJob, appendRunEvent, updateJob } from "@/lib/db-jobs";
 import { buildAttachmentPrompt } from "@/lib/uploads";
 import { config } from "@/lib/config";
+import { getUserAgentCwd, getUserExecutionIdentity } from "@/lib/mcp";
 import {
   findActiveConnection,
   getProviderConnection,
@@ -505,6 +506,7 @@ async function runCodex(context: ProviderContext): Promise<ProviderResult> {
     ? await createCodexHome(context.connection.secret, context.connection.authType, persistentHome)
     : undefined;
   const env = inheritedEnv(codexHome ? { CODEX_HOME: codexHome.home } : {});
+  const agentCwd = getUserAgentCwd(context.job.userId);
   const codex = new Codex({
     ...(context.connection.authType === "api_key" && context.connection.secret
       ? { apiKey: context.connection.secret }
@@ -526,7 +528,7 @@ async function runCodex(context: ProviderContext): Promise<ProviderResult> {
               allowedCategories: modeById(context.chat.sessionState?.modeId).allowedCategories,
               toolOverrides: modeById(context.chat.sessionState?.modeId).toolOverrides || {},
             }),
-            MCP_AGENT_CWD: config.agentCwd,
+            MCP_AGENT_CWD: agentCwd,
           },
         },
       },
@@ -538,7 +540,7 @@ async function runCodex(context: ProviderContext): Promise<ProviderResult> {
     : undefined;
   const threadOptions = {
     model: codexModel,
-    workingDirectory: config.agentCwd,
+    workingDirectory: agentCwd,
     skipGitRepoCheck: true,
     sandboxMode: "workspace-write" as const,
     approvalPolicy: "never" as const,
@@ -635,8 +637,9 @@ async function runClaude(context: ProviderContext): Promise<ProviderResult> {
   const previousId = context.chat.agentId?.startsWith("claude:")
     ? context.chat.agentId.slice("claude:".length)
     : undefined;
+  const agentCwd = getUserAgentCwd(context.job.userId);
   const options = {
-    cwd: config.agentCwd,
+    cwd: agentCwd,
     model: context.modelId,
     tools: { type: "preset", preset: "claude_code" } as const,
     permissionMode: "acceptEdits" as const,
@@ -724,10 +727,13 @@ async function runAntigravity(context: ProviderContext): Promise<ProviderResult>
         }
       : {}),
   });
+  const agentCwd = getUserAgentCwd(context.job.userId);
+  const identity = getUserExecutionIdentity(context.job.userId);
   const child = spawn(process.env.ANTIGRAVITY_PYTHON || "python3", [bridge], {
-    cwd: config.agentCwd,
+    cwd: agentCwd,
     env: env as NodeJS.ProcessEnv,
     stdio: "pipe",
+    ...(identity ? { uid: identity.uid, gid: identity.gid } : {}),
   });
   const abortChild = () => child.kill("SIGTERM");
   if (context.signal.aborted) abortChild();
@@ -741,7 +747,7 @@ async function runAntigravity(context: ProviderContext): Promise<ProviderResult>
       .filter(Boolean)
       .join("\n\nUser request:\n"),
     model: context.modelId,
-    cwd: config.agentCwd,
+    cwd: agentCwd,
   })}\n`);
   child.stdin.end();
   const lines = createInterface({ input: child.stdout });

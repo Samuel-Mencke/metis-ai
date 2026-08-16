@@ -5,6 +5,7 @@ import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { callRemoteGatewayTool } from "@/lib/remote-gateway";
 import { collectRemoteClientEvents, requestRemoteClient } from "@/lib/remote-client-gateway";
 import { config } from "@/lib/config";
+import { getUserAgentCwd, getUserExecutionIdentity } from "@/lib/mcp";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,6 +23,11 @@ const terminalSessions = new Map<string, {
 function resolveRemotePath(value: unknown, cwd = DEFAULT_CWD) {
   const input = typeof value === "string" && value.trim() ? value.trim() : cwd;
   return path.resolve(input.startsWith("/") ? input : path.join(cwd, input));
+}
+
+function isInside(root: string, candidate: string) {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function shellQuote(value: string) {
@@ -117,8 +123,12 @@ export async function POST(req: Request) {
     return Response.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const cwd = resolveRemotePath(body.cwd);
+  const defaultCwd = getUserAgentCwd(ownerId);
+  const cwd = resolveRemotePath(body.cwd, defaultCwd);
   const targetPath = resolveRemotePath(body.path, cwd);
+  if (!isInside(defaultCwd, cwd) || !isInside(defaultCwd, targetPath)) {
+    return Response.json({ error: "Path must be inside the agent workspace." }, { status: 400 });
+  }
 
   try {
     cleanupTerminalSessions();
@@ -181,6 +191,12 @@ export async function POST(req: Request) {
           TERM: "xterm-256color",
           COLORTERM: "truecolor",
         } as Record<string, string>,
+        ...(getUserExecutionIdentity(ownerId)
+          ? (() => {
+              const identity = getUserExecutionIdentity(ownerId)!;
+              return { uid: identity.uid, gid: identity.gid };
+            })()
+          : {}),
       });
       const session = {
         ownerId,

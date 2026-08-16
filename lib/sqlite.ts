@@ -172,6 +172,17 @@ export function getDatabase(): DatabaseSync {
       password_hash TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS user_workspace_access (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      workspace_root TEXT NOT NULL,
+      os_username TEXT,
+      uid INTEGER,
+      gid INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS user_workspace_access_root
+      ON user_workspace_access(workspace_root);
     CREATE TABLE IF NOT EXISTS user_model_permissions (
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       model_id TEXT NOT NULL,
@@ -459,6 +470,12 @@ export function getDatabase(): DatabaseSync {
   database.prepare(
     "INSERT OR IGNORE INTO meta (key, value) VALUES ('shared_context_schema', '2')",
   ).run();
+  const accessTimestamp = new Date().toISOString();
+  database.prepare(
+    `INSERT OR IGNORE INTO user_workspace_access
+       (user_id, workspace_root, created_at, updated_at)
+     SELECT id, ?, ?, ? FROM users`,
+  ).run(config.agentCwd, accessTimestamp, accessTimestamp);
   return database;
 }
 

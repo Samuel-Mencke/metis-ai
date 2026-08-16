@@ -1,7 +1,8 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "@/lib/config";
+import { getUserAccess, getUserExecutionIdentity } from "@/lib/user-access";
+export { getUserExecutionIdentity } from "@/lib/user-access";
 
 export type McpServerMap = Record<
   string,
@@ -30,6 +31,7 @@ export type McpContext = {
 export function getMcpServers(context: McpContext = {}): McpServerMap {
   const appRoot = config.root;
   const agentCwd = getUserAgentCwd(context.userId);
+  const identity = getUserExecutionIdentity(context.userId);
   const env = Object.fromEntries(
     Object.entries({
       ...process.env,
@@ -44,6 +46,9 @@ export function getMcpServers(context: McpContext = {}): McpServerMap {
       MCP_COMPRESSION_MODE: context.compressionMode,
       MCP_COMPRESSION_TOOL_RESULTS: context.compressionToolResults === false ? "0" : "1",
       MCP_AGENT_CWD: agentCwd,
+      MCP_OS_USERNAME: identity?.username,
+      MCP_OS_UID: identity ? String(identity.uid) : undefined,
+      MCP_OS_GID: identity ? String(identity.gid) : undefined,
     }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
   );
   return {
@@ -51,6 +56,7 @@ export function getMcpServers(context: McpContext = {}): McpServerMap {
       type: "stdio",
       command: process.execPath,
       args: [
+        path.join(appRoot, "lib", "run-user-mcp.mjs"),
         process.env.AI_CHAT_INTERNAL_MCP_SERVER?.trim() ||
           path.join(appRoot, "lib", "internal-mcp-server.mjs"),
       ],
@@ -65,11 +71,7 @@ export function getAgentCwd(userId?: string): string {
 }
 
 export function getUserAgentCwd(userId?: string): string {
-  if (!userId?.trim()) return config.agentCwd;
-  const normalized = userId.trim();
-  const slug = normalized.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 48) || "user";
-  const suffix = crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 12);
-  const workspace = path.join(config.root, "workspaces", `${slug}-${suffix}`);
+  const workspace = getUserAccess(userId).workspaceRoot;
   fs.mkdirSync(workspace, { recursive: true });
   return workspace;
 }

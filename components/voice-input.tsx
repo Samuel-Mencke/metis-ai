@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Mic, RotateCcw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 type VoiceInputProps = {
   chatId?: string | null;
@@ -18,6 +19,7 @@ type VoiceInputProps = {
   endpoint?: string;
   connectionId?: string;
   stopSignal?: number;
+  onOpenSettings?: () => void;
 };
 
 type VoiceState = "idle" | "permission" | "recording" | "uploading" | "transcribing" | "ready" | "error";
@@ -52,6 +54,7 @@ export function VoiceInput({
   endpoint,
   connectionId,
   stopSignal = 0,
+  onOpenSettings,
 }: VoiceInputProps) {
   const [state, setState] = useState<VoiceState>("idle");
   const [error, setError] = useState("");
@@ -388,12 +391,32 @@ export function VoiceInput({
 
   if (!enabled) return null;
 
+  const voiceConfigured = provider === "browser" || Boolean(connectionId);
+
   return (
     <div className="flex items-center gap-1">
       {state !== "recording" ? (
-        <Button type="button" size="icon" variant="ghost" className="size-9 shrink-0 rounded-full" onClick={() => void start()} disabled={["permission", "uploading", "transcribing"].includes(state)} aria-label="Record voice input" title="Record voice input">
-          <Mic className="size-4" />
-        </Button>
+        voiceConfigured ? (
+          <Button type="button" size="icon" variant="ghost" className="size-9 shrink-0 rounded-full" onClick={() => void start()} disabled={["permission", "uploading", "transcribing"].includes(state)} aria-label="Record voice input" title="Record voice input">
+            <Mic className="size-4" />
+          </Button>
+        ) : (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex" tabIndex={0}>
+                <Button type="button" size="icon" variant="ghost" className="size-9 shrink-0 rounded-full text-muted-foreground/50" disabled aria-label="Voice input requires an API key">
+                  <Mic className="size-4" />
+                </Button>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="max-w-64 flex-col items-start">
+              <span>Richte zuerst den API-Key für Voice ein, bevor du die Voice-Funktion nutzt.</span>
+              <button type="button" className="font-medium text-primary-foreground underline underline-offset-2" onClick={onOpenSettings}>
+                Voice-Einstellungen öffnen
+              </button>
+            </TooltipContent>
+          </Tooltip>
+        )
       ) : null}
       {state === "recording" ? <span className="mr-2 text-[10px] tabular-nums text-red-400">{formatDuration(elapsed)}</span> : null}
       {provider === "browser" && livePreview ? <span className="max-w-48 truncate text-[11px] italic text-muted-foreground" title={livePreview}>{livePreview}</span> : null}

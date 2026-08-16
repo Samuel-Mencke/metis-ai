@@ -89,7 +89,19 @@ default_public_host() {
   host="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
   printf '%s' "${host:-127.0.0.1}"
 }
-command -v brew >/dev/null 2>&1 || die "Homebrew is required on macOS. Install it from https://brew.sh."
+install_homebrew() {
+  command -v brew >/dev/null 2>&1 && return
+  confirm_install "Homebrew" || die "Homebrew is required."
+  command -v curl >/dev/null 2>&1 || die "curl is required to install Homebrew automatically."
+  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  if [[ -x /opt/homebrew/bin/brew ]]; then
+    eval "$(/opt/homebrew/bin/brew shellenv)"
+  elif [[ -x /usr/local/bin/brew ]]; then
+    eval "$(/usr/local/bin/brew shellenv)"
+  fi
+  command -v brew >/dev/null 2>&1 || die "Homebrew installation completed but brew is not available."
+}
+install_homebrew
 command -v git >/dev/null 2>&1 || { confirm_install "git" && brew install git || die "git is required."; }
 if ! version_at_least_22 node; then
   confirm_install "Node.js 22 or newer" || die "Node.js 22 or newer is required."

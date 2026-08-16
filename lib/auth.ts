@@ -47,6 +47,21 @@ function users() {
     .all() as unknown as User[];
 }
 
+export function createUser(username: string, password: string) {
+  const normalized = username.trim();
+  if (!normalized || !password) throw new Error("Username and password are required.");
+  const user = {
+    id: randomUUID(),
+    username: normalized,
+    passwordHash: hashPassword(password),
+    createdAt: new Date().toISOString(),
+  };
+  getDatabase().prepare(
+    "INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)",
+  ).run(user.id, user.username, user.passwordHash, user.createdAt);
+  return user;
+}
+
 export function getChatPassword(): string {
   return process.env.CHAT_PASSWORD?.trim() || "";
 }

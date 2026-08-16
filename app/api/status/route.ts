@@ -1,6 +1,7 @@
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { checkGatewayHealth } from "@/lib/mcp";
 import { listProviderConnections } from "@/lib/provider-connections";
+import { getUserAgentCwd } from "@/lib/mcp";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,6 +17,7 @@ export async function GET(req: Request) {
 
   return Response.json({
     authenticated: authed,
+    agentCwd: ownerId ? getUserAgentCwd(ownerId) : undefined,
     cursorSdkConfigured: hasCursorSdkConnection,
     providers: connections.map((connection) => ({
       id: connection.id,

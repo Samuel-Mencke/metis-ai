@@ -636,6 +636,7 @@ type ReferenceItem = {
 
 type StatusPayload = {
   authenticated: boolean;
+  agentCwd?: string;
   cursorSdkConfigured: boolean;
   mcp: { ok: boolean; url: string; detail: string };
   providers?: Array<{
@@ -1654,7 +1655,6 @@ function FileShareEmbed({
 }
 
 export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
-  const workspaceDefaultCwd = defaultCwd.trim() || clientConfig.defaultCwd;
   const router = useRouter();
   const searchParams = useSearchParams();
   const routeChatId = searchParams.get("c");
@@ -1665,6 +1665,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState("");
   const [status, setStatus] = useState<StatusPayload | null>(null);
+  const workspaceDefaultCwd = status?.agentCwd?.trim() || defaultCwd.trim() || clientConfig.defaultCwd;
 
   const [chats, setChats] = useState<ChatIndexEntry[]>([]);
   const [chatsLoaded, setChatsLoaded] = useState(false);
@@ -1847,6 +1848,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
 
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState("general");
   const [chatLogsOpen, setChatLogsOpen] = useState(false);
   const [chatLogs, setChatLogs] = useState<ChatLogEntry[]>([]);
   const [chatLogsChatId, setChatLogsChatId] = useState<string | null>(null);
@@ -1855,6 +1857,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
   const [desktopSidebarMounted, setDesktopSidebarMounted] = useState(true);
+  const [isMacPlatform, setIsMacPlatform] = useState(false);
 
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
@@ -1863,6 +1866,11 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [findMatchCount, setFindMatchCount] = useState(0);
   const [findMatchIndex, setFindMatchIndex] = useState(0);
   const findInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setIsMacPlatform(/Mac|iPhone|iPad|iPod/.test(navigator.userAgent));
+  }, []);
+
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [notificationsReady, setNotificationsReady] = useState(false);
   const [soundCuesEnabled, setSoundCuesEnabled] = useState(false);
@@ -6908,6 +6916,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             realtime={voiceRealtime}
             endpoint={voiceEndpoint}
             connectionId={voiceConnectionId}
+            onOpenSettings={() => {
+              setSettingsTab("voice");
+              setSettingsOpen(true);
+            }}
             onRecordingChange={setVoiceRecording}
             onStateChange={setVoiceState}
             onWaveformLevelChange={setVoiceWaveformLevel}
@@ -7186,7 +7198,9 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         >
           <Search className="size-3.5 shrink-0 opacity-60" />
           <span className="min-w-0 flex-1 truncate">Search chats</span>
-          <kbd className="hidden text-[10px] text-muted-foreground/70 lg:inline">⌘K</kbd>
+          <kbd className="hidden text-[10px] text-muted-foreground/70 lg:inline">
+            {isMacPlatform ? "⌘K" : "Ctrl K"}
+          </kbd>
         </button>
         <button
           type="button"
@@ -9132,6 +9146,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       <SettingsPanel
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
+        settingsTab={settingsTab}
+        onSettingsTabChange={setSettingsTab}
         memories={memories}
         notificationsEnabled={notificationsEnabled}
         onNotificationsEnabledChange={setNotificationsEnabled}
