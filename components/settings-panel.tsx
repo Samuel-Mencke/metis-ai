@@ -1520,7 +1520,7 @@ export function SettingsPanel({
                         max={30}
                         value={browserFps}
                         onChange={(event) => onBrowserSettingsChange({
-                          browserFps: Math.max(1, Math.min(30, Number(event.target.value) || 10)),
+                          browserFps: Math.max(1, Math.min(30, Number(event.target.value) || 5)),
                         })}
                         aria-label="Browser stream FPS"
                       />

@@ -124,28 +124,30 @@ async function handleBrowserEngine(request, response) {
   }
 }
 
-async function sendFrame(socket, context, tabId, quality, streamState) {
+async function sendFrame(socket, context, tabId, quality, streamState, includeMetadata = false) {
   if (socket.readyState !== 1 || socket.bufferedAmount > 2_000_000) return tabId;
-  const frame = await captureBrowserFrame(context.userId, context.chatId, tabId, quality);
-  const metadataKey = JSON.stringify({
-    tabId: frame.tabId,
-    activeTabId: frame.activeTabId,
-    url: frame.url,
-    title: frame.title,
-    tabs: frame.tabs,
-    viewport: frame.viewport,
-  });
-  if (metadataKey !== streamState.metadataKey) {
-    streamState.metadataKey = metadataKey;
-    socket.send(JSON.stringify({
-      type: "meta",
+  const frame = await captureBrowserFrame(context.userId, context.chatId, tabId, quality, includeMetadata);
+  if (includeMetadata) {
+    const metadataKey = JSON.stringify({
       tabId: frame.tabId,
       activeTabId: frame.activeTabId,
       url: frame.url,
       title: frame.title,
       tabs: frame.tabs,
       viewport: frame.viewport,
-    }));
+    });
+    if (metadataKey !== streamState.metadataKey) {
+      streamState.metadataKey = metadataKey;
+      socket.send(JSON.stringify({
+        type: "meta",
+        tabId: frame.tabId,
+        activeTabId: frame.activeTabId,
+        url: frame.url,
+        title: frame.title,
+        tabs: frame.tabs,
+        viewport: frame.viewport,
+      }));
+    }
   }
   socket.send(frame.data, { binary: true });
   return frame.tabId;
@@ -156,15 +158,15 @@ websocketServer.on("connection", async (socket, request, context, options) => {
   let inFlight = false;
   let stopped = false;
   const streamState = { metadataKey: "" };
-  const fps = Math.max(1, Math.min(Number(options.fps) || 10, 30));
+  const fps = Math.max(1, Math.min(Number(options.fps) || 5, 30));
   const quality = Math.max(35, Math.min(Number(options.quality) || 70, 90));
   const realtime = options.realtime !== false;
 
-  const push = async () => {
+  const push = async (includeMetadata = false) => {
     if (stopped || inFlight || socket.readyState !== 1) return;
     inFlight = true;
     try {
-      tabId = await sendFrame(socket, context, tabId, quality, streamState);
+      tabId = await sendFrame(socket, context, tabId, quality, streamState, includeMetadata);
     } catch (error) {
       socket.send(JSON.stringify({ type: "error", message: error instanceof Error ? error.message : "Browser stream failed" }));
     } finally {
@@ -176,7 +178,8 @@ websocketServer.on("connection", async (socket, request, context, options) => {
   const subscribers = browserStreamSubscribers.get(subscriberKey) || new Set();
   const notify = (result) => {
     if (result?.activeTabId) tabId = result.activeTabId;
-    return push();
+    streamState.metadataKey = "";
+    return push(true);
   };
   subscribers.add(notify);
   browserStreamSubscribers.set(subscriberKey, subscribers);
@@ -222,7 +225,7 @@ websocketServer.on("connection", async (socket, request, context, options) => {
   if (options.width && options.height) {
     await setBrowserViewport(context.userId, context.chatId, options.width, options.height);
   }
-  await push();
+  await push(true);
   let timer;
   if (!realtime) return;
   const scheduleNextFrame = () => {

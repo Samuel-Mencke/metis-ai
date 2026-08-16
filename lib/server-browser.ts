@@ -249,16 +249,27 @@ async function resultFor(state: BrowserContextState, tabId: string): Promise<Bro
   };
 }
 
-export async function captureBrowserFrame(ownerId: string, chatId: string, requestedTabId?: string, quality = 70) {
+export async function captureBrowserFrame(
+  ownerId: string,
+  chatId: string,
+  requestedTabId?: string,
+  quality = 70,
+  includeMetadata = true,
+) {
   const state = await getSession(ownerId, chatId);
   const tabId = tabIdFor(state, requestedTabId);
   const page = state.tabs.get(tabId)!;
-  const info = await pageInfo(state, tabId);
+  const url = page.url();
+  const info = includeMetadata
+    ? await pageInfo(state, tabId)
+    : { id: tabId, url, title: "" };
   return {
     tabId,
     activeTabId: state.activeTabId,
-    tabs: await Promise.all([...state.tabs.keys()].map((id) => pageInfo(state, id))),
-    url: info.url === "about:blank" ? "" : info.url,
+    tabs: includeMetadata
+      ? await Promise.all([...state.tabs.keys()].map((id) => pageInfo(state, id)))
+      : [],
+    url: url === "about:blank" ? "" : url,
     title: info.title,
     viewport: page.viewportSize() || DEFAULT_VIEWPORT,
     data: await page.screenshot({ type: "jpeg", quality: Math.max(35, Math.min(90, quality)) }),

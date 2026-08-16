@@ -726,6 +726,23 @@ function chatHref(id: string | null): string {
   return id ? `/?c=${encodeURIComponent(id)}` : "/";
 }
 
+async function readJsonResponse<T>(response: Response): Promise<T> {
+  const body = await response.text();
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.toLowerCase().includes("application/json")) {
+    throw new Error(
+      response.status === 404
+        ? "Browser API not found. Open Metis AI through its application server, not a static frontend server."
+        : `Browser API returned an unexpected response (${response.status}).`,
+    );
+  }
+  try {
+    return JSON.parse(body) as T;
+  } catch {
+    throw new Error(`Browser API returned invalid JSON (${response.status}).`);
+  }
+}
+
 function normalizeBrowserContext(
   context: BrowserContext | undefined,
   sessionKey: string,
@@ -1749,7 +1766,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [compressionMode, setCompressionMode] = useState<"lite" | "standard" | "aggressive" | "ultra" | "rtk" | "stacked">("stacked");
   const [compressionToolResults, setCompressionToolResults] = useState(true);
   const [compressionChatHistory, setCompressionChatHistory] = useState(true);
-  const [browserFps, setBrowserFps] = useState(10);
+  const [browserFps, setBrowserFps] = useState(5);
   const [browserDefaultViewport, setBrowserDefaultViewport] = useState({ width: 1280, height: 800 });
   const [voiceInputEnabled, setVoiceInputEnabled] = useState(true);
   const [voiceMaxDurationSeconds, setVoiceMaxDurationSeconds] = useState(300);
@@ -2599,10 +2616,40 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   }
 
   function showBrowserScreenshot(source: string) {
+    if (browserStreamObjectUrlRef.current) {
+      URL.revokeObjectURL(browserStreamObjectUrlRef.current);
+      browserStreamObjectUrlRef.current = null;
+    }
     if (browserScreenshotRef.current) {
       browserScreenshotRef.current.src = source;
       browserScreenshotRef.current.style.display = "block";
     }
+    if (browserScreenshotPlaceholderRef.current) {
+      browserScreenshotPlaceholderRef.current.style.display = "none";
+    }
+  }
+
+  function showBrowserStreamFrame(blob: Blob) {
+    const nextUrl = URL.createObjectURL(blob);
+    const previousUrl = browserStreamObjectUrlRef.current;
+    browserStreamObjectUrlRef.current = nextUrl;
+    const image = browserScreenshotRef.current;
+    if (!image) {
+      if (previousUrl) URL.revokeObjectURL(previousUrl);
+      URL.revokeObjectURL(nextUrl);
+      return;
+    }
+    const releasePrevious = () => {
+      if (previousUrl && previousUrl !== browserStreamObjectUrlRef.current) {
+        URL.revokeObjectURL(previousUrl);
+      }
+      image.onload = null;
+      image.onerror = null;
+    };
+    image.onload = releasePrevious;
+    image.onerror = releasePrevious;
+    image.src = nextUrl;
+    image.style.display = "block";
     if (browserScreenshotPlaceholderRef.current) {
       browserScreenshotPlaceholderRef.current.style.display = "none";
     }
@@ -2621,7 +2668,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ chatId, action, tabId, ...extra }),
       });
-      const data = await response.json() as { error?: string; screenshot?: string; url?: string; tabId?: string; tabs?: BrowserTab[]; viewport?: { width: number; height: number } };
+      const data = await readJsonResponse<{ error?: string; screenshot?: string; url?: string; tabId?: string; tabs?: BrowserTab[]; viewport?: { width: number; height: number } }>(response);
       if (!response.ok) throw new Error(data.error || "Browser action failed");
       if (activeChatIdRef.current !== chatId) return null;
       if (data.screenshot) showBrowserScreenshot(`data:image/png;base64,${data.screenshot}`);
@@ -2767,17 +2814,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           return;
         }
         const blob = event.data instanceof Blob ? event.data : new Blob([event.data], { type: "image/jpeg" });
-        const nextUrl = URL.createObjectURL(blob);
-        if (browserStreamObjectUrlRef.current) URL.revokeObjectURL(browserStreamObjectUrlRef.current);
-        browserStreamObjectUrlRef.current = nextUrl;
+        showBrowserStreamFrame(blob);
         browserLastFrameAtRef.current = Date.now();
-        if (browserScreenshotRef.current) {
-          browserScreenshotRef.current.src = nextUrl;
-          browserScreenshotRef.current.style.display = "block";
-        }
-        if (browserScreenshotPlaceholderRef.current) {
-          browserScreenshotPlaceholderRef.current.style.display = "none";
-        }
       };
       socket.onclose = () => {
         if (browserSocketRef.current === socket) browserSocketRef.current = null;
@@ -2800,17 +2838,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         .then((response) => (response.ok ? response.blob() : null))
         .then((blob) => {
           if (!blob || disposed) return;
-          const nextUrl = URL.createObjectURL(blob);
-          if (browserStreamObjectUrlRef.current) URL.revokeObjectURL(browserStreamObjectUrlRef.current);
-          browserStreamObjectUrlRef.current = nextUrl;
+          showBrowserStreamFrame(blob);
           browserLastFrameAtRef.current = Date.now();
-          if (browserScreenshotRef.current) {
-            browserScreenshotRef.current.src = nextUrl;
-            browserScreenshotRef.current.style.display = "block";
-          }
-          if (browserScreenshotPlaceholderRef.current) {
-            browserScreenshotPlaceholderRef.current.style.display = "none";
-          }
         })
         .catch(() => undefined)
         .finally(() => {
