@@ -5,7 +5,6 @@ import {
   createChat,
   getChat,
   getGlobalModelSettings,
-  listMemories,
   updateChat,
   upsertMessage,
   type ToolPart,
@@ -693,14 +692,37 @@ export async function runQueuedJob(job: AgentJob) {
       ...(modelParams?.length ? { params: modelParams } : {}),
     };
     agent = job.agentId || chat.agentId
-      ? await withTimeout(Agent.resume(job.agentId || chat.agentId!, {
-          apiKey,
-          model,
-          local: { cwd: agentCwd, settingSources: ["project"] },
-          ...(nativeTools ? { tools: nativeTools } : {}),
-          mcpServers: getMcpServers(mcpContext),
-          ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
-        }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be resumed within 90 seconds.")
+      ? await (async () => {
+          try {
+            return await withTimeout(Agent.resume(job.agentId || chat.agentId!, {
+              apiKey,
+              model,
+              local: { cwd: agentCwd, settingSources: ["project"] },
+              ...(nativeTools ? { tools: nativeTools } : {}),
+              mcpServers: getMcpServers(mcpContext),
+              ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
+            }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be resumed within 90 seconds.");
+          } catch (resumeError) {
+            const messageText = resumeError instanceof Error ? resumeError.message : String(resumeError);
+            if (/not found|no such|does not exist|unknown agent/i.test(messageText)) {
+              // Stale agent id (server restart, expired session): fall back to a
+              // fresh agent instead of failing the whole job.
+              appendRunEvent(job.id, job.chatId, job.userId, "info", {
+                message: "Previous agent session was not found; started a new session.",
+              });
+              updateChat(job.chatId, { agentId: null }, job.userId);
+              return await withTimeout(Agent.create({
+                apiKey,
+                model,
+                local: { cwd: agentCwd, settingSources: ["project"] },
+                ...(nativeTools ? { tools: nativeTools } : {}),
+                mcpServers: getMcpServers(mcpContext),
+                ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
+              }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be created within 90 seconds.");
+            }
+            throw resumeError;
+          }
+        })()
       : await withTimeout(Agent.create({
           apiKey,
           model,
@@ -727,7 +749,7 @@ export async function runQueuedJob(job: AgentJob) {
               "Automation run: execute autonomously without waiting for the user. Never call ask_user, request_mode_change, wait, subagent_status, or any confirmation/user-approval tool. If information is missing, make a safe reasonable assumption and continue; if the task cannot be completed safely, explain that in the final response.",
             ]
         : [
-            `Memories:\n${listMemories(job.userId).map((memory) => `- ${memory.content}`).join("\n") || "(none yet)"}`,
+            "Personal context: the context_search / context_profile / context_remember MCP tools access the owner's shared context hub (devices, services, projects, preferences). Search it on demand when background knowledge about the owner would change your answer — do not guess. Do not dump its contents unprompted; cite only what the query returned. list_memories/add_memory manage lightweight in-app memories the same way.",
             `Current chat keywords: ${chat.keywords?.join(", ") || "(none)"}`,
             `Existing workspaces:\n${chat.workspaces?.map((item) => `[${item.type}] ${item.name} (link: workspace://${item.type}/${item.id})\n${item.content}`).join("\n\n") || "(none)"}`,
           ]),

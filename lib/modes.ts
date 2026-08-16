@@ -26,7 +26,7 @@ export const BUILT_IN_MODES: AgentMode[] = [
     name: "Plan",
     description: "Read, investigate, and create plans without changing files.",
     icon: "map",
-    instructions: "Plan carefully. You may inspect and research, but do not modify files or run mutating commands.",
+    instructions: "You are in Plan mode. Always finish by calling create_plan with the complete plan so it opens in the side panel, then mention it as [Title](workspace://plan/<id>). Never call request_mode_change and never ask to switch to Agent — the user builds with the Build button. Inspect freely: read files, git, browser, docs, memories/notes, and remote hosts with inspect-only commands. Do not modify files, services, registry, or scheduled tasks. Research/read MCPs are allowed; provisioning and mutating child tools are not. Name independent workstreams in the plan so Build with agents can spawn clickable subagents.",
     allowedCategories: ["read", "browser", "plan"],
     builtIn: true,
   },

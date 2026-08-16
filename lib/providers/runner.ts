@@ -14,7 +14,6 @@ import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import {
   appendMessage,
   getChat,
-  listMemories,
   updateChat,
   upsertMessage,
   type Chat,
@@ -23,6 +22,8 @@ import {
 import { getJob, appendRunEvent, updateJob } from "@/lib/db-jobs";
 import { buildAttachmentPrompt } from "@/lib/uploads";
 import { config } from "@/lib/config";
+import { contextHubTools } from "@/lib/context-hub";
+import { mcpBridgeTools } from "@/lib/mcp-bridge";
 import { getUserAgentCwd, getUserExecutionIdentity } from "@/lib/mcp";
 import {
   findActiveConnection,
@@ -156,10 +157,7 @@ function inheritedEnv(extra: Record<string, string | undefined> = {}) {
   );
 }
 
-function providerPrompt(job: AgentJob) {
-  const memories = job.userId
-    ? listMemories(job.userId).map((memory) => `- ${memory.content}`).join("\n")
-    : "";
+function providerPrompt(job: AgentJob, options: { contextTools?: boolean } = {}) {
   const references = job.references?.length
     ? job.references.map((reference) => [
         `- [${reference.kind}] ${reference.label}`,
@@ -174,7 +172,9 @@ function providerPrompt(job: AgentJob) {
     "Response recommendation rule: when the result is incomplete, uses demo/stub endpoints, or still lacks real integrations, clearly distinguish implemented from missing functionality, then provide 1–3 concise, concrete next-step recommendations and ask whether to implement the recommended next step. Never present demo functionality as production-ready.",
     "Remote-client tools are available in this run when supported by the provider. Use list_remote_clients first, then target remote operations with target=client:<remote-client-id>; do not use server paths for client files.",
     "When you use browser results, selected references, or other verifiable web sources, cite the exact URL immediately after the sentence it supports using the format [Source: Website title](URL). At the end, put every source used in exactly one fenced block starting with ```sources, with one Markdown link per line. Never invent URLs; if no verifiable source is available, do not create a sources block.",
-    memories ? `Durable user memories:\n${memories}` : "",
+    options.contextTools
+      ? "Personal context: the context_search / context_profile / context_remember tools access the owner's shared context hub (devices, services, projects, preferences). Search it on demand when background knowledge about the owner would change your answer — do not guess. Do not dump its contents unprompted; cite only what the query returned."
+      : "",
     references ? `Selected references:\n${references}` : "",
     job.referenceText ? `Referenced context:\n${job.referenceText}` : "",
     buildAttachmentPrompt(job.chatId, job.attachments),
@@ -324,13 +324,46 @@ async function consumeAiStream(
   } satisfies Usage;
 }
 
+function modeMcpEnv(context: ProviderContext): Record<string, string> {
+  const mode = modeById(context.chat.sessionState?.modeId);
+  const env = Object.fromEntries(
+    Object.entries({
+      MCP_CHAT_ID: context.job.chatId,
+      MCP_USER_ID: context.job.userId || "",
+      MCP_JOB_ID: context.job.id,
+      MCP_INCOGNITO: (context.job as { incognito?: boolean }).incognito ? "1" : undefined,
+      MCP_MODE_ID: mode.id,
+      MCP_MODE_POLICY: JSON.stringify({
+        allowedCategories: mode.allowedCategories,
+        toolOverrides: mode.toolOverrides || {},
+      }),
+      MCP_AGENT_CWD: getUserAgentCwd(context.job.userId),
+    }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
+  return env;
+}
+
+async function agentToolsFor(context: ProviderContext): Promise<ToolSet> {
+  const mode = modeById(context.chat.sessionState?.modeId);
+  const canRemote = mode.allowedCategories.includes("remote");
+  if (!canRemote) return {};
+  try {
+    const bridged = await mcpBridgeTools(modeMcpEnv(context));
+    return { ...bridged, ...contextHubTools({ allowWrite: mode.allowedCategories.includes("memory") }) };
+  } catch (error) {
+    console.error("[runner] MCP bridge unavailable, falling back to remote tools:", error instanceof Error ? error.message : error);
+    return { ...providerRemoteTools(context), ...contextHubTools({ allowWrite: mode.allowedCategories.includes("memory") }) };
+  }
+}
+
 async function runAiSdk(context: ProviderContext): Promise<ProviderResult> {
+  const tools = await agentToolsFor(context);
   const result = streamText({
     model: aiModel(context.connection.providerKey, context.modelId, context.connection),
-    instructions: providerPrompt(context.job),
+    instructions: providerPrompt(context.job, { contextTools: true }),
     messages: modelMessages(context.chat, context.job),
-    tools: providerRemoteTools(context),
-    stopWhen: stepCountIs(20),
+    tools,
+    stopWhen: stepCountIs(50),
     abortSignal: context.signal,
   });
   return {
@@ -363,12 +396,13 @@ async function runOAuthAiSdk(
       ["gpt-5.4", "gpt-5-codex", "gpt-5.6-sol"].includes(context.modelId)
         ? "gpt-5.6-terra"
         : context.modelId;
+    const oauthTools = await agentToolsFor(context);
     const result = streamText({
       model: provider.languageModel(oauthModelId),
-      instructions: providerPrompt(context.job),
+      instructions: providerPrompt(context.job, { contextTools: true }),
       messages: modelMessages(context.chat, context.job),
-      tools: providerRemoteTools(context),
-      stopWhen: stepCountIs(20),
+      tools: oauthTools,
+      stopWhen: stepCountIs(50),
       abortSignal: context.signal,
     });
     const usage = await consumeAiStream(result, context);

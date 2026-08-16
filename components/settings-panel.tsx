@@ -943,6 +943,10 @@ export function SettingsPanel({
       project: typeof connection.config?.project === "string" ? connection.config.project : "",
       location: typeof connection.config?.location === "string" ? connection.config.location : "",
     });
+    onSettingsTabChange("providers");
+    requestAnimationFrame(() => {
+      document.getElementById("provider-connection-form")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
   }
 
   async function saveProviderConnection() {
@@ -1839,7 +1843,29 @@ export function SettingsPanel({
                     Configure API keys, OAuth, SDK, CLI, and local connections together in one list.
                   </p>
                 </div>
-                <div className="grid gap-2 sm:grid-cols-2">
+                <div id="provider-connection-form" className={`space-y-3 rounded-xl border p-4 ${providerDraft.id ? "border-primary/40 bg-primary/5" : "border-border/60 bg-muted/20"}`}>
+                  {providerDraft.id ? (
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs font-medium text-primary">
+                        Editing existing connection · {providerDraft.id.slice(0, 8)}…
+                      </p>
+                      <Button
+                        type="button"
+                        size="xs"
+                        variant="ghost"
+                        onClick={() => setProviderDraft((current) => ({
+                          ...current,
+                          id: "",
+                          slug: `${current.providerKey}-main`,
+                          label: providerDefinitions.find((provider) => provider.key === current.providerKey)?.name || current.label,
+                          secret: "",
+                        }))}
+                      >
+                        New connection instead
+                      </Button>
+                    </div>
+                  ) : null}
+                  <div className="grid gap-2 sm:grid-cols-2">
                   <CustomSelect
                     value={providerDraft.providerKey}
                     onValueChange={selectProvider}
@@ -1935,11 +1961,11 @@ export function SettingsPanel({
                   </p>
                 ) : null}
                 <div className="flex flex-wrap gap-2">
-                  {providerDraft.authType === "oauth" ? (
-                    <Button type="button" onClick={() => void connectProviderOAuth()} disabled={providerBusy || !providersLoaded}>
-                      {providerBusy ? "Connecting…" : "Connect via OAuth"}
-                    </Button>
-                  ) : (
+                {providerDraft.authType === "oauth" ? (
+                  <Button type="button" onClick={() => void connectProviderOAuth()} disabled={providerBusy || !providersLoaded}>
+                    {providerBusy ? "Connecting…" : providerDraft.id ? `Reconnect ${providerDraft.label || "connection"}` : "Connect via OAuth"}
+                  </Button>
+                ) : (
                     <Button type="button" onClick={() => void saveProviderConnection()} disabled={providerBusy || !providersLoaded}>
                       {providerBusy ? "Saving…" : providerDraft.id ? "Update connection" : "Save connection"}
                     </Button>
@@ -1957,6 +1983,7 @@ export function SettingsPanel({
                   >
                     Clear
                   </Button>
+                </div>
                 </div>
                 {oauthFlow ? (
                   <div className="space-y-3 rounded-lg border border-border/60 bg-muted/20 p-3">
