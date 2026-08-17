@@ -21,7 +21,12 @@ import {
   getProviderConnectionSecret,
 } from "@/lib/provider-connections";
 import { parseModelKey } from "@/lib/providers/types";
+import { providerModelsForConnection } from "@/lib/providers/discovery";
+import { routeModel, type RoutingModel } from "@/lib/model-routing";
+import type { Chat } from "@/lib/store";
 import { runAlternativeProviderJob } from "@/lib/providers/runner";
+import { appendAgentTrace } from "@/lib/agent-trace";
+import { snapshotInterruptedJob } from "@/lib/recovery";
 import { createSnapshot } from "@/lib/shared-context";
 import { allModes, modeById } from "@/lib/modes";
 import type { AgentMode, MessagePart, ToolPermissionCategory } from "@/lib/store";
@@ -488,6 +493,77 @@ function markJobError(job: AgentJob, message: string) {
     badge: "red",
   }, job.userId);
   appendRunEvent(job.id, job.chatId, job.userId, "error", { message });
+  appendAgentTrace(job, "error", { message });
+}
+
+/**
+ * Resolve the "auto" model key for a job. Gathers candidates from every
+ * enabled provider connection (any provider kind), pulls passive telemetry
+ * when the model_signals table exists, and delegates the actual choice to the
+ * pure `routeModel` function in lib/model-routing.ts.
+ */
+async function resolveAutoModel(job: AgentJob, chat: Chat): Promise<string | null> {
+  if (!job.userId) return null;
+  try {
+    const { listProviderConnections } = await import("@/lib/provider-connections");
+    const connections = listProviderConnections(job.userId, false);
+    const candidates: RoutingModel[] = [];
+    for (const connection of connections) {
+      if (connection.providerKey === "cursor") continue;
+      try {
+        for (const model of providerModelsForConnection(connection)) {
+          candidates.push({
+            key: model.key,
+            id: model.id,
+            displayName: model.displayName,
+            contextWindow: model.contextWindow,
+            tags: "tags" in model && Array.isArray(model.tags) ? model.tags : undefined,
+          });
+        }
+      } catch {
+        // A broken connection should not break routing for the others.
+      }
+    }
+    if (!candidates.length) return null;
+
+    // Approximate the working context: current prompt + recent history.
+    const historyTokens = Math.ceil(
+      chat.messages.slice(-20).reduce((total: number, message: { content: string }) => total + message.content.length, 0) / 4,
+    );
+    const promptTokens = Math.ceil((job.message || "").length / 4);
+    const description = [
+      job.message || "",
+      job.referenceText ? `context: ${job.referenceText.slice(0, 400)}` : "",
+    ].filter(Boolean).join("\n");
+
+    let signals;
+    try {
+      const { getAllModelPerformance } = await import("@/lib/model-telemetry");
+      const known = new Set(candidates.map((model) => model.key));
+      const summaries = getAllModelPerformance({ sinceDays: 30 })
+        .filter((summary) => known.has(summary.modelId));
+      if (summaries.length) {
+        signals = {
+          byModel: Object.fromEntries(summaries.map((summary) => [summary.modelId, {
+            compositeScore: summary.compositeScore,
+            successRate: summary.successRate,
+            avgTimeToFirstTokenMs: summary.avgTimeToFirstTokenMs,
+            avgLatencyMs: summary.avgLatencyMs,
+            totalRuns: summary.totalRuns,
+          }])),
+        };
+      }
+    } catch {
+      // model_signals is created lazily; absence is a normal first-run state.
+    }
+
+    const routed = routeModel(description, candidates, signals) ||
+      routeModel(description + "\n", candidates) ||
+      candidates[0].key;
+    return isModelAllowed(job.userId, routed) ? routed : candidates.find((model) => isModelAllowed(job.userId, model.key))?.key || null;
+  } catch {
+    return null;
+  }
 }
 
 export async function runQueuedJob(job: AgentJob) {
@@ -496,7 +572,23 @@ export async function runQueuedJob(job: AgentJob) {
     markJobError(job, "Chat not found or access denied.");
     return;
   }
-  const requestedModelId = job.modelId || chat.modelId || "";
+  let requestedModelId = job.modelId || chat.modelId || "";
+  // Context-aware auto routing: "auto" resolves to a concrete model based on
+  // the task shape (simple → fast, complex/code → high tier, big context →
+  // largest window) across ALL enabled provider connections, not just one
+  // provider kind. Passive model_signals telemetry nudges the choice when
+  // available. Falls back to the first allowed model when routing cannot
+  // decide.
+  if (requestedModelId === "auto" && job.userId) {
+    const routed = await resolveAutoModel(job, chat);
+    if (routed) {
+      requestedModelId = routed;
+      appendAgentTrace(job, "info", { message: `Auto routing selected ${routed}.` });
+    } else {
+      markJobError(job, "No model is available for automatic routing. Select a model first.");
+      return;
+    }
+  }
   if (!requestedModelId) {
     markJobError(job, "No model is selected for this chat.");
     return;
@@ -525,6 +617,7 @@ export async function runQueuedJob(job: AgentJob) {
   const assistantMessageId = crypto.randomUUID();
   appendMessage(job.chatId, { id: assistantMessageId, role: "assistant", content: "" });
   const emit = (event: string, data: unknown) => {
+    appendAgentTrace(job, event, data);
     const result = appendRunEvent(job.id, job.chatId, job.userId, event, data);
     const needsAttention = event === "question" || event === "error";
     if (needsAttention) {
@@ -611,7 +704,20 @@ export async function runQueuedJob(job: AgentJob) {
       : "Subagent model policy: no standard subagent model is configured. Choose the subagent model yourself.";
   const heartbeat = setInterval(() => {
     touchJob(job.id);
+    const active = tools.filter((tool) => isActiveToolStatus(tool.status));
+    appendAgentTrace(job, "heartbeat", {
+      textChars: text.length,
+      toolCount: tools.length,
+      activeTools: active.map((tool) => ({ id: tool.id, name: tool.name, status: tool.status })),
+    });
   }, 30_000);
+  appendAgentTrace(job, "start", {
+    modelId: job.modelId,
+    modeId: activeMode.id,
+    cwd: agentCwd,
+    resume: Boolean(job.resumePrompt),
+    tracePath: `${job.createdAt.slice(0, 10)}/${job.id}.jsonl`,
+  });
   let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
   let checkpointDirty = false;
   const checkpointNow = () => {
@@ -735,6 +841,7 @@ export async function runQueuedJob(job: AgentJob) {
     updateChat(job.chatId, { agentId: agent.agentId }, job.userId);
     const prompt = [
       `Current agent mode: ${activeMode.name}\n${activeMode.instructions}`,
+      "Working style: precise, technically fluent, proactive. Act with your tools instead of describing steps. Reply in the user's language — German in, German out. No filler phrases. On clear orders decide and act yourself; ask back only when genuinely ambiguous or destructive.",
       `Available mode IDs for request_mode_change: ${availableModes || "agent (Agent), plan (Plan), ask (Ask)"}. Use the exact ID before the parentheses; never invent values such as "Code". For implementation or file changes, request modeId "agent".`,
       "Response recommendation rule: when the result is incomplete, uses demo/stub endpoints, or still lacks real integrations, clearly say what is and is not implemented, then always provide 1–3 concise, concrete next-step recommendations in exactly one ```suggestions fenced block so the UI can render clickable actions. End by asking whether to implement the recommended next step. Do not present demo functionality as production-ready.",
       ...(activeMode.id !== "agent"
@@ -749,7 +856,7 @@ export async function runQueuedJob(job: AgentJob) {
               "Automation run: execute autonomously without waiting for the user. Never call ask_user, request_mode_change, wait, subagent_status, or any confirmation/user-approval tool. If information is missing, make a safe reasonable assumption and continue; if the task cannot be completed safely, explain that in the final response.",
             ]
         : [
-            "Personal context: the context_search / context_profile / context_remember MCP tools access the owner's shared context hub (devices, services, projects, preferences). Search it on demand when background knowledge about the owner would change your answer — do not guess. Do not dump its contents unprompted; cite only what the query returned. list_memories/add_memory manage lightweight in-app memories the same way.",
+            "Personal context: the context_search / context_profile / context_remember MCP tools access the owner's shared context hub (devices, services, projects, preferences). When a task touches the owner's infrastructure, projects, or devices, consult them FIRST instead of asking the user. Do not dump contents unprompted; cite only what the query returned. Store newly learned durable preferences (how the owner wants things) via context_remember. list_memories/add_memory manage lightweight in-app memories the same way.",
             `Current chat keywords: ${chat.keywords?.join(", ") || "(none)"}`,
             `Existing workspaces:\n${chat.workspaces?.map((item) => `[${item.type}] ${item.name} (link: workspace://${item.type}/${item.id})\n${item.content}`).join("\n\n") || "(none)"}`,
           ]),
@@ -759,6 +866,7 @@ export async function runQueuedJob(job: AgentJob) {
       "Use list_notes or search_notes when you need note IDs before linking them.",
       "When you use browser results, selected references, or other verifiable web sources, cite the exact URL immediately after the sentence it supports using the format [Source: Website title](URL). At the end, put every source used in exactly one fenced block starting with ```sources, with one Markdown link per line. Never invent URLs; if no verifiable source is available, do not create a sources block.",
       "To create a plan or canvas, call the MCP tools create_plan or create_canvas with title and content. Use an empty content string for a blank workspace, and do not claim creation without a completed tool call.",
+      "Progress tracking: call write_todos with a short checklist and keep statuses updated so it renders in the chat. In Agent mode do not call create_plan unless the user asked for a plan document or you are in Plan mode.",
       "For memories, use list_memories to retrieve the current user's entries, add_memory only for useful durable facts or preferences, and edit_memory with the exact memory id to change an existing entry. Never claim a memory was changed without a completed tool call.",
       "To edit an existing workspace, call edit_plan or edit_canvas with its exact id and the changed title/content. Do not create a duplicate when the user asked to edit.",
       "When the chat topic is clear or changes, silently call update_chat_keywords with 3-8 concise, non-sensitive search terms using mode=add. Do not mention this metadata maintenance in the main response. Use search_chats when you need to locate an earlier chat by title, keyword, or message content.",
@@ -805,12 +913,23 @@ export async function runQueuedJob(job: AgentJob) {
     let run: Awaited<ReturnType<typeof agent.send>>;
     let sendTimeout: ReturnType<typeof setTimeout> | undefined;
     let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
-    let inactivityTimedOut = false;
     const resetInactivityTimer = () => {
       if (inactivityTimer) clearTimeout(inactivityTimer);
       inactivityTimer = setTimeout(() => {
-        inactivityTimedOut = true;
-        void activeRun?.cancel().catch(() => undefined);
+        const active = tools.filter((tool) => isActiveToolStatus(tool.status));
+        const payload = {
+          reason: active.length ? "active_tool" : "stream_gap",
+          activeTools: active.map((tool) => ({ id: tool.id, name: tool.name, status: tool.status })),
+          textChars: text.length,
+        };
+        appendAgentTrace(job, "inactivity", payload);
+        emit("status", {
+          status: "running",
+          message: active.length
+            ? `Waiting on ${active.map((tool) => tool.name).join(", ")}.`
+            : "No new tokens for 5 minutes; continuing instead of aborting.",
+        });
+        resetInactivityTimer();
       }, AGENT_INACTIVITY_TIMEOUT_MS);
     };
     const cancellationWatcher = setInterval(() => {
@@ -986,14 +1105,15 @@ export async function runQueuedJob(job: AgentJob) {
         }
         checkpoint(true);
         emit("text", { text });
+        } else {
+          appendAgentTrace(job, "sdk_event", {
+            type: String((event as { type?: unknown }).type || "unknown"),
+          });
         }
       }
     } finally {
       clearInterval(cancellationWatcher);
       if (inactivityTimer) clearTimeout(inactivityTimer);
-    }
-    if (inactivityTimedOut) {
-      throw new Error("The agent stopped producing progress for 5 minutes.");
     }
     const result = await withTimeout(
       run.wait(),
@@ -1207,6 +1327,7 @@ export async function runQueuedJob(job: AgentJob) {
       });
       emit("error", { message });
     } else if (finalJob?.status === "interrupted") {
+      snapshotInterruptedJob(finalJob);
       emit("status", { status: "interrupted", message });
     }
   } finally {

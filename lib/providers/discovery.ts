@@ -4,6 +4,7 @@ import {
   type ProviderConnectionWithSecret,
 } from "@/lib/provider-connections";
 import { getProviderDefinition } from "@/lib/providers/registry";
+import { contextWindowOf, inferContextWindow } from "@/lib/context-window";
 import {
   modelKey,
   type ProviderModel,
@@ -52,10 +53,12 @@ function modelFromValue(value: unknown) {
       : typeof item.displayName === "string"
         ? item.displayName
         : id;
+  const contextWindow = contextWindowOf(item) || inferContextWindow(id, displayName);
   return {
     id,
     displayName,
     ...(typeof item.description === "string" ? { description: item.description } : {}),
+    ...(contextWindow ? { contextWindow } : {}),
   };
 }
 
@@ -115,6 +118,7 @@ export async function discoverProviderModels(connection: ProviderConnectionWithS
       id: string;
       displayName: string;
       description?: string;
+      contextWindow?: number;
     }>;
     if (!discovered.length) throw new Error("Codex returned no models for this account.");
     return discovered;
@@ -143,6 +147,7 @@ export async function discoverProviderModels(connection: ProviderConnectionWithS
     id: string;
     displayName: string;
     description?: string;
+    contextWindow?: number;
   }>;
   const merged = new Map(provider.models.map((model) => [model.id, model]));
   for (const model of discovered) merged.set(model.id, model);
@@ -164,9 +169,13 @@ export function providerModelsForConnection(connection: ProviderConnectionWithSe
         id: model.id,
         displayName: model.displayName,
         description: model.description,
+        contextWindow: model.contextWindow || inferContextWindow(model.id, model.displayName),
         capabilities: model.capabilities,
       }))
-    : provider.models;
+    : provider.models.map((model) => ({
+        ...model,
+        contextWindow: model.contextWindow || inferContextWindow(model.id, model.displayName),
+      }));
   return sourceModels.map((model) => ({
     ...model,
     key: modelKey(provider.key, model.id, connection.id),

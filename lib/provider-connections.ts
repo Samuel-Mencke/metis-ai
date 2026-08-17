@@ -301,15 +301,15 @@ export function markProviderConnection(
 
 export function saveProviderModels(
   connectionId: string,
-  models: Array<Pick<ProviderModel, "id" | "displayName" | "description" | "capabilities">>,
+  models: Array<Pick<ProviderModel, "id" | "displayName" | "description" | "capabilities" | "contextWindow">>,
 ) {
   const db = getDatabase();
   transaction(() => {
     db.prepare("DELETE FROM provider_models WHERE connection_id = ?").run(connectionId);
     const insert = db.prepare(
       `INSERT INTO provider_models
-        (connection_id, canonical_id, display_name, description, capabilities, discovered_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+        (connection_id, canonical_id, display_name, description, capabilities, context_window, discovered_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
     const discoveredAt = new Date().toISOString();
     for (const model of models.slice(0, 500)) {
@@ -319,6 +319,9 @@ export function saveProviderModels(
         model.displayName.slice(0, 200),
         model.description?.slice(0, 500) ?? null,
         JSON.stringify(model.capabilities ?? {}),
+        typeof model.contextWindow === "number" && Number.isFinite(model.contextWindow) && model.contextWindow > 0
+          ? Math.round(model.contextWindow)
+          : null,
         discoveredAt,
       );
     }
@@ -328,7 +331,8 @@ export function saveProviderModels(
 export function listProviderModels(connectionId: string) {
   return getDatabase().prepare(
     `SELECT canonical_id as id, display_name as displayName,
-            description, capabilities, discovered_at as discoveredAt
+            description, capabilities, context_window as contextWindow,
+            discovered_at as discoveredAt
      FROM provider_models
      WHERE connection_id = ?
      ORDER BY display_name COLLATE NOCASE ASC`,
@@ -338,6 +342,7 @@ export function listProviderModels(connectionId: string) {
       displayName: string;
       description?: string | null;
       capabilities: string;
+      contextWindow?: number | null;
       discoveredAt: string;
     };
     let capabilities: Record<string, unknown> = {};
@@ -350,6 +355,13 @@ export function listProviderModels(connectionId: string) {
       id: value.id,
       displayName: value.displayName,
       ...(value.description ? { description: value.description } : {}),
+      ...(typeof value.contextWindow === "number" && value.contextWindow > 0
+        ? { contextWindow: value.contextWindow }
+        // Legacy rows stored the context window inside the capabilities JSON
+        // before the dedicated column existed.
+        : typeof capabilities.contextWindow === "number" && capabilities.contextWindow > 0
+          ? { contextWindow: capabilities.contextWindow }
+          : {}),
       capabilities,
       discoveredAt: value.discoveredAt,
     };

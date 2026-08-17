@@ -157,7 +157,7 @@ function migrateLegacy(db: DatabaseSync) {
 export function getDatabase(): DatabaseSync {
   if (database) return database;
   mkdirSync(path.dirname(databasePath), { recursive: true });
-  database = new DatabaseSync(databasePath);
+  database = new DatabaseSync(databasePath, { timeout: 10_000 });
   database.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
@@ -449,6 +449,7 @@ export function getDatabase(): DatabaseSync {
     "ALTER TABLE automations ADD COLUMN mode_id TEXT",
     "ALTER TABLE automations ADD COLUMN model_id TEXT",
     "ALTER TABLE automations ADD COLUMN extended_model_id TEXT",
+    "ALTER TABLE provider_models ADD COLUMN context_window INTEGER",
   ]) {
     try {
       database.exec(statement);
@@ -479,17 +480,47 @@ export function getDatabase(): DatabaseSync {
   return database;
 }
 
-export function transaction<T>(fn: () => T): T {
-  const db = getDatabase();
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const result = fn();
-    db.exec("COMMIT");
-    return result;
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
+export function isSqliteBusyError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /database is locked|SQLITE_BUSY|SQLITE_LOCKED/i.test(message);
+}
+
+export function isSqliteForeignKeyError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /FOREIGN KEY constraint failed/i.test(message);
+}
+
+export function withSqliteRetry<T>(fn: () => T, attempts = 8): T {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return fn();
+    } catch (error) {
+      lastError = error;
+      if (!isSqliteBusyError(error) || attempt === attempts) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(250, 20 * attempt));
+    }
   }
+  throw lastError;
+}
+
+export function transaction<T>(fn: () => T): T {
+  return withSqliteRetry(() => {
+    const db = getDatabase();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = fn();
+      db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // The connection may already have rolled back after a busy lock.
+      }
+      throw error;
+    }
+  });
 }
 
 export function parseData<T>(row: unknown): T | null {

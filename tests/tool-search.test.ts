@@ -1,0 +1,72 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  compactToolMatch,
+  mapWithConcurrency,
+  rankToolMatches,
+  scoreToolHaystack,
+  toolSearchHaystack,
+  withOverallBudget,
+  withTimeout,
+} from "../lib/mcp-core/tool-search.mjs";
+
+test("scoreToolHaystack counts overlapping query words", () => {
+  assert.equal(scoreToolHaystack("github issues", "github github issues"), 2);
+  assert.equal(scoreToolHaystack("figma", "vercel deploy"), 0);
+});
+
+test("rankToolMatches sorts by score then server/name and omits schemas", () => {
+  const ranked = rankToolMatches([
+    { server: "b", name: "z", score: 1 },
+    { server: "a", name: "a", score: 2 },
+    { server: "a", name: "b", score: 2 },
+  ], 2);
+  assert.deepEqual(ranked.map((item) => `${item.server}:${item.name}`), ["a:a", "a:b"]);
+});
+
+test("compactToolMatch truncates descriptions and drops inputSchema", () => {
+  const match = compactToolMatch(
+    { id: "github" },
+    { name: "list_issues", description: "x".repeat(400), inputSchema: { type: "object" } },
+    2,
+  );
+  assert.equal(match.description.length, 240);
+  assert.equal("inputSchema" in match, false);
+});
+
+test("toolSearchHaystack does not stringify schemas", () => {
+  const haystack = toolSearchHaystack(
+    { id: "playwright", name: "browser", tags: ["web"] },
+    { name: "browser_navigate", description: "open a url", inputSchema: { huge: true } },
+  );
+  assert.match(haystack, /playwright/);
+  assert.match(haystack, /browser_navigate/);
+  assert.doesNotMatch(haystack, /huge/);
+});
+
+test("mapWithConcurrency preserves order with a low worker cap", async () => {
+  const seen: number[] = [];
+  const results = await mapWithConcurrency([1, 2, 3, 4], 2, async (value) => {
+    seen.push(value);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return value * 10;
+  });
+  assert.deepEqual(results, [10, 20, 30, 40]);
+  assert.equal(seen.length, 4);
+});
+
+test("withTimeout rejects slow work", async () => {
+  await assert.rejects(
+    () => withTimeout(new Promise(() => undefined), 20, "slow"),
+    /slow/,
+  );
+});
+
+test("withOverallBudget returns partial fallback instead of hanging", async () => {
+  const result = await withOverallBudget(
+    new Promise(() => undefined),
+    20,
+    (reason) => ({ tools: [], errors: [{ server: "*", error: reason }] }),
+  );
+  assert.equal(result.errors[0].error, "search_budget_exceeded");
+});

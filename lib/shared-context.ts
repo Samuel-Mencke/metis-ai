@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { getDatabase, parseData, transaction } from "@/lib/sqlite";
+import { getDatabase, isSqliteForeignKeyError, parseData, transaction, withSqliteRetry } from "@/lib/sqlite";
 import type {
   NoteActivity,
   NoteAuthor,
@@ -340,7 +340,7 @@ export function revertChatNotes(chatId: string, ownerId: string | undefined, cut
   });
 }
 
-export function saveSnapshot(snapshot: SessionSnapshot) {
+function writeSnapshotRow(snapshot: SessionSnapshot) {
   const db = getDatabase();
   const serialized = JSON.stringify(snapshot);
   if (snapshot.checkpoint === "periodic") {
@@ -368,6 +368,20 @@ export function saveSnapshot(snapshot: SessionSnapshot) {
     "INSERT INTO session_snapshots (id, chat_id, owner_id, schema_version, checkpoint, data, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   ).run(snapshot.id, snapshot.chatId, snapshot.ownerId ?? null, snapshot.schemaVersion, snapshot.checkpoint, serialized, snapshot.createdAt, snapshot.updatedAt);
   return snapshot;
+}
+
+export function saveSnapshot(snapshot: SessionSnapshot) {
+  return withSqliteRetry(() => {
+    try {
+      return writeSnapshotRow(snapshot);
+    } catch (error) {
+      if (snapshot.ownerId && isSqliteForeignKeyError(error)) {
+        const { ownerId: _ownerId, ...rest } = snapshot;
+        return writeSnapshotRow(rest);
+      }
+      throw error;
+    }
+  });
 }
 
 export function getLatestSnapshot(chatId: string, ownerId?: string) {

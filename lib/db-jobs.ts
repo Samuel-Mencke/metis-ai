@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { getDatabase, parseData, transaction } from "@/lib/sqlite";
 import type { AgentJob, JobStatus } from "@/lib/jobs";
 import { updateChat } from "@/lib/db-store";
+import { describeQueueWait } from "@/lib/worker-scheduler";
 
 const iso = () => new Date().toISOString();
 const RUN_EVENT_RETENTION = 10_000;
@@ -37,16 +38,11 @@ export function enqueueJob(input: Omit<AgentJob, "id" | "status" | "attempts" | 
         "SELECT COUNT(*) as count FROM jobs WHERE status = 'running'",
       ).get() as { count?: number }).count || 0,
     );
-    const queued = Number(
-      (getDatabase().prepare(
-        "SELECT COUNT(*) as count FROM jobs WHERE status = 'queued'",
-      ).get() as { count?: number }).count || 0,
-    );
-    const queueMessage = running >= maxWorkers
-      ? `Max workers reached (${maxWorkers}). Waiting for other runs to finish before starting this one.`
-      : queued > 0
-        ? `Waiting for ${queued} queued run${queued === 1 ? "" : "s"} before starting.`
-        : undefined;
+    const queuedRows = getDatabase()
+      .prepare("SELECT data FROM jobs WHERE status = 'queued'")
+      .all();
+    const queued = queuedRows.filter((row) => parseData<AgentJob>(row)).length;
+    const queueMessage = describeQueueWait(running, queued, maxWorkers);
     const job: AgentJob = {
       ...input,
       ...(queueMessage ? { queueMessage } : {}),
@@ -92,13 +88,35 @@ export function listJobs(chatId?: string, userId?: string) {
 export function claimNextJob() {
   return transaction(() => {
     const db = getDatabase();
-    const row = db.prepare("SELECT data FROM jobs WHERE status = 'queued' ORDER BY updated_at ASC LIMIT 1").get();
-    const job = parseData<AgentJob>(row);
-    if (!job) return null;
-    const claimed = { ...job, status: "running" as const, claimedAt: iso(), attempts: job.attempts + 1, updatedAt: iso() };
-    db.prepare("UPDATE jobs SET data = ?, status = ?, updated_at = ? WHERE id = ? AND status = 'queued'")
-      .run(JSON.stringify(claimed), claimed.status, claimed.updatedAt, claimed.id);
-    return claimed;
+    const selectQueued = db.prepare(
+      "SELECT id, chat_id as chatId, user_id as userId, data FROM jobs WHERE status = 'queued' ORDER BY updated_at ASC LIMIT 1",
+    );
+    for (;;) {
+      const row = selectQueued.get() as { id: string; chatId: string; userId: string | null; data: string } | undefined;
+      if (!row) return null;
+      const job = parseData<AgentJob>(row);
+      if (!job) {
+        const now = iso();
+        const failed = {
+          id: row.id,
+          chatId: row.chatId,
+          ...(row.userId ? { userId: row.userId } : {}),
+          message: "",
+          status: "error" as const,
+          error: "Unreadable queued job data.",
+          attempts: 0,
+          createdAt: now,
+          updatedAt: now,
+        };
+        db.prepare("UPDATE jobs SET data = ?, status = ?, updated_at = ? WHERE id = ? AND status = 'queued'")
+          .run(JSON.stringify(failed), failed.status, now, row.id);
+        continue;
+      }
+      const claimed = { ...job, status: "running" as const, claimedAt: iso(), attempts: job.attempts + 1, updatedAt: iso() };
+      db.prepare("UPDATE jobs SET data = ?, status = ?, updated_at = ? WHERE id = ? AND status = 'queued'")
+        .run(JSON.stringify(claimed), claimed.status, claimed.updatedAt, claimed.id);
+      return claimed;
+    }
   });
 }
 
@@ -122,27 +140,42 @@ export function touchJob(id: string) {
   return updated;
 }
 
-export function recoverStaleJobs(maxAgeMs = 15 * 60 * 1000) {
+export function recoverStaleJobs(_maxAgeMs = 15 * 60 * 1000) {
   const jobs = listJobs();
-  const cutoff = Date.now() - maxAgeMs;
-  return jobs.filter((job) => {
-    if (job.status !== "running" || new Date(job.updatedAt).getTime() >= cutoff) return job.status === "queued";
+  const queued: AgentJob[] = [];
+  const resumed: AgentJob[] = [];
+  const interrupted: AgentJob[] = [];
+  for (const job of jobs) {
+    if (job.status === "queued") {
+      queued.push(job);
+      continue;
+    }
+    if (job.status !== "running") continue;
     const pendingQuestion = getDatabase().prepare(
       "SELECT question_id FROM pending_questions WHERE job_id = ? AND status = 'waiting_for_user' LIMIT 1",
     ).get(job.id);
     if (pendingQuestion) {
       updateJob(job.id, { status: "waiting_input", error: "Paused for user input after worker restart." });
       updateChat(job.chatId, { runStatus: "waiting_for_user", runUpdatedAt: iso() }, job.userId);
-      return false;
+      continue;
     }
-    updateJob(job.id, { status: "interrupted", error: "Run interrupted by a worker restart; manual resume is required." });
+    const updated = updateJob(job.id, {
+      status: "queued",
+      error: undefined,
+      resumePrompt: "The worker restarted. Continue from the last saved agent state. Do not repeat completed tool calls or rewrite finished work.",
+      resumeRequestedAt: iso(),
+    });
     updateChat(job.chatId, {
-      runStatus: "interrupted",
+      runStatus: "running",
       runUpdatedAt: iso(),
-      badge: "red",
+      badge: null,
     }, job.userId);
-    return false;
-  });
+    if (updated) {
+      queued.push(updated);
+      resumed.push(updated);
+    }
+  }
+  return { queued, resumed, interrupted };
 }
 
 export function appendRunEvent(jobId: string, chatId: string, userId: string | undefined, event: string, data: unknown) {

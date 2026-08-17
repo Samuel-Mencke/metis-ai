@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { appendRunEvent, claimNextJob, getJob, recoverStaleJobs, updateJob } from "@/lib/db-jobs";
+import { snapshotInterruptedJob } from "@/lib/recovery";
 import { appendMessage, getChat, updateChat, upsertMessage } from "@/lib/db-store";
 import { expirePendingQuestions } from "@/lib/db-questions";
 import {
@@ -11,6 +12,7 @@ import {
   startAutomationRun,
 } from "@/lib/automations";
 import { enqueueJob } from "@/lib/db-jobs";
+import { waitForSchedulerTick } from "@/lib/worker-scheduler";
 
 const pollMs = Number(process.env.AI_CHAT_WORKER_POLL_MS || 500);
 const configuredConcurrency = Number(process.env.AI_CHAT_WORKER_CONCURRENCY || 4);
@@ -96,6 +98,9 @@ function runJobInIsolatedProcess(jobId: string) {
       const detail = stderr
         .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
         .replace(/(api[_-]?key|access[_-]?token|refresh[_-]?token)\s*[:=]\s*\S+/gi, "$1=[redacted]")
+        .split(/\r?\n/)
+        .filter((line) => !/ExperimentalWarning|node --trace-warnings/i.test(line))
+        .join("\n")
         .trim();
       const message = detail ? `${baseMessage} ${detail.slice(-2_000)}` : baseMessage;
       markFailed(message);
@@ -134,7 +139,14 @@ process.on("SIGTERM", stop);
 process.on("SIGINT", stop);
 
 async function main() {
-  recoverStaleJobs();
+  const recovered = recoverStaleJobs();
+  for (const job of recovered.interrupted) snapshotInterruptedJob(job);
+  if (recovered.resumed.length) {
+    console.log(`[ai-chat-worker] requeued ${recovered.resumed.length} orphaned run${recovered.resumed.length === 1 ? "" : "s"} after restart`);
+  }
+  if (recovered.interrupted.length) {
+    console.log(`[ai-chat-worker] marked ${recovered.interrupted.length} orphaned run${recovered.interrupted.length === 1 ? "" : "s"} interrupted after restart`);
+  }
   console.log(`[ai-chat-worker] started (concurrency: ${concurrency})`);
   const active = new Set<Promise<void>>();
   let lastQuestionExpiry = 0;
@@ -171,15 +183,7 @@ async function main() {
         });
       active.add(task);
     }
-    if (active.size >= concurrency) {
-      await Promise.race(active);
-      continue;
-    }
-    if (active.size > 0) {
-      await Promise.race(active);
-      continue;
-    }
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    await waitForSchedulerTick(active, concurrency, pollMs);
   }
   await Promise.all(active);
   console.log("[ai-chat-worker] stopped");

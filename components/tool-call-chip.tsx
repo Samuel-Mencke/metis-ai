@@ -18,10 +18,15 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { memo, useEffect, useState } from "react";
+import { memo, useState } from "react";
 import { cn } from "@/lib/utils";
 import { PlanWorkspaceCard } from "@/components/plan-workspace-card";
+import { planLooksParallelizable } from "@/lib/modes";
 import { CanvasWorkspaceCard } from "@/components/canvas-workspace-card";
+import { isToolRunning, todosFromToolPayload, toolCallHeadline, toolGroupLabel } from "@/lib/tool-call-display";
+
+const toolCallTriggerClass =
+  "inline-flex max-w-full cursor-pointer items-center gap-1 appearance-none rounded-none border-0 bg-transparent p-0 text-left text-[11px] font-light text-muted-foreground/70 shadow-none ring-0 outline-none transition-colors hover:bg-transparent hover:text-muted-foreground focus-visible:ring-0";
 
 export type ToolCallData = {
   id: string;
@@ -49,10 +54,12 @@ type ToolCallProps = ToolCallData & {
   onOpenDiff?: () => void;
   onOpenSubagent?: () => void;
   onOpenWorkspace?: () => void;
-  onBuildPlan?: (plan: { title: string; content: string }) => void;
+  onBuildPlan?: (plan: { title: string; content: string; workspaceLink?: string }, options?: { multiAgent?: boolean }) => void;
   buildDisabled?: boolean;
   onOpenRaw?: () => void;
   autoExpand?: boolean;
+  locked?: boolean;
+  hostnames?: Record<string, string>;
 };
 
 function formatStructuredValue(value: unknown, indent = 0): string {
@@ -167,7 +174,13 @@ function planInfo(input?: string, result?: string, detail?: string) {
         return {
           title: title?.trim() || "Plan",
           content: content.trim(),
-          workspaceLink: typeof parsed.workspaceLink === "string" ? parsed.workspaceLink : undefined,
+          workspaceLink: typeof parsed.workspaceLink === "string"
+            ? parsed.workspaceLink
+            : typeof value.workspaceLink === "string"
+              ? value.workspaceLink
+              : typeof parsed.id === "string"
+                ? `workspace://plan/${parsed.id}`
+                : undefined,
         };
       }
     } catch {
@@ -231,77 +244,6 @@ function noteInfo(input?: string, result?: string, detail?: string) {
   return null;
 }
 
-function mcpDisplayInfo(name: string, input?: string, detail?: string) {
-  const source = input || detail;
-  let values: Record<string, unknown> = {};
-  try {
-    const parsed = source ? JSON.parse(source) : null;
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      values = parsed as Record<string, unknown>;
-    }
-  } catch {
-    // MCP arguments may be plain text.
-  }
-  const nested = values.arguments && typeof values.arguments === "object"
-    ? values.arguments as Record<string, unknown>
-    : {};
-  const server = typeof values.server === "string" ? values.server : undefined;
-  const tool = typeof values.tool === "string"
-    ? values.tool
-    : typeof values.toolName === "string"
-      ? values.toolName
-      : undefined;
-  const nestedServer = typeof nested.server === "string" ? nested.server : undefined;
-  const nestedTool = typeof nested.tool === "string"
-    ? nested.tool
-    : typeof nested.toolName === "string"
-      ? nested.toolName
-      : undefined;
-  const action = [nestedServer || server, nestedTool || tool].filter(Boolean).join(" · ") || name.replaceAll("_", " ");
-  const description = [
-    values.description,
-    values.command,
-    values.query,
-    values.path,
-    nested.description,
-    nested.command,
-    nested.query,
-    nested.path,
-  ].find((value): value is string => typeof value === "string" && value.trim().length > 0);
-  return {
-    label: action,
-    detail: description?.replace(/\s+/g, " ").trim(),
-  };
-}
-
-function toolDisplayInfo(kind: ToolCallData["kind"], name: string, input?: string, detail?: string, path?: string) {
-  let values: Record<string, unknown> = {};
-  try {
-    const parsed = input ? JSON.parse(input) : null;
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) values = parsed as Record<string, unknown>;
-  } catch {
-    // Keep the compact fallback for streamed or plain-text arguments.
-  }
-  const command = [values.command, values.cmd, values.script]
-    .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
-  const inputPath = path || [values.path, values.file, values.filePath, values.filename]
-    .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
-  const readableName = name
-    .replaceAll("_", " ")
-    .replace(/^(shell|read|edit|write)\s*/i, "")
-    .trim();
-  const primary = kind === "shell"
-    ? command || readableName
-    : kind === "read" || kind === "edit"
-      ? inputPath || readableName
-      : readableName;
-  const output = detail?.replace(/\s+/g, " ").trim();
-  return {
-    label: primary || kind || name.replaceAll("_", " "),
-    detail: command && primary !== command ? command : output,
-  };
-}
-
 export const ToolCallChip = memo(function ToolCallChip({
   name,
   status,
@@ -319,43 +261,43 @@ export const ToolCallChip = memo(function ToolCallChip({
   buildDisabled,
   onOpenRaw,
   autoExpand = false,
+  locked = false,
   todos,
+  hostnames,
 }: ToolCallProps) {
-  const [expanded, setExpanded] = useState(false);
-  const running = ["running", "in_progress", "pending", "started", "executing", "queued"].includes(status.toLowerCase());
-
-  useEffect(() => {
-    setExpanded(autoExpand);
-  }, [autoExpand]);
+  const [userOpen, setUserOpen] = useState(false);
+  const running = isToolRunning(status);
+  const expanded = locked ? autoExpand : autoExpand || userOpen;
+  const todoItems = todos?.length ? todos : todosFromToolPayload(input, result);
 
   const config = {
-    plan: { label: "Plan", icon: ClipboardList, color: "text-blue-400", border: "border-blue-400/30", bg: "bg-blue-400/10" },
-    edit: { label: "File edit", icon: FilePenLine, color: "text-emerald-400", border: "border-emerald-400/30", bg: "bg-emerald-400/10" },
-    read: { label: "Read", icon: FileSearch, color: "text-slate-300", border: "border-slate-400/30", bg: "bg-slate-400/10" },
-    shell: { label: "Shell", icon: Terminal, color: "text-orange-400", border: "border-orange-400/30", bg: "bg-orange-400/10" },
-    subagent: { label: "Subagent", icon: Bot, color: "text-purple-400", border: "border-purple-400/30", bg: "bg-purple-400/10" },
-    mcp: { label: "MCP", icon: Cable, color: "text-cyan-400", border: "border-cyan-400/30", bg: "bg-cyan-400/10" },
-    canvas: { label: "Canvas", icon: Palette, color: "text-pink-400", border: "border-pink-400/30", bg: "bg-pink-400/10" },
-    note: { label: "Note", icon: StickyNote, color: "text-yellow-300", border: "border-yellow-300/30", bg: "bg-yellow-300/10" },
-    todo: { label: "Tasks", icon: ListTodo, color: "text-blue-400", border: "border-blue-400/30", bg: "bg-blue-400/10" },
-    browser: { label: "Browser", icon: Globe2, color: "text-cyan-400", border: "border-cyan-400/30", bg: "bg-cyan-400/10" },
-    memory: { label: "Memory", icon: Brain, color: "text-violet-400", border: "border-violet-400/30", bg: "bg-violet-400/10" },
-    other: { label: name.replaceAll("_", " "), icon: Globe2, color: "text-muted-foreground", border: "border-border/50", bg: "bg-muted/20" },
+    plan: { label: "Plan", icon: ClipboardList },
+    edit: { label: "File edit", icon: FilePenLine },
+    read: { label: "Read", icon: FileSearch },
+    shell: { label: "Shell", icon: Terminal },
+    subagent: { label: "Subagent", icon: Bot },
+    mcp: { label: "MCP", icon: Cable },
+    canvas: { label: "Canvas", icon: Palette },
+    note: { label: "Note", icon: StickyNote },
+    todo: { label: "Tasks", icon: ListTodo },
+    browser: { label: "Browser", icon: Globe2 },
+    memory: { label: "Memory", icon: Brain },
+    other: { label: name.replaceAll("_", " "), icon: Globe2 },
   }[kind ?? "other"];
   const deleteTool = /(^|[._:/-])(delete|remove|unlink)(?=[._:/-]|$)/i.test(name);
   const Icon = deleteTool && kind === "edit" ? Trash2 : config.icon;
-  const toolLabel = deleteTool && kind === "edit" ? "File delete" : config.label;
+  const headline = toolCallHeadline({ name, kind, input, detail, path, hostnames });
   const clickable = kind === "edit" && Boolean(diff || path);
   const subagentClickable = kind === "subagent";
   const workspaceClickable = kind === "plan" || kind === "canvas" || kind === "browser";
-  if (kind === "todo" && todos?.length) {
-    const completed = todos.filter((todo) => todo.status === "completed" || todo.status === "done").length;
+  if (kind === "todo" && todoItems?.length) {
+    const completed = todoItems.filter((todo) => todo.status === "completed" || todo.status === "done").length;
     return (
       <div className="my-2 w-full rounded-md border border-border/50 bg-muted/15 px-2.5 py-2">
         <div className="mb-1.5 flex items-center gap-2 text-xs">
           <ListTodo className="size-3.5 text-blue-400" />
           <span className="font-medium text-foreground/80">Tasks</span>
-          <span className="text-muted-foreground/70">{completed}/{todos.length}</span>
+          <span className="text-muted-foreground/70">{completed}/{todoItems.length}</span>
           {onOpenRaw ? (
             <button
               type="button"
@@ -368,7 +310,7 @@ export const ToolCallChip = memo(function ToolCallChip({
           ) : null}
         </div>
         <div className="space-y-1">
-          {todos.map((todo, index) => {
+          {todoItems.map((todo, index) => {
             const done = todo.status === "completed" || todo.status === "done";
             return (
               <div key={todo.id ?? `${todo.content}-${index}`} className="flex min-w-0 items-center gap-2 text-xs">
@@ -395,20 +337,8 @@ export const ToolCallChip = memo(function ToolCallChip({
       </div>
     );
   }
-  const rawOutput = result || detail || input || "";
   const plan = kind === "plan" ? planInfo(input, result, detail) : null;
-  const mcpInfo = kind === "mcp" ? mcpDisplayInfo(name, input, detail) : undefined;
-  const displayName = kind === "plan"
-    ? plan?.title || ""
-    : mcpInfo?.label || path || name.replaceAll("_", " ");
-  const genericInfo = kind !== "plan" && kind !== "mcp"
-    ? toolDisplayInfo(kind, name, input, detail, path)
-    : undefined;
-  const compactName = genericInfo?.label || displayName;
-  const previewText = mcpInfo?.detail || genericInfo?.detail || path || (subagent?.prompt || rawOutput)?.replace(/\s+/g, " ").trim();
-  const compactDetail = previewText && previewText.length > 120
-    ? `${previewText.slice(0, 117)}…`
-    : previewText;
+  const previewText = headline.preview;
   const diffStats = displayedDiffStats(diff, input);
   if (kind === "plan" && !running && plan) {
     return (
@@ -418,6 +348,8 @@ export const ToolCallChip = memo(function ToolCallChip({
         workspaceLink={plan.workspaceLink}
         onOpen={onOpenWorkspace}
         onBuild={() => onBuildPlan?.(plan)}
+        onBuildWithAgents={() => onBuildPlan?.(plan, { multiAgent: true })}
+        showMultiAgent={planLooksParallelizable(plan.content)}
         buildDisabled={buildDisabled}
       />
     );
@@ -489,97 +421,112 @@ export const ToolCallChip = memo(function ToolCallChip({
     );
   }
   return (
-    <div>
-      <div
-          role={clickable || subagentClickable || workspaceClickable ? "button" : undefined}
-          tabIndex={clickable || subagentClickable || workspaceClickable ? 0 : undefined}
+    <div className="my-0.5 w-full min-w-0" style={{ overflowAnchor: "none" }}>
+      <div className="group flex w-full min-w-0 items-center gap-1">
+        <button
+          type="button"
+          className={cn(toolCallTriggerClass, "min-w-0 flex-1")}
           onClick={() => {
-            if (clickable) onOpenDiff?.();
-            else if (subagentClickable) onOpenSubagent?.();
-            else if (workspaceClickable && onOpenWorkspace) onOpenWorkspace();
-            else setExpanded((value) => !value);
-          }}
-          onKeyDown={(event) => {
-            if ((clickable || subagentClickable || workspaceClickable) && (event.key === "Enter" || event.key === " ")) {
-              event.preventDefault();
-              if (clickable) onOpenDiff?.();
-              else if (subagentClickable) onOpenSubagent?.();
-              else if (workspaceClickable && onOpenWorkspace) onOpenWorkspace();
+            if (subagentClickable && onOpenSubagent) {
+              onOpenSubagent();
+              return;
             }
+            if (locked) return;
+            setUserOpen((open) => !open);
           }}
-          className={cn(
-            "my-2 flex w-full max-w-full items-center gap-2 rounded-md border px-2 py-1 text-left transition-colors",
-            "border-border/50 bg-muted/15 text-xs text-muted-foreground hover:bg-muted/30 active:bg-muted/40",
-            (clickable || subagentClickable || workspaceClickable) && "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-          )}
         >
-      <span className={cn("flex size-4 shrink-0 items-center justify-center", config.color)}>
-        {running ? <LoaderCircle className="size-3 animate-spin" /> : <Icon className="size-3" />}
-      </span>
-      <div className="min-w-0 flex-1 truncate">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <span className={cn("shrink-0 font-medium", deleteTool ? "text-rose-400" : config.color)}>
-            {toolLabel}
-          </span>
-          {compactName && compactName.toLocaleLowerCase() !== toolLabel.toLocaleLowerCase() ? (
-            <span className="truncate text-foreground/75">{compactName}</span>
+          {running ? (
+            <LoaderCircle className="size-3 shrink-0 animate-spin" />
+          ) : (
+            <ChevronRight className={cn("size-3 shrink-0 transition-transform", expanded && "rotate-90")} />
+          )}
+          <Icon className="size-3 shrink-0 opacity-70" />
+          <span className={cn("truncate", deleteTool && "text-rose-400/80")}>{headline.title}</span>
+          {previewText ? (
+            <span className="hidden truncate text-muted-foreground/45 sm:inline">· {previewText}</span>
           ) : null}
           {kind === "subagent" && subagent?.model ? (
-            <span className="shrink-0 text-[10px] text-muted-foreground/70">{subagent.model}</span>
+            <span className="shrink-0 text-[10px] text-muted-foreground/50">{subagent.model}</span>
           ) : null}
           {kind === "edit" && diffStats ? (
-            <span className="shrink-0 text-[10px] text-muted-foreground/70">
+            <span className="shrink-0 text-[10px] text-muted-foreground/50">
               +{diffStats.additions} -{diffStats.deletions}
             </span>
           ) : null}
-        </div>
-        {compactDetail && !path ? <span className="ml-1 text-[11px] text-muted-foreground/65">· {compactDetail}</span> : null}
-      </div>
-      {workspaceClickable ? (
-        <button
-          type="button"
-          className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground/60 hover:bg-muted hover:text-foreground"
-          aria-label={`Open ${kind === "canvas" ? "canvas" : kind === "plan" ? "plan" : "browser"} in side panel`}
-          title={`Open ${kind === "canvas" ? "canvas" : kind === "plan" ? "plan" : "browser"}`}
-          onClick={(event) => {
-            event.stopPropagation();
-            onOpenWorkspace?.();
-          }}
-        >
-          <ExternalLink className="size-3" />
         </button>
-      ) : null}
-          {onOpenRaw ? (
-            <button
-              type="button"
-              className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground/50 hover:bg-muted hover:text-foreground"
-              aria-label="Show raw tool information"
-              onClick={(event) => {
-                event.stopPropagation();
-                onOpenRaw();
-              }}
-            >
-              <Code2 className="size-3" />
-            </button>
-          ) : null}
-        </div>
+        {clickable ? (
+          <button
+            type="button"
+            className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground/40 opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
+            aria-label="Open file diff"
+            title="Open file diff"
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenDiff?.();
+            }}
+          >
+            <FilePenLine className="size-3" />
+          </button>
+        ) : null}
+        {subagentClickable ? (
+          <button
+            type="button"
+            className="flex size-5 shrink-0 items-center justify-center rounded text-violet-300/80 opacity-100 transition-opacity hover:bg-muted hover:text-foreground"
+            aria-label="Open subagent"
+            title="Open subagent"
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenSubagent?.();
+            }}
+          >
+            <ExternalLink className="size-3" />
+          </button>
+        ) : null}
+        {workspaceClickable ? (
+          <button
+            type="button"
+            className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground/40 opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
+            aria-label={`Open ${kind === "canvas" ? "canvas" : kind === "plan" ? "plan" : "browser"} in side panel`}
+            title={`Open ${kind === "canvas" ? "canvas" : kind === "plan" ? "plan" : "browser"}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenWorkspace?.();
+            }}
+          >
+            <ExternalLink className="size-3" />
+          </button>
+        ) : null}
+        {onOpenRaw ? (
+          <button
+            type="button"
+            className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground/40 opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
+            aria-label="Show raw tool information"
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenRaw();
+            }}
+          >
+            <Code2 className="size-3" />
+          </button>
+        ) : null}
+      </div>
       {expanded ? (
-        <div className="my-1 min-w-0 max-w-full max-h-72 space-y-2 overflow-x-hidden overflow-y-auto rounded-md border border-border/40 bg-muted/20 px-2.5 py-2 text-[11px] leading-4 text-foreground/80">
+        <div className="my-1 min-w-0 max-h-72 max-w-full space-y-2 overflow-x-hidden overflow-y-auto pl-4 text-[11px] font-light leading-4 text-muted-foreground/80">
           {input ? (
             <section>
-              <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Request</p>
+              <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground/60">Request</p>
               <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono">{formatToolOutput(input)}</pre>
             </section>
           ) : null}
           {kind === "edit" && diff ? (
             <section>
-              <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground">File diff</p>
+              <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground/60">File diff</p>
               <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono">{`Before:\n${diff.before || "(empty)"}\n\nAfter:\n${diff.after || "(empty)"}`}</pre>
             </section>
           ) : null}
           {result || detail ? (
             <section>
-              <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Response</p>
+              <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground/60">Response</p>
               <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono">{formatToolOutput(result || detail)}</pre>
             </section>
           ) : null}
@@ -595,11 +542,13 @@ export function PlanToolCallCard({
   onOpenWorkspace,
   onBuildPlan,
   buildDisabled,
+  hostnames,
 }: {
   tool: ToolCallData;
   onOpenWorkspace?: () => void;
-  onBuildPlan?: (plan: { title: string; content: string }) => void;
+  onBuildPlan?: (plan: { title: string; content: string; workspaceLink?: string }, options?: { multiAgent?: boolean }) => void;
   buildDisabled?: boolean;
+  hostnames?: Record<string, string>;
 }) {
   const plan = planInfo(tool.input, tool.result, tool.detail);
   if (tool.status !== "running" && plan) {
@@ -607,8 +556,11 @@ export function PlanToolCallCard({
       <PlanWorkspaceCard
         title={plan.title}
         content={plan.content}
+        workspaceLink={plan.workspaceLink}
         onOpen={onOpenWorkspace}
         onBuild={() => onBuildPlan?.(plan)}
+        onBuildWithAgents={() => onBuildPlan?.(plan, { multiAgent: true })}
+        showMultiAgent={planLooksParallelizable(plan.content)}
         buildDisabled={buildDisabled}
       />
     );
@@ -616,6 +568,7 @@ export function PlanToolCallCard({
   return (
     <ToolCallChip
       {...tool}
+      hostnames={hostnames}
       onOpenWorkspace={onOpenWorkspace}
       onBuildPlan={onBuildPlan}
       buildDisabled={buildDisabled}
@@ -633,42 +586,47 @@ export const ToolCallGroup = memo(function ToolCallGroup({
   onOpenRaw,
   includePlans = true,
   autoExpand = false,
+  live = false,
+  hostnames,
 }: {
   tools: ToolCallData[];
   onOpenDiff?: (tool: ToolCallData) => void;
   onOpenSubagent?: (tool: ToolCallData) => void;
   onOpenWorkspace?: (tool: ToolCallData) => void;
-  onBuildPlan?: (tool: ToolCallData, plan: { title: string; content: string }) => void;
+  onBuildPlan?: (tool: ToolCallData, plan: { title: string; content: string; workspaceLink?: string }, options?: { multiAgent?: boolean }) => void;
   buildDisabled?: boolean;
   onOpenRaw?: (tool: ToolCallData) => void;
   includePlans?: boolean;
   autoExpand?: boolean;
+  live?: boolean;
+  hostnames?: Record<string, string>;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  useEffect(() => {
-    setExpanded(autoExpand);
-  }, [autoExpand]);
+  const [userOpen, setUserOpen] = useState(false);
   const planTools = includePlans ? tools.filter((tool) => tool.kind === "plan") : [];
   const noteTools = tools.filter((tool) => tool.kind === "note");
+  const todoTools = tools.filter((tool) => tool.kind === "todo");
   const regularTools = tools.filter(
-    (tool) => tool.kind !== "note" && (includePlans || tool.kind !== "plan"),
+    (tool) =>
+      tool.kind !== "note" &&
+      tool.kind !== "todo" &&
+      (includePlans || tool.kind !== "plan"),
   );
-  const first = regularTools[0];
-  const firstMcpInfo = first?.kind === "mcp"
-    ? mcpDisplayInfo(first.name, first.input, first.detail)
-    : undefined;
-  const label = firstMcpInfo?.label || first?.name.replaceAll("_", " ") || "Tools";
-  const working = tools.some((tool) => tool.status === "running");
+  const groupTitle = toolGroupLabel(regularTools.length, regularTools.map((tool) => tool.kind));
+  const showStack = Boolean(live);
+  const groupOpen = userOpen || Boolean(autoExpand && !showStack);
+  const lastToolId = regularTools[regularTools.length - 1]?.id;
   const renderTool = (tool: ToolCallData) => (
     <ToolCallChip
       {...tool}
+      hostnames={hostnames}
       onOpenDiff={() => onOpenDiff?.(tool)}
       onOpenSubagent={() => onOpenSubagent?.(tool)}
       onOpenWorkspace={() => onOpenWorkspace?.(tool)}
-      onBuildPlan={(plan) => onBuildPlan?.(tool, plan)}
+      onBuildPlan={(plan, options) => onBuildPlan?.(tool, plan, options)}
       buildDisabled={buildDisabled}
       onOpenRaw={() => onOpenRaw?.(tool)}
-      autoExpand={autoExpand}
+      autoExpand={showStack && tool.id === lastToolId}
+      locked={showStack}
     />
   );
   if (regularTools.length === 0) {
@@ -680,35 +638,41 @@ export const ToolCallGroup = memo(function ToolCallGroup({
         {noteTools.map((tool) => (
           <div key={tool.id}>{renderTool(tool)}</div>
         ))}
+        {todoTools.map((tool) => (
+          <div key={tool.id}>{renderTool(tool)}</div>
+        ))}
       </>
     );
   }
   return (
-    <>
+    <div className="w-full min-w-0" style={{ overflowAnchor: "none" }}>
       {planTools.map((tool) => (
         <div key={tool.id}>{renderTool(tool)}</div>
       ))}
       {noteTools.map((tool) => (
         <div key={tool.id}>{renderTool(tool)}</div>
       ))}
-      {regularTools.length === 1 ? renderTool(regularTools[0]) : (
-        <div className="my-4 w-full">
+      {todoTools.map((tool) => (
+        <div key={tool.id}>{renderTool(tool)}</div>
+      ))}
+      {regularTools.length === 1 || showStack ? (
+        <div className="flex flex-col">
+          {regularTools.map((tool) => (
+            <div key={tool.id}>{renderTool(tool)}</div>
+          ))}
+        </div>
+      ) : (
+        <div className="my-1 w-full">
           <button
             type="button"
-            onClick={() => setExpanded((value) => !value)}
-            className="flex w-full items-center gap-2 rounded-md border border-border/50 bg-muted/15 px-2 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/30"
+            className={toolCallTriggerClass}
+            onClick={() => setUserOpen((open) => !open)}
           >
-            <ChevronRight className={cn("size-3 shrink-0 transition-transform", expanded && "rotate-90")} />
-            <span className="truncate text-foreground/75">{label}</span>
-            <span className="shrink-0 text-muted-foreground/70">+{regularTools.length - 1}</span>
-            {working ? (
-              <span className="ml-auto flex items-center" aria-label="Working">
-                <LoaderCircle className="size-3.5 animate-spin text-muted-foreground/80" />
-              </span>
-            ) : null}
+            <ChevronRight className={cn("size-3 shrink-0 transition-transform", groupOpen && "rotate-90")} />
+            <span className="truncate">{groupTitle}</span>
           </button>
-          {expanded ? (
-            <div className="mt-1 space-y-1 pl-3">
+          {groupOpen ? (
+            <div className="mt-0.5 space-y-0.5 pl-4">
               {regularTools.map((tool) => (
                 <div key={tool.id}>{renderTool(tool)}</div>
               ))}
@@ -716,6 +680,6 @@ export const ToolCallGroup = memo(function ToolCallGroup({
           ) : null}
         </div>
       )}
-    </>
+    </div>
   );
 });

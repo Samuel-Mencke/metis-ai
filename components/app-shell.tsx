@@ -99,7 +99,10 @@ import {
   type ModelParamSelection,
 } from "@/components/settings-panel";
 import { ThinkingBlock } from "@/components/thinking-block";
-import { PlanToolCallCard, ToolCallGroup, type ToolCallData } from "@/components/tool-call-chip";
+import { ContextUsageCircle, PlanUsageGauge, usePlanUsageSnapshot, usageForSelectedProvider } from "@/components/quota-gauges";
+import { contextWindowForModel, resolveContextTotal } from "@/lib/context-window";
+import { ToolCallGroup, type ToolCallData } from "@/components/tool-call-chip";
+import { layoutAssistantParts, remoteClientHostnameMap } from "@/lib/tool-call-display";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -726,6 +729,23 @@ function chatHref(id: string | null): string {
   return id ? `/?c=${encodeURIComponent(id)}` : "/";
 }
 
+async function readJsonResponse<T>(response: Response): Promise<T> {
+  const body = await response.text();
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.toLowerCase().includes("application/json")) {
+    throw new Error(
+      response.status === 404
+        ? "Browser API not found. Open Metis AI through its application server, not a static frontend server."
+        : `Browser API returned an unexpected response (${response.status}).`,
+    );
+  }
+  try {
+    return JSON.parse(body) as T;
+  } catch {
+    throw new Error(`Browser API returned invalid JSON (${response.status}).`);
+  }
+}
+
 function normalizeBrowserContext(
   context: BrowserContext | undefined,
   sessionKey: string,
@@ -898,86 +918,6 @@ function McpSupportIndicator({ providerId }: { providerId?: string }) {
         </TooltipTrigger>
         <TooltipContent>
           MCP tools are not supported for this provider. Remote clients and MCP actions are unavailable.
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  );
-}
-
-function formatTokenCount(value: number) {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k`;
-  return String(Math.round(value));
-}
-
-function ContextUsageCircle({
-  used,
-  total,
-  estimated,
-  className,
-}: {
-  used: number;
-  total: number;
-  estimated?: boolean;
-  className?: string;
-}) {
-  const [tooltipOpen, setTooltipOpen] = useState(false);
-  const percentage = Math.min(100, Math.max(0, (used / Math.max(1, total)) * 100));
-  const radius = 8;
-  const circumference = 2 * Math.PI * radius;
-  const color = percentage >= 90 ? "text-red-400" : percentage >= 75 ? "text-amber-400" : "text-emerald-400";
-  const barColor = percentage >= 90 ? "bg-red-400" : percentage >= 75 ? "bg-amber-400" : "bg-emerald-400";
-  return (
-    <TooltipProvider>
-      <Tooltip open={tooltipOpen} onOpenChange={setTooltipOpen}>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            className={cn("group/context relative inline-flex size-7 shrink-0 items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring", className)}
-            aria-label={`Context: ${formatTokenCount(used)} of ${formatTokenCount(total)} tokens used`}
-            onClick={() => setTooltipOpen((open) => !open)}
-          >
-            <svg viewBox="0 0 24 24" className="size-6 -rotate-90" aria-hidden="true">
-              <circle cx="12" cy="12" r={radius} fill="none" stroke="currentColor" strokeWidth="2.5" className="text-muted/60" />
-              <circle
-                cx="12"
-                cy="12"
-                r={radius}
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.5"
-                strokeLinecap="round"
-                strokeDasharray={circumference}
-                strokeDashoffset={circumference * (1 - percentage / 100)}
-                className={cn("transition-[stroke-dashoffset,color] duration-500", color)}
-              />
-            </svg>
-          </button>
-        </TooltipTrigger>
-        <TooltipContent
-          side="bottom"
-          align="end"
-          sideOffset={8}
-          arrowClassName="!bg-popover !fill-popover"
-          className="w-64 rounded-xl border border-border/60 bg-popover p-3 text-popover-foreground shadow-xl"
-        >
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-3">
-              <span className="font-medium">Context usage</span>
-              <span className={cn("font-medium", color)}>{percentage.toFixed(1)}%</span>
-            </div>
-            <div className="h-1.5 overflow-hidden rounded-full bg-white/15">
-              <div className={cn("h-full rounded-full transition-[width,background-color] duration-500", barColor)} style={{ width: `${percentage}%` }} />
-            </div>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-zinc-300">
-              <span>Used</span><span className="text-right text-zinc-100">{formatTokenCount(used)} tokens</span>
-              <span>Maximum</span><span className="text-right text-zinc-100">{formatTokenCount(total)} tokens</span>
-              <span>Remaining</span><span className="text-right text-zinc-100">{formatTokenCount(Math.max(0, total - used))} tokens</span>
-            </div>
-            <p className="text-[10px] leading-snug text-zinc-400">
-              {estimated ? "The current value is estimated; actual usage will be shown after the next model run." : "Measured from the input tokens of the last model run."}
-            </p>
-          </div>
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
@@ -1740,6 +1680,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   ]);
   const [activeBrowserTabId, setActiveBrowserTabId] = useState("browser-1");
   const [browserLoading, setBrowserLoading] = useState(false);
+  const sendInFlightRef = useRef(false);
+  const lastSendFingerprintRef = useRef<{ text: string; at: number }>({ text: "", at: 0 });
+  const [agentBrowserActivity, setAgentBrowserActivity] = useState<Array<{ action: string; url: string; ts: number }>>([]);
+  const agentBrowserActiveRef = useRef(false);
   const [browserError, setBrowserError] = useState("");
   const [browserViewport, setBrowserViewport] = useState({ width: 1280, height: 800 });
   const [browserWidthInput, setBrowserWidthInput] = useState("1280");
@@ -1749,7 +1693,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [compressionMode, setCompressionMode] = useState<"lite" | "standard" | "aggressive" | "ultra" | "rtk" | "stacked">("stacked");
   const [compressionToolResults, setCompressionToolResults] = useState(true);
   const [compressionChatHistory, setCompressionChatHistory] = useState(true);
-  const [browserFps, setBrowserFps] = useState(10);
+  const [browserFps, setBrowserFps] = useState(5);
   const [browserDefaultViewport, setBrowserDefaultViewport] = useState({ width: 1280, height: 800 });
   const [voiceInputEnabled, setVoiceInputEnabled] = useState(true);
   const [voiceMaxDurationSeconds, setVoiceMaxDurationSeconds] = useState(300);
@@ -1789,6 +1733,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     setActiveSubagent(null);
   }, [activeChatId]);
   const [manualCleanupTools, setManualCleanupTools] = useState<ToolPart[]>([]);
+  const [remoteHostnames, setRemoteHostnames] = useState<Record<string, string>>({});
   const [reverting, setReverting] = useState(false);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -1818,12 +1763,12 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const queuedSendRef = useRef<Set<string>>(new Set());
   const [attentionChatIds, setAttentionChatIds] = useState<string[]>([]);
   const attentionNotifiedRef = useRef<Set<string>>(new Set());
-  const recoveryErrorNotifiedRef = useRef<Set<string>>(new Set());
   const [showScrollDown, setShowScrollDown] = useState(false);
   const [liveStatus, setLiveStatus] = useState("");
   const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null);
   const [recoveryStatus, setRecoveryStatus] = useState<"restored" | "needs_attention" | "not_available" | null>(null);
   const [recoveryJobId, setRecoveryJobId] = useState<string | null>(null);
+  const [recoveryCanResume, setRecoveryCanResume] = useState(false);
   const [questionAnswers, setQuestionAnswers] = useState<string[]>([]);
   const [questionCustom, setQuestionCustom] = useState<string[]>([]);
   const [questionCustomActive, setQuestionCustomActive] = useState<boolean[]>([]);
@@ -2312,6 +2257,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       try {
         const response = await fetch("/api/recovery", {
           method: "POST",
+          credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             chatId: activeChatId,
@@ -2327,7 +2273,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               activeTerminalTabId: state.activeTerminalTabId,
             },
             browser: {
-              tabs: state.browserTabs,
+              tabs: state.browserTabs.map((tab) => ({ id: tab.id, title: tab.title, url: tab.url })),
               activeTabId: state.activeBrowserTabId,
               reachable: true,
             },
@@ -2344,15 +2290,13 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           }),
           signal: controller.signal,
         });
+        if (response.status === 404) return;
+        if (response.status === 503) return;
         if (!response.ok) throw new Error("Could not save the session recovery state.");
         recoveryFingerprintRef.current.set(activeChatId, fingerprint);
-        recoveryErrorNotifiedRef.current.delete(activeChatId);
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") return;
-        if (!recoveryErrorNotifiedRef.current.has(activeChatId)) {
-          recoveryErrorNotifiedRef.current.add(activeChatId);
-          toast.error(error instanceof Error ? error.message : "Could not save the session recovery state.");
-        }
+        // Periodic checkpoints are best-effort; retry quietly on the next interval.
       }
     };
 
@@ -2368,6 +2312,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     if (!activeChatId || activeChatIncognito) {
       setRecoveryStatus(null);
       setRecoveryJobId(null);
+      setRecoveryCanResume(false);
       return;
     }
     let disposed = false;
@@ -2379,26 +2324,25 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       .then((body: { snapshot?: { availability?: "available" | "restored" | "needs_attention" | "not_available"; runStatus?: string; resumeMarker?: { jobId?: string; safe?: boolean } } | null } | null) => {
         if (disposed) return;
         const snapshot = body?.snapshot;
-        if (!snapshot) {
+        if (!snapshot || snapshot.availability !== "needs_attention") {
           setRecoveryStatus(null);
           setRecoveryJobId(null);
+          setRecoveryCanResume(false);
           return;
         }
-        const needsAttention = snapshot.availability === "needs_attention" ||
-          (snapshot.runStatus === "running" && snapshot.resumeMarker?.safe === false);
-        setRecoveryStatus(needsAttention ? "needs_attention" : null);
+        setRecoveryStatus("needs_attention");
         setRecoveryJobId(snapshot.resumeMarker?.jobId || null);
+        setRecoveryCanResume(snapshot.resumeMarker?.safe === true);
       })
-      .catch((error) => {
+      .catch(() => {
         if (!disposed) {
           setRecoveryStatus(null);
-          toast.error(error instanceof Error ? error.message : "Could not load the session recovery state.");
         }
       });
     return () => {
       disposed = true;
     };
-  }, [activeChatId, activeChatIncognito]);
+  }, [activeChatId, activeChatIncognito, busy]);
 
   const persistActiveSnapshot = useCallback(() => {
     const id = activeChatIdRef.current;
@@ -2599,10 +2543,40 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   }
 
   function showBrowserScreenshot(source: string) {
+    if (browserStreamObjectUrlRef.current) {
+      URL.revokeObjectURL(browserStreamObjectUrlRef.current);
+      browserStreamObjectUrlRef.current = null;
+    }
     if (browserScreenshotRef.current) {
       browserScreenshotRef.current.src = source;
       browserScreenshotRef.current.style.display = "block";
     }
+    if (browserScreenshotPlaceholderRef.current) {
+      browserScreenshotPlaceholderRef.current.style.display = "none";
+    }
+  }
+
+  function showBrowserStreamFrame(blob: Blob) {
+    const nextUrl = URL.createObjectURL(blob);
+    const previousUrl = browserStreamObjectUrlRef.current;
+    browserStreamObjectUrlRef.current = nextUrl;
+    const image = browserScreenshotRef.current;
+    if (!image) {
+      if (previousUrl) URL.revokeObjectURL(previousUrl);
+      URL.revokeObjectURL(nextUrl);
+      return;
+    }
+    const releasePrevious = () => {
+      if (previousUrl && previousUrl !== browserStreamObjectUrlRef.current) {
+        URL.revokeObjectURL(previousUrl);
+      }
+      image.onload = null;
+      image.onerror = null;
+    };
+    image.onload = releasePrevious;
+    image.onerror = releasePrevious;
+    image.src = nextUrl;
+    image.style.display = "block";
     if (browserScreenshotPlaceholderRef.current) {
       browserScreenshotPlaceholderRef.current.style.display = "none";
     }
@@ -2621,7 +2595,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ chatId, action, tabId, ...extra }),
       });
-      const data = await response.json() as { error?: string; screenshot?: string; url?: string; tabId?: string; tabs?: BrowserTab[]; viewport?: { width: number; height: number } };
+      const data = await readJsonResponse<{ error?: string; screenshot?: string; url?: string; tabId?: string; tabs?: BrowserTab[]; viewport?: { width: number; height: number } }>(response);
       if (!response.ok) throw new Error(data.error || "Browser action failed");
       if (activeChatIdRef.current !== chatId) return null;
       if (data.screenshot) showBrowserScreenshot(`data:image/png;base64,${data.screenshot}`);
@@ -2767,17 +2741,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           return;
         }
         const blob = event.data instanceof Blob ? event.data : new Blob([event.data], { type: "image/jpeg" });
-        const nextUrl = URL.createObjectURL(blob);
-        if (browserStreamObjectUrlRef.current) URL.revokeObjectURL(browserStreamObjectUrlRef.current);
-        browserStreamObjectUrlRef.current = nextUrl;
+        showBrowserStreamFrame(blob);
         browserLastFrameAtRef.current = Date.now();
-        if (browserScreenshotRef.current) {
-          browserScreenshotRef.current.src = nextUrl;
-          browserScreenshotRef.current.style.display = "block";
-        }
-        if (browserScreenshotPlaceholderRef.current) {
-          browserScreenshotPlaceholderRef.current.style.display = "none";
-        }
       };
       socket.onclose = () => {
         if (browserSocketRef.current === socket) browserSocketRef.current = null;
@@ -2800,17 +2765,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         .then((response) => (response.ok ? response.blob() : null))
         .then((blob) => {
           if (!blob || disposed) return;
-          const nextUrl = URL.createObjectURL(blob);
-          if (browserStreamObjectUrlRef.current) URL.revokeObjectURL(browserStreamObjectUrlRef.current);
-          browserStreamObjectUrlRef.current = nextUrl;
+          showBrowserStreamFrame(blob);
           browserLastFrameAtRef.current = Date.now();
-          if (browserScreenshotRef.current) {
-            browserScreenshotRef.current.src = nextUrl;
-            browserScreenshotRef.current.style.display = "block";
-          }
-          if (browserScreenshotPlaceholderRef.current) {
-            browserScreenshotPlaceholderRef.current.style.display = "none";
-          }
         })
         .catch(() => undefined)
         .finally(() => {
@@ -2836,6 +2792,26 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   // The stream intentionally follows the active browser tab.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceTab, activeChatId, activeBrowserTabId, browserRealtime, browserFps, browserDefaultViewport, loadingChatId]);
+
+  // Live feed of agent browser activity: appends to the activity log and
+  // auto-opens the workspace browser tab when the agent starts browsing.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const source = new EventSource("/api/browser/live");
+    source.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data) as { type?: string; action?: string; url?: string; ts?: number };
+        if (data.type === "action" || data.type === "navigation") {
+          const entry = { action: data.action || data.type || "", url: data.url || "", ts: data.ts || Date.now() };
+          agentBrowserActiveRef.current = true;
+          setAgentBrowserActivity((current) => [...current.slice(-49), entry]);
+          setWorkspaceOpen(true);
+          setWorkspaceTab("browser");
+        }
+      } catch { /* ignore malformed */ }
+    };
+    return () => source.close();
+  }, []);
 
   useEffect(() => {
     if (workspaceTab !== "monitor") return;
@@ -3955,6 +3931,29 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     const t = setInterval(() => void refreshStatus(), 30000);
     return () => clearInterval(t);
   }, [refreshStatus]);
+
+  useEffect(() => {
+    if (!authed) return;
+    let cancelled = false;
+    const loadRemoteHostnames = async () => {
+      try {
+        const response = await fetch("/api/remote-clients", { cache: "no-store" });
+        if (!response.ok) return;
+        const data = (await response.json()) as {
+          clients?: Array<{ id: string; hostname?: string; name?: string; os?: string }>;
+        };
+        if (!cancelled) setRemoteHostnames(remoteClientHostnameMap(data.clients || []));
+      } catch {
+        // Tool chips still render without hostname prefixes.
+      }
+    };
+    void loadRemoteHostnames();
+    const timer = window.setInterval(() => void loadRemoteHostnames(), 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [authed]);
 
   useEffect(() => {
     if (!authed) return;
@@ -5150,6 +5149,27 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     }
   }
 
+  async function dismissInterruptedRun() {
+    setRecoveryStatus(null);
+    setRecoveryJobId(null);
+    setRecoveryCanResume(false);
+    if (!activeChatId || activeChatIncognito) return;
+    try {
+      await fetch("/api/recovery", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chatId: activeChatId,
+          checkpoint: "recovery",
+          runStatus: "idle",
+          resumeMarker: { safe: true, reason: "Interrupted run dismissed." },
+        }),
+      });
+    } catch {
+      // Local dismiss still stands if the snapshot write fails.
+    }
+  }
+
   async function resumeInterruptedRun() {
     if (!activeChatId || !recoveryJobId) return;
     try {
@@ -5268,16 +5288,21 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     setLiveStatus("");
   }
 
-  function buildPlan(plan: { title: string; content: string }) {
-    if (busy) return;
-    setWorkspaceOpen(false);
-    void send(
-      undefined,
-      `Build the plan "${plan.title}". Follow the plan referenced below and implement it.`,
-      [],
-      true,
-      plan.content,
-    );
+  async function buildPlan(
+    plan: { title: string; content: string; workspaceLink?: string },
+    options: { multiAgent?: boolean } = {},
+  ) {
+    if (busy || reverting) return;
+    await selectMode("agent");
+    setWorkspaceTab("plan");
+    setWorkspaceOpen(true);
+    const named = plan.workspaceLink
+      ? `[${plan.title}](${plan.workspaceLink})`
+      : `"${plan.title}"`;
+    const prompt = options.multiAgent
+      ? `Build ${named} using parallel subagents for independent streams. Keep this chat as coordinator: give each subagent a tight scoped prompt, do not overlap files, then synthesize. After spawning, mention each as [Name](subagent://Name) so they open on click. Follow the plan already open in the side panel — do not paste it again.`
+      : `Build ${named}. Follow the plan already open in the side panel and implement it. If you spawn subagents, mention them as [Name](subagent://Name).`;
+    void send(undefined, prompt, [], true);
   }
 
   function toggleWorkspace() {
@@ -5332,6 +5357,32 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     storedAttachmentsOverride?: MsgAttachment[],
   ) {
     e?.preventDefault();
+    if (sendInFlightRef.current && !force) return;
+    const text = (textOverride ?? input).trim();
+    if (!force && text) {
+      const last = lastSendFingerprintRef.current;
+      if (last.text === text && Date.now() - last.at < 1000) return;
+      lastSendFingerprintRef.current = { text, at: Date.now() };
+    }
+    sendInFlightRef.current = true;
+    try {
+    await sendInner(e, textOverride, attachmentsOverride, force, referenceTextOverride, referencesOverride, messageIdOverride, onAccepted, storedAttachmentsOverride);
+    } finally {
+      sendInFlightRef.current = false;
+    }
+  }
+
+  async function sendInner(
+    e?: FormEvent | KeyboardEvent,
+    textOverride?: string,
+    attachmentsOverride?: PendingFile[],
+    force = false,
+    referenceTextOverride?: string,
+    referencesOverride?: ReferenceItem[],
+    messageIdOverride?: string,
+    onAccepted?: () => void,
+    storedAttachmentsOverride?: MsgAttachment[],
+  ) {
     const text = (textOverride ?? input).trim();
     const filesToSend = attachmentsOverride ?? pendingFiles;
     const referencesToSend = incognito ? [] : (referencesOverride ?? references);
@@ -5381,6 +5432,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     }
     if (!force) queueDrainBlockedRef.current = false;
     setBusy(true);
+    setRecoveryStatus(null);
     setLiveStatus("");
 
     const localAttachments: MsgAttachment[] = [
@@ -6143,8 +6195,13 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     messages.reduce((total, message) => total + message.content.length, 0) / 4,
   );
   const contextUsed = latestUsage?.inputTokens ?? estimatedContextTokens;
-  const contextTotal = selectedModel.contextWindow || 128_000;
+  const contextTotal = resolveContextTotal(
+    contextWindowForModel(selectedModel),
+    contextUsed,
+  );
   const contextEstimated = !latestUsage?.inputTokens;
+  const { snapshot: planUsageSnapshot } = usePlanUsageSnapshot();
+  const selectedUsage = usageForSelectedProvider(planUsageSnapshot, selectedModel.providerId);
   const selectedAttrs = modelAttrSummary(selectedModel, modelParams);
   const selectedMode = modes.find((mode) => mode.id === modeId) || modes[0];
   const providerQueryMatch = normalizedModelSearch.match(/^([a-z0-9_-]+):(.*)$/);
@@ -7138,12 +7195,14 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               onModelParamsChange={applyModelParams}
               onInsertPrompt={(text) => setInput(text)}
             />
-            <ContextUsageCircle
-              className="ml-auto mr-1.5"
-              used={contextUsed}
-              total={contextTotal}
-              estimated={contextEstimated}
-            />
+            <div className="ml-auto mr-1.5 flex items-center">
+              {selectedUsage ? <PlanUsageGauge provider={selectedUsage} /> : null}
+              <ContextUsageCircle
+                used={contextUsed}
+                total={contextTotal}
+                estimated={contextEstimated}
+              />
+            </div>
           </div>
         )}
       </div>
@@ -7732,13 +7791,18 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                     "border-amber-400/30 bg-amber-400/10 text-amber-200",
                   )}>
                     <span>
-                      The last run needs attention after a restart.
+                      The last run was interrupted by a restart. Resume it, or dismiss and continue.
                     </span>
-                    {recoveryJobId && !busy ? (
-                      <Button type="button" size="xs" variant="outline" onClick={() => void resumeInterruptedRun()}>
-                        Resume
+                    <div className="flex shrink-0 items-center gap-1">
+                      {recoveryJobId && recoveryCanResume && !busy ? (
+                        <Button type="button" size="xs" variant="outline" onClick={() => void resumeInterruptedRun()}>
+                          Resume
+                        </Button>
+                      ) : null}
+                      <Button type="button" size="xs" variant="ghost" onClick={() => void dismissInterruptedRun()}>
+                        Dismiss
                       </Button>
-                    ) : null}
+                    </div>
                   </div>
                 ) : null}
                 {hasEarlierMessages || loadingEarlierMessages ? (
@@ -7968,9 +8032,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                           const messageParts = m.parts && m.parts.length > 0
                           ? m.parts
                           : partsFromFlat(m);
-                          const planTools = messageParts.filter(
-                            (part): part is ToolMsgPart => part.type === "tool" && part.kind === "plan",
-                          );
+                          const viewBlocks = layoutAssistantParts(messageParts);
+                          const lastBlockIndex = viewBlocks.length - 1;
                           const fileLinks = detectedFileLinks(m.content).filter(
                             (href) => !m.attachments?.some(
                               (attachment) =>
@@ -7980,37 +8043,29 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                           );
                           return (
                             <>
-                        {messageParts.map((part, pi, parts) => {
-                          if (part.type === "thinking") {
+                        {viewBlocks.map((block, bi, blocks) => {
+                          if (block.type === "thinking") {
                             return (
                               <ThinkingBlock
-                                key={`thinking-${pi}`}
-                                text={part.content}
+                                key={`thinking-${bi}`}
+                                text={block.content}
                                 done={
-                                  Boolean(part.done) ||
+                                  Boolean(block.done) ||
                                   Boolean(m.thinkingDone) ||
                                   !m.streaming
                                 }
                                 durationMs={
-                                  part.durationMs ?? m.thinkingDurationMs
+                                  block.durationMs ?? m.thinkingDurationMs
                                 }
                               />
                             );
                           }
-                          if (part.type === "tool") {
-                            const currentTool = part as ToolCallData;
-                            const previousTool = parts[pi - 1]?.type === "tool"
-                              ? parts[pi - 1] as ToolCallData
-                              : undefined;
-                            if (previousTool) return null;
-                            const groupedTools: ToolCallData[] = [];
-                            for (let toolIndex = pi; toolIndex < parts.length && parts[toolIndex]?.type === "tool"; toolIndex += 1) {
-                              groupedTools.push(parts[toolIndex] as ToolCallData);
-                            }
+                          if (block.type === "tools") {
                             return (
                               <ToolCallGroup
-                                key={`tools-${part.id}`}
-                                tools={groupedTools.filter((tool) => tool.kind !== "plan")}
+                                key={`tools-${block.tools[0]?.id ?? bi}`}
+                                tools={block.tools}
+                                live={Boolean(m.streaming) && bi === lastBlockIndex}
                                 onOpenDiff={(tool) =>
                                   setActiveDiff({
                                     name: tool.name,
@@ -8038,23 +8093,24 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                                     setWorkspaceOpen(true);
                                   }
                                 }}
-                                onBuildPlan={(tool, plan) => {
+                                onBuildPlan={(tool, plan, options) => {
                                   void tool;
-                                  buildPlan(plan);
+                                  void buildPlan(plan, options);
                                 }}
-                                buildDisabled={busy}
-                                includePlans={false}
+                                buildDisabled={busy || reverting}
+                                includePlans
+                                hostnames={remoteHostnames}
                               />
                             );
                           }
-                          const displayContent = stripAssistantControlBlocks(part.content);
+                          const displayContent = stripAssistantControlBlocks(block.content);
                           return (
                             <div
-                              key={`text-${pi}`}
+                              key={`text-${bi}`}
                               className={cn(
                                 "block w-full",
-                                m.streaming && "streaming-answer",
-                                pi > 0 && "mt-3",
+                                m.streaming && bi === blocks.length - 1 && "streaming-answer",
+                                bi > 0 && "mt-3",
                               )}
                             >
                               {m.streaming ? (
@@ -8070,22 +8126,6 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                             key={`file-share-${href}`}
                             href={href}
                             onOpen={(attachment) => setActiveAttachment({ attachment, chatId: activeChatId ?? undefined })}
-                          />
-                        ))}
-                        {planTools.map((tool) => (
-                          <PlanToolCallCard
-                            key={`plan-ready-${tool.id}`}
-                            tool={tool}
-                            onOpenWorkspace={() => {
-                              const workspace = workspaces.find((item) => item.type === "plan");
-                              if (workspace) {
-                                setActiveWorkspaceId(workspace.id);
-                                setWorkspaceTab("plan");
-                                setWorkspaceOpen(true);
-                              }
-                            }}
-                            onBuildPlan={buildPlan}
-                            buildDisabled={busy}
                           />
                         ))}
                             </>
@@ -8168,6 +8208,40 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                       >
                         <RotateCcw className="size-3" />
                         Retry
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="xs"
+                        className="h-6 gap-1 px-1.5 text-[11px] text-muted-foreground opacity-100 sm:opacity-60 sm:hover:opacity-100"
+                        onClick={() => {
+                          const raw = m.content || "";
+                          const done = () => toast.success("Copied");
+                          if (navigator.clipboard?.writeText) {
+                            navigator.clipboard.writeText(raw).then(done).catch(() => {
+                              const area = document.createElement("textarea");
+                              area.value = raw;
+                              document.body.appendChild(area);
+                              area.select();
+                              document.execCommand("copy");
+                              area.remove();
+                              done();
+                            });
+                          } else {
+                            const area = document.createElement("textarea");
+                            area.value = raw;
+                            document.body.appendChild(area);
+                            area.select();
+                            document.execCommand("copy");
+                            area.remove();
+                            done();
+                          }
+                        }}
+                        title="Copy message"
+                        aria-label="Copy message"
+                      >
+                        <Copy className="size-3" />
+                        Copy
                       </Button>
                       {canRevert ? <Button
                         type="button"
@@ -8586,6 +8660,17 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                     <ExternalLink className="size-3.5" />
                   </Button>
                 </form>
+                {agentBrowserActivity.length > 0 ? (
+                  <div className="max-h-24 shrink-0 overflow-y-auto rounded-md border border-border/60 bg-muted/30 px-2 py-1">
+                    <p className="sticky top-0 bg-muted/30 pb-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Agent activity</p>
+                    {agentBrowserActivity.slice().reverse().map((entry, index) => (
+                      <p key={`${entry.ts}-${index}`} className="truncate text-[11px] leading-relaxed text-muted-foreground">
+                        <span className="text-foreground">{entry.action || "navigate"}</span>
+                        {entry.url ? ` · ${entry.url}` : ""}
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="flex shrink-0 items-center gap-1">
                   <Button type="button" size="icon-xs" variant="ghost" aria-label="Back" title="Back" onClick={() => void performBrowserAction("back")}><ArrowLeft className="size-3.5" /></Button>
                   <Button type="button" size="icon-xs" variant="ghost" aria-label="Reload" title="Reload" onClick={() => void performBrowserAction("reload")}><RotateCcw className="size-3.5" /></Button>
@@ -9254,7 +9339,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                   {tool.kind ? <span className="text-xs text-muted-foreground">· {tool.kind}</span> : null}
                 </div>
                 <div className="-mx-1 mt-1">
-                  <ToolCallGroup tools={[tool]} autoExpand={false} />
+                  <ToolCallGroup tools={[tool]} autoExpand={false} hostnames={remoteHostnames} />
                 </div>
                 <div className="mt-2 grid gap-2">
                   <div>

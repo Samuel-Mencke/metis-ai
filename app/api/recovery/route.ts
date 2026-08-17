@@ -1,7 +1,8 @@
-import { randomUUID } from "node:crypto";
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { getChat } from "@/lib/db-store";
-import { createSnapshot, getLatestSnapshot, SNAPSHOT_SCHEMA_VERSION } from "@/lib/shared-context";
+import { resolveRecoverySnapshot } from "@/lib/recovery";
+import { isSqliteBusyError } from "@/lib/sqlite";
+import { createSnapshot, SNAPSHOT_SCHEMA_VERSION } from "@/lib/shared-context";
 import type { SessionSnapshot } from "@/lib/store";
 
 export const runtime = "nodejs";
@@ -21,12 +22,17 @@ export async function GET(req: Request) {
   const chatId = new URL(req.url).searchParams.get("chatId")?.trim() || "";
   if (!chatId) return Response.json({ error: "chatId is required" }, { status: 400 });
   if (!getChat(chatId, userId)) return Response.json({ error: "Chat not found" }, { status: 404 });
-  const snapshot = getLatestSnapshot(chatId, userId);
-  return Response.json({
-    snapshot,
-    schemaVersion: SNAPSHOT_SCHEMA_VERSION,
-    status: snapshot?.availability || "not_available",
-  });
+  try {
+    const snapshot = resolveRecoverySnapshot(chatId, userId);
+    return Response.json({
+      snapshot,
+      schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+      status: snapshot?.availability || "not_available",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not load the session recovery state.";
+    return Response.json({ error: message, snapshot: null, status: "not_available" }, { status: isSqliteBusyError(error) ? 503 : 500 });
+  }
 }
 
 export async function POST(req: Request) {
@@ -38,7 +44,8 @@ export async function POST(req: Request) {
   const sessionState = body.sessionState && typeof body.sessionState === "object" ? body.sessionState as Record<string, unknown> : {};
   const browser = body.browser && typeof body.browser === "object" ? body.browser as Record<string, unknown> : undefined;
   const notesView = body.notesView && typeof body.notesView === "object" ? body.notesView as Record<string, unknown> : undefined;
-  const snapshot = createSnapshot({
+  try {
+    const snapshot = createSnapshot({
     chatId,
     ...(userId ? { ownerId: userId } : {}),
     checkpoint: body.checkpoint === "shutdown" || body.checkpoint === "recovery" || body.checkpoint === "periodic"
@@ -66,7 +73,11 @@ export async function POST(req: Request) {
                 typeof (tab as { id?: unknown }).id === "string" &&
                 typeof (tab as { title?: unknown }).title === "string" &&
                 typeof (tab as { url?: unknown }).url === "string",
-              ).slice(0, 50)
+              ).slice(0, 50).map((tab) => ({
+                id: tab.id.slice(0, 200),
+                title: tab.title.slice(0, 200),
+                url: tab.url.slice(0, 4_000),
+              }))
             : [],
           activeTabId: text(browser.activeTabId, 200) || undefined,
           reachable: browser.reachable !== false,
@@ -94,5 +105,12 @@ export async function POST(req: Request) {
       : undefined,
     availability: "available",
   });
-  return Response.json({ snapshot });
+    return Response.json({ snapshot });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not save the session recovery state.";
+    return Response.json(
+      { error: message },
+      { status: isSqliteBusyError(error) ? 503 : 500 },
+    );
+  }
 }

@@ -157,7 +157,7 @@ function inheritedEnv(extra: Record<string, string | undefined> = {}) {
   );
 }
 
-function providerPrompt(job: AgentJob, options: { contextTools?: boolean } = {}) {
+function providerPrompt(job: AgentJob) {
   const references = job.references?.length
     ? job.references.map((reference) => [
         `- [${reference.kind}] ${reference.label}`,
@@ -168,13 +168,12 @@ function providerPrompt(job: AgentJob, options: { contextTools?: boolean } = {})
     : "";
   return [
     "You are a provider inside a private AI chat application.",
+    "Working style: precise, technically fluent, proactive. Act with your tools instead of describing steps. Reply in the user's language — German in, German out. No filler phrases. On clear orders decide and act yourself; ask back only when genuinely ambiguous or destructive.",
     "Answer the user directly and do not claim to have used tools you were not given.",
     "Response recommendation rule: when the result is incomplete, uses demo/stub endpoints, or still lacks real integrations, clearly distinguish implemented from missing functionality, then provide 1–3 concise, concrete next-step recommendations and ask whether to implement the recommended next step. Never present demo functionality as production-ready.",
     "Remote-client tools are available in this run when supported by the provider. Use list_remote_clients first, then target remote operations with target=client:<remote-client-id>; do not use server paths for client files.",
     "When you use browser results, selected references, or other verifiable web sources, cite the exact URL immediately after the sentence it supports using the format [Source: Website title](URL). At the end, put every source used in exactly one fenced block starting with ```sources, with one Markdown link per line. Never invent URLs; if no verifiable source is available, do not create a sources block.",
-    options.contextTools
-      ? "Personal context: the context_search / context_profile / context_remember tools access the owner's shared context hub (devices, services, projects, preferences). Search it on demand when background knowledge about the owner would change your answer — do not guess. Do not dump its contents unprompted; cite only what the query returned."
-      : "",
+    "Personal context: the context_search / context_profile / context_remember tools, when available in this run, access the owner's shared context hub (devices, services, projects, preferences). When a task touches the owner's infrastructure, projects, or devices, consult them FIRST instead of asking the user. Do not dump contents unprompted; cite only what the query returned. Store newly learned durable preferences (how the owner wants things) via context_remember.",
     references ? `Selected references:\n${references}` : "",
     job.referenceText ? `Referenced context:\n${job.referenceText}` : "",
     buildAttachmentPrompt(job.chatId, job.attachments),
@@ -360,7 +359,7 @@ async function runAiSdk(context: ProviderContext): Promise<ProviderResult> {
   const tools = await agentToolsFor(context);
   const result = streamText({
     model: aiModel(context.connection.providerKey, context.modelId, context.connection),
-    instructions: providerPrompt(context.job, { contextTools: true }),
+    instructions: providerPrompt(context.job),
     messages: modelMessages(context.chat, context.job),
     tools,
     stopWhen: stepCountIs(50),
@@ -399,7 +398,7 @@ async function runOAuthAiSdk(
     const oauthTools = await agentToolsFor(context);
     const result = streamText({
       model: provider.languageModel(oauthModelId),
-      instructions: providerPrompt(context.job, { contextTools: true }),
+      instructions: providerPrompt(context.job),
       messages: modelMessages(context.chat, context.job),
       tools: oauthTools,
       stopWhen: stepCountIs(50),

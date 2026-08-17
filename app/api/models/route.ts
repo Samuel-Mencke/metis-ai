@@ -1,7 +1,7 @@
 import { Cursor } from "@cursor/sdk";
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { filterAllowedModels } from "@/lib/model-access";
-import { UNCENSORED_PARAMETER } from "@/lib/model-params";
+import { CONTEXT_TIER_PARAMETER, UNCENSORED_PARAMETER } from "@/lib/model-params";
 import {
   findActiveConnection,
   getProviderConnectionSecret,
@@ -9,6 +9,11 @@ import {
 } from "@/lib/provider-connections";
 import { providerModelsForConnection } from "@/lib/providers/discovery";
 import { modelKey } from "@/lib/providers/types";
+import {
+  contextTiersForModel,
+  contextWindowForModel,
+  contextWindowOf as providerContextWindow,
+} from "@/lib/context-window";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,18 +50,13 @@ export type ModelInfo = {
   contextWindow?: number;
 };
 
-function contextWindowOf(value: unknown) {
-  if (!value || typeof value !== "object") return undefined;
-  const item = value as Record<string, unknown>;
-  const candidate = [
-    item.contextWindow,
-    item.context_window,
-    item.maxInputTokens,
-    item.max_input_tokens,
-    item.inputTokenLimit,
-    item.input_token_limit,
-  ].find((entry) => typeof entry === "number" && Number.isFinite(entry) && entry > 0);
-  return typeof candidate === "number" ? candidate : undefined;
+function modelContextWindow(value: unknown, id?: string, displayName?: string) {
+  const record = value && typeof value === "object" ? value as { id?: unknown; displayName?: unknown } : null;
+  return contextWindowForModel({
+    id: id || (typeof record?.id === "string" ? record.id : ""),
+    displayName: displayName || (typeof record?.displayName === "string" ? record.displayName : ""),
+    contextWindow: providerContextWindow(value),
+  });
 }
 
 export async function GET(req: Request) {
@@ -97,7 +97,7 @@ export async function GET(req: Request) {
         return {
           id: m.id,
           displayName: m.displayName || m.id,
-          ...(contextWindowOf(m) ? { contextWindow: contextWindowOf(m) } : {}),
+          ...(modelContextWindow(m) ? { contextWindow: modelContextWindow(m) } : {}),
           providerId: "cursor",
           providerName: "Cursor",
           source: "cursor",
@@ -122,25 +122,42 @@ export async function GET(req: Request) {
     if (connection.providerKey === "cursor") continue;
     const models = providerModelsForConnection({ ...connection });
     connectionModels.push(
-      ...models.map((model) => ({
-        id: model.key || modelKey(model.providerKey, model.id),
-        displayName: model.displayName,
-        description: model.description,
-        providerId: model.providerKey,
-        providerName: model.providerName,
-        connectionId: model.connectionId,
-        connectionLabel: model.connectionLabel,
-        source: model.source,
-        tags: "tags" in model && Array.isArray(model.tags) ? model.tags : undefined,
-        ...(contextWindowOf(model) ? { contextWindow: contextWindowOf(model) } : {}),
-        capabilities: model.capabilities as Record<string, boolean> | undefined,
-        parameters: model.parameters?.map((parameter) => ({
+      ...models.map((model) => {
+        const contextWindow = modelContextWindow(model, model.id, model.displayName);
+        const tiers = contextTiersForModel({ id: model.id, displayName: model.displayName });
+        const baseParameters = model.parameters?.map((parameter) => ({
           id: parameter.id,
           displayName: parameter.displayName,
           values: parameter.values.map((value) => ({ ...value })),
-        })),
-        defaultParams: model.defaultParams?.map((parameter) => ({ ...parameter })),
-      })),
+        })) || [];
+        const parameters = tiers
+          ? [
+              ...baseParameters,
+              {
+                ...CONTEXT_TIER_PARAMETER,
+                values: tiers.map((tier) => ({
+                  value: tier.suffix,
+                  displayName: tier.priceHint ? `${tier.label} · ${tier.priceHint}` : tier.label,
+                })),
+              },
+            ]
+          : baseParameters;
+        return {
+          id: model.key || modelKey(model.providerKey, model.id),
+          displayName: model.displayName,
+          description: model.description,
+          providerId: model.providerKey,
+          providerName: model.providerName,
+          connectionId: model.connectionId,
+          connectionLabel: model.connectionLabel,
+          source: model.source,
+          tags: "tags" in model && Array.isArray(model.tags) ? model.tags : undefined,
+          ...(contextWindow ? { contextWindow } : {}),
+          capabilities: model.capabilities as Record<string, boolean> | undefined,
+          ...(parameters.length ? { parameters } : {}),
+          defaultParams: model.defaultParams?.map((parameter) => ({ ...parameter })),
+        };
+      }),
     );
   }
 

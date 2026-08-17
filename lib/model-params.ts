@@ -25,3 +25,16 @@ export const UNCENSORED_PARAMETER: ModelParameter = {
     { value: "true", displayName: "Uncensored" },
   ],
 };
+
+/** Context-tier selection for models that ship multiple context windows
+ *  (e.g. GLM 5.x 200K vs 1M). Selecting a tier rewrites the model id suffix
+ *  ("-200k"/"-1m") before the request is sent, so the parameter is display
+ *  and persistence sugar on top of the model id itself. */
+export const CONTEXT_TIER_PARAMETER: ModelParameter = {
+  id: "context",
+  displayName: "Context",
+  values: [
+    { value: "200k", displayName: "200K" },
+    { value: "1m", displayName: "1M" },
+  ],
+};

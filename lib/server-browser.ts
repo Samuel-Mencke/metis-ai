@@ -1,5 +1,6 @@
 import dns from "node:dns/promises";
 import crypto from "node:crypto";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -28,6 +29,9 @@ type BrowserAction = {
   selector?: string;
   text?: string;
   key?: string;
+  value?: string;
+  targetSelector?: string;
+  filePath?: string;
   x?: number;
   y?: number;
   deltaY?: number;
@@ -49,6 +53,36 @@ type BrowserResult = {
   downloadPath?: string;
   downloadFilename?: string;
 };
+
+export type BrowserEventPayload = {
+  type: "action" | "navigation" | "screenshot";
+  ownerId: string;
+  chatId: string;
+  tabId: string;
+  url: string;
+  title: string;
+  action?: string;
+  screenshot?: string;
+  ts: number;
+};
+
+// The custom server entrypoint (server.mjs via tsx) and the Next-bundled route
+// handlers can end up with separate module instances of this file; anchor the
+// emitter on globalThis so every consumer observes the same instance.
+const browserEventsGlobal = globalThis as typeof globalThis & { __metisBrowserEvents?: EventEmitter };
+export const browserEvents: EventEmitter = browserEventsGlobal.__metisBrowserEvents || new EventEmitter();
+browserEvents.setMaxListeners(200);
+browserEventsGlobal.__metisBrowserEvents = browserEvents;
+
+function emitBrowserEvent(payload: BrowserEventPayload) {
+  try {
+    browserEvents.emit("browser-event", payload);
+  } catch {
+    // Event emission must never break the browser action it reports.
+  }
+}
+
+const pageMeta = new WeakMap<Page, { ownerId: string; chatId: string; tabId: string }>();
 
 const persistentContexts = new Map<string, Promise<BrowserContext>>();
 const sessions = new Map<string, BrowserContextState>();
@@ -173,6 +207,10 @@ async function getPersistentContext(ownerId: string) {
     return context;
   } catch (error) {
     if (persistentContexts.get(ownerId) === pending) persistentContexts.delete(ownerId);
+    const message = error instanceof Error ? error.message : String(error);
+    if (/Executable doesn't exist/i.test(message)) {
+      throw new Error("Playwright Chromium is not installed. From /home/samuel/metis-ai run: pnpm exec playwright install chromium");
+    }
     throw error;
   }
 }
@@ -188,10 +226,30 @@ async function installRequestGuard(page: Page) {
   });
 }
 
+// Tracks a session page so page-initiated navigations (links, redirects,
+// JS router pushes) surface as live events even without an explicit action.
+function attachPageEventTracking(page: Page, ownerId: string, chatId: string, tabId: string) {
+  pageMeta.set(page, { ownerId, chatId, tabId });
+  page.on("framenavigated", (frame) => {
+    if (frame !== page.mainFrame()) return;
+    const meta = pageMeta.get(page);
+    if (!meta) return;
+    const url = frame.url();
+    const ts = Date.now();
+    void page
+      .title()
+      .catch(() => "")
+      .then((title) => {
+        emitBrowserEvent({ type: "navigation", ownerId: meta.ownerId, chatId: meta.chatId, tabId: meta.tabId, url, title, ts });
+      });
+  });
+}
+
 async function createSession(ownerId: string, chatId: string) {
   const context = await getPersistentContext(ownerId);
   const page = await context.newPage();
   await installRequestGuard(page);
+  attachPageEventTracking(page, ownerId, chatId, "browser-1");
   const state: BrowserContextState = {
     ownerId,
     chatId,
@@ -249,16 +307,27 @@ async function resultFor(state: BrowserContextState, tabId: string): Promise<Bro
   };
 }
 
-export async function captureBrowserFrame(ownerId: string, chatId: string, requestedTabId?: string, quality = 70) {
+export async function captureBrowserFrame(
+  ownerId: string,
+  chatId: string,
+  requestedTabId?: string,
+  quality = 70,
+  includeMetadata = true,
+) {
   const state = await getSession(ownerId, chatId);
   const tabId = tabIdFor(state, requestedTabId);
   const page = state.tabs.get(tabId)!;
-  const info = await pageInfo(state, tabId);
+  const url = page.url();
+  const info = includeMetadata
+    ? await pageInfo(state, tabId)
+    : { id: tabId, url, title: "" };
   return {
     tabId,
     activeTabId: state.activeTabId,
-    tabs: await Promise.all([...state.tabs.keys()].map((id) => pageInfo(state, id))),
-    url: info.url === "about:blank" ? "" : info.url,
+    tabs: includeMetadata
+      ? await Promise.all([...state.tabs.keys()].map((id) => pageInfo(state, id)))
+      : [],
+    url: url === "about:blank" ? "" : url,
     title: info.title,
     viewport: page.viewportSize() || DEFAULT_VIEWPORT,
     data: await page.screenshot({ type: "jpeg", quality: Math.max(35, Math.min(90, quality)) }),
@@ -291,6 +360,7 @@ async function performBrowserActionUnlocked(ownerId: string, chatId: string, act
     tabId = `browser-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     page = await state.context.newPage();
     await installRequestGuard(page);
+    attachPageEventTracking(page, ownerId, chatId, tabId);
     state.tabs.set(tabId, page);
     state.activeTabId = tabId;
   } else {
@@ -340,6 +410,24 @@ async function performBrowserActionUnlocked(ownerId: string, chatId: string, act
     const width = Math.max(320, Math.min(Number(action.width) || DEFAULT_VIEWPORT.width, 2560));
     const height = Math.max(240, Math.min(Number(action.height) || DEFAULT_VIEWPORT.height, 1600));
     await page.setViewportSize({ width, height });
+  } else if (action.action === "drag") {
+    if (!action.selector || !action.targetSelector) throw new Error("source selector and target selector are required for drag");
+    const source = page.locator(action.selector).first();
+    const target = page.locator(action.targetSelector).first();
+    await source.scrollIntoViewIfNeeded();
+    await target.scrollIntoViewIfNeeded();
+    await source.dragTo(target, { timeout: 15_000 });
+  } else if (action.action === "hover") {
+    if (!action.selector) throw new Error("A selector is required for hover");
+    await page.locator(action.selector).first().hover({ timeout: 10_000 });
+  } else if (action.action === "select_option") {
+    if (!action.selector || typeof action.value !== "string") throw new Error("A selector and value are required for select_option");
+    await page.locator(action.selector).first().selectOption(action.value, { timeout: 10_000 });
+  } else if (action.action === "upload_file") {
+    if (!action.selector || !action.filePath) throw new Error("A selector and file path are required for upload_file");
+    const local = path.resolve(String(action.filePath));
+    if (!fs.existsSync(local)) throw new Error(`File not found: ${local}`);
+    await page.locator(action.selector).first().setInputFiles(local, { timeout: 15_000 });
   } else if (action.action === "download") {
     if (!action.selector) throw new Error("A selector is required for download");
     const [download] = await Promise.all([
@@ -350,12 +438,14 @@ async function performBrowserActionUnlocked(ownerId: string, chatId: string, act
     const filename = await download.suggestedFilename();
     const destination = path.join(directory, filename);
     await download.saveAs(destination);
-    return { ...(await resultFor(state, tabId)), downloadPath: destination, downloadFilename: filename };
+    const downloadResult = { ...(await resultFor(state, tabId)), downloadPath: destination, downloadFilename: filename };
+    emitBrowserEvent({ type: "action", ownerId, chatId, tabId, url: downloadResult.url, title: downloadResult.title, action: action.action, ts: Date.now() });
+    return downloadResult;
   }
 
   recordOrigin(ownerId, page.url());
   const result = await resultFor(state, tabId);
-  if (action.action === "screenshot" || action.action === "navigate" || action.action === "click" || action.action === "type" || action.action === "press" || action.action === "reload" || action.action === "back" || action.action === "forward" || action.action === "select_tab" || action.action === "scroll" || action.action === "resize") {
+  if (action.action === "screenshot" || action.action === "navigate" || action.action === "click" || action.action === "type" || action.action === "press" || action.action === "reload" || action.action === "back" || action.action === "forward" || action.action === "select_tab" || action.action === "scroll" || action.action === "resize" || action.action === "drag" || action.action === "hover" || action.action === "select_option" || action.action === "upload_file") {
     result.screenshot = (await page.screenshot({ type: "png" })).toString("base64");
   }
   if (action.action === "snapshot") {
@@ -363,6 +453,11 @@ async function performBrowserActionUnlocked(ownerId: string, chatId: string, act
   }
   if (action.action === "extract_text") {
     result.snapshot = (await page.locator("body").innerText().catch(() => "")).slice(0, MAX_SNAPSHOT_LENGTH);
+  }
+
+  emitBrowserEvent({ type: "action", ownerId, chatId, tabId, url: result.url, title: result.title, action: action.action, ts: Date.now() });
+  if (result.screenshot) {
+    emitBrowserEvent({ type: "screenshot", ownerId, chatId, tabId, url: result.url, title: result.title, screenshot: result.screenshot, ts: Date.now() });
   }
   return result;
 }

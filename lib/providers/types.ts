@@ -31,6 +31,7 @@ export type ProviderModelDefinition = {
   id: string;
   displayName: string;
   description?: string;
+  contextWindow?: number;
   capabilities?: Partial<ProviderCapabilities>;
   tags?: string[];
   parameters?: ReadonlyArray<ProviderModelParameter>;

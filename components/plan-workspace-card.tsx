@@ -12,6 +12,8 @@ export type PlanWorkspaceCardProps = {
   workspaceLink?: string;
   onOpen?: () => void;
   onBuild?: () => void;
+  onBuildWithAgents?: () => void;
+  showMultiAgent?: boolean;
   buildDisabled?: boolean;
 };
 
@@ -21,6 +23,8 @@ export function PlanWorkspaceCard({
   workspaceLink,
   onOpen,
   onBuild,
+  onBuildWithAgents,
+  showMultiAgent = false,
   buildDisabled = false,
 }: PlanWorkspaceCardProps) {
   const [copied, setCopied] = useState(false);
@@ -97,6 +101,20 @@ export function PlanWorkspaceCard({
             onClick={onBuild}
           >
             {buildDisabled ? "Agent running…" : "Build plan"}
+          </button>
+        ) : null}
+        {showMultiAgent && onBuildWithAgents ? (
+          <button
+            type="button"
+            disabled={buildDisabled}
+            className={cn(
+              "rounded-md border border-border bg-background px-2 py-1 text-xs font-medium text-foreground hover:bg-muted",
+              "disabled:cursor-not-allowed disabled:opacity-50",
+            )}
+            title="Split independent work across parallel subagents"
+            onClick={onBuildWithAgents}
+          >
+            {buildDisabled ? "Agent running…" : "Build with agents"}
           </button>
         ) : null}
       </div>

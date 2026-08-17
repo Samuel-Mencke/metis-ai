@@ -37,7 +37,7 @@ function eventCategory(event: string): ChatLogCategory {
   if (event === "workspace" || event === "canvas") return "workspace";
   if (event === "stream") return "stream";
   if (event === "text" || event === "text-reset" || event === "suggestions") return "response";
-  if (event === "status" || event === "done" || event === "question") return "status";
+  if (event === "status" || event === "done" || event === "question" || event === "inactivity" || event === "heartbeat") return "status";
   return "system";
 }
 
