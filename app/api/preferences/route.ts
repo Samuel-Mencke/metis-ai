@@ -32,6 +32,7 @@ export async function PATCH(req: Request) {
     favoriteModelKeys?: unknown;
     modelAliases?: unknown;
     browserRealtime?: unknown;
+    browserFollowAgent?: unknown;
     browserFps?: unknown;
     browserViewportWidth?: unknown;
     browserViewportHeight?: unknown;
@@ -108,6 +109,8 @@ export async function PATCH(req: Request) {
     : undefined;
   const browserRealtime =
     typeof body.browserRealtime === "boolean" ? body.browserRealtime : undefined;
+  const browserFollowAgent =
+    typeof body.browserFollowAgent === "boolean" ? body.browserFollowAgent : undefined;
   const browserFps =
     typeof body.browserFps === "number" && Number.isFinite(body.browserFps)
       ? Math.max(1, Math.min(30, Math.round(body.browserFps)))
@@ -161,6 +164,7 @@ export async function PATCH(req: Request) {
         ...(favoriteModelKeys !== undefined ? { favoriteModelKeys } : {}),
         ...(modelAliases !== undefined ? { modelAliases } : {}),
         ...(browserRealtime !== undefined ? { browserRealtime } : {}),
+        ...(browserFollowAgent !== undefined ? { browserFollowAgent } : {}),
         ...(browserFps !== undefined ? { browserFps } : {}),
         ...(browserViewportWidth !== undefined ? { browserViewportWidth } : {}),
         ...(browserViewportHeight !== undefined ? { browserViewportHeight } : {}),

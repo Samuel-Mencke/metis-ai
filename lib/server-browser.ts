@@ -54,8 +54,10 @@ type BrowserResult = {
   downloadFilename?: string;
 };
 
+export type PointerKind = "click" | "drag" | "hover" | "type" | "scroll";
+
 export type BrowserEventPayload = {
-  type: "action" | "navigation" | "screenshot";
+  type: "action" | "navigation" | "screenshot" | "pointer";
   ownerId: string;
   chatId: string;
   tabId: string;
@@ -63,8 +65,49 @@ export type BrowserEventPayload = {
   title: string;
   action?: string;
   screenshot?: string;
+  // Pointer events: viewport-relative FRACTIONS (0..1) so any stream resolution scales.
+  x?: number;
+  y?: number;
+  pointerKind?: PointerKind;
+  detail?: string;
   ts: number;
 };
+
+async function recordBrowserHistory(ownerId: string, chatId: string, url: string, title: string) {
+  try {
+    const { getDatabase } = await import("@/lib/sqlite");
+    getDatabase().prepare("INSERT INTO browser_history (owner_id, chat_id, url, title, ts) VALUES (?, ?, ?, ?, ?)")
+      .run(ownerId, chatId, url, title || "", Date.now());
+  } catch {
+    // history persistence is best-effort, never break navigation
+  }
+}
+
+async function emitPointerEvent(
+  ownerId: string, chatId: string, tabId: string, page: Page,
+  kind: PointerKind, detail?: string,
+  coords?: { x?: number; y?: number }, selector?: string,
+) {
+  try {
+    let x = coords?.x;
+    let y = coords?.y;
+    if ((x === undefined || y === undefined) && selector) {
+      const box = await page.locator(selector).first().boundingBox();
+      if (box) { x = box.x + box.width / 2; y = box.y + box.height / 2; }
+    }
+    if (x === undefined || y === undefined) return;
+    const viewport = page.viewportSize() || DEFAULT_VIEWPORT;
+    emitBrowserEvent({
+      type: "pointer", ownerId, chatId, tabId, url: page.url(), title: "",
+      pointerKind: kind, detail,
+      x: Math.max(0, Math.min(1, x / viewport.width)),
+      y: Math.max(0, Math.min(1, y / viewport.height)),
+      ts: Date.now(),
+    });
+  } catch {
+    // pointer overlay is cosmetic — never break the action
+  }
+}
 
 // The custom server entrypoint (server.mjs via tsx) and the Next-bundled route
 // handlers can end up with separate module instances of this file; anchor the
@@ -241,6 +284,7 @@ function attachPageEventTracking(page: Page, ownerId: string, chatId: string, ta
       .catch(() => "")
       .then((title) => {
         emitBrowserEvent({ type: "navigation", ownerId: meta.ownerId, chatId: meta.chatId, tabId: meta.tabId, url, title, ts });
+        void recordBrowserHistory(meta.ownerId, meta.chatId, url, title);
       });
   });
 }
@@ -392,6 +436,7 @@ async function performBrowserActionUnlocked(ownerId: string, chatId: string, act
     if (action.selector) await page.locator(action.selector).first().click({ timeout: 15_000, noWaitAfter: true });
     else if (Number.isFinite(action.x) && Number.isFinite(action.y)) await page.mouse.click(action.x!, action.y!);
     else throw new Error("A selector or x/y coordinates are required for click");
+    await emitPointerEvent(ownerId, chatId, tabId, page, "click", undefined, { x: action.x, y: action.y }, action.selector);
   } else if (action.action === "type") {
     if (typeof action.text !== "string") throw new Error("Text is required");
     if (action.selector) {
@@ -401,11 +446,13 @@ async function performBrowserActionUnlocked(ownerId: string, chatId: string, act
     } else {
       await page.keyboard.insertText(action.text);
     }
+    await emitPointerEvent(ownerId, chatId, tabId, page, "type", action.text.slice(0, 40), undefined, action.selector);
   } else if (action.action === "press") {
     if (!action.key) throw new Error("A key is required");
     await page.keyboard.press(action.key);
   } else if (action.action === "scroll") {
     await page.mouse.wheel(0, Number(action.deltaY) || 600);
+    await emitPointerEvent(ownerId, chatId, tabId, page, "scroll", `Δy ${Number(action.deltaY) || 600}`);
   } else if (action.action === "resize") {
     const width = Math.max(320, Math.min(Number(action.width) || DEFAULT_VIEWPORT.width, 2560));
     const height = Math.max(240, Math.min(Number(action.height) || DEFAULT_VIEWPORT.height, 1600));
@@ -417,9 +464,11 @@ async function performBrowserActionUnlocked(ownerId: string, chatId: string, act
     await source.scrollIntoViewIfNeeded();
     await target.scrollIntoViewIfNeeded();
     await source.dragTo(target, { timeout: 15_000 });
+    await emitPointerEvent(ownerId, chatId, tabId, page, "drag", undefined, undefined, action.targetSelector);
   } else if (action.action === "hover") {
     if (!action.selector) throw new Error("A selector is required for hover");
     await page.locator(action.selector).first().hover({ timeout: 10_000 });
+    await emitPointerEvent(ownerId, chatId, tabId, page, "hover", undefined, undefined, action.selector);
   } else if (action.action === "select_option") {
     if (!action.selector || typeof action.value !== "string") throw new Error("A selector and value are required for select_option");
     await page.locator(action.selector).first().selectOption(action.value, { timeout: 10_000 });
@@ -445,8 +494,10 @@ async function performBrowserActionUnlocked(ownerId: string, chatId: string, act
 
   recordOrigin(ownerId, page.url());
   const result = await resultFor(state, tabId);
-  if (action.action === "screenshot" || action.action === "navigate" || action.action === "click" || action.action === "type" || action.action === "press" || action.action === "reload" || action.action === "back" || action.action === "forward" || action.action === "select_tab" || action.action === "scroll" || action.action === "resize" || action.action === "drag" || action.action === "hover" || action.action === "select_option" || action.action === "upload_file") {
-    result.screenshot = (await page.screenshot({ type: "png" })).toString("base64");
+  // Screenshot diet: JPEG q60, only for visually changing actions (skip hover/press).
+  const SCREENSHOT_ACTIONS = ["screenshot", "navigate", "click", "type", "reload", "back", "forward", "select_tab", "scroll", "resize", "drag", "select_option", "upload_file"];
+  if (SCREENSHOT_ACTIONS.includes(action.action)) {
+    result.screenshot = (await page.screenshot({ type: "jpeg", quality: 60 })).toString("base64");
   }
   if (action.action === "snapshot") {
     result.snapshot = (await page.locator("body").ariaSnapshot().catch(() => page.locator("body").innerText().catch(() => ""))).slice(0, MAX_SNAPSHOT_LENGTH);

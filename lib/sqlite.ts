@@ -435,6 +435,16 @@ export function getDatabase(): DatabaseSync {
     );
     CREATE INDEX IF NOT EXISTS remote_audit_owner
       ON remote_audit(owner_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS browser_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      owner_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      url TEXT NOT NULL,
+      title TEXT,
+      ts INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS browser_history_chat
+      ON browser_history(owner_id, chat_id, ts DESC);
   `);
   for (const statement of [
     "ALTER TABLE memories ADD COLUMN owner_id TEXT REFERENCES users(id) ON DELETE CASCADE",

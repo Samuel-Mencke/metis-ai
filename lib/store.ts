@@ -405,6 +405,7 @@ export type GlobalModelSettings = {
   favoriteModelKeys?: string[];
   modelAliases?: Record<string, string>;
   browserRealtime?: boolean;
+  browserFollowAgent?: boolean;
   browserFps?: number;
   browserViewportWidth?: number;
   browserViewportHeight?: number;

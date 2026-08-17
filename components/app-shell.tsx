@@ -1684,6 +1684,11 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const lastSendFingerprintRef = useRef<{ text: string; at: number }>({ text: "", at: 0 });
   const [agentBrowserActivity, setAgentBrowserActivity] = useState<Array<{ action: string; url: string; ts: number }>>([]);
   const agentBrowserActiveRef = useRef(false);
+  const [agentPointer, setAgentPointer] = useState<{ x: number; y: number; kind: string; detail?: string; ts: number } | null>(null);
+  const [browserFollowAgent, setBrowserFollowAgent] = useState(true);
+  const browserFollowAgentRef = useRef(true);
+  const [browserHistory, setBrowserHistory] = useState<Array<{ id: number; url: string; title: string | null; ts: number }>>([]);
+  const [browserHistoryOpen, setBrowserHistoryOpen] = useState(false);
   const [browserError, setBrowserError] = useState("");
   const [browserViewport, setBrowserViewport] = useState({ width: 1280, height: 800 });
   const [browserWidthInput, setBrowserWidthInput] = useState("1280");
@@ -1880,6 +1885,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const activeChatIdRef = useRef<string | null>(null);
+  const activeBrowserTabIdRef = useRef("browser-1");
   const chatCacheRef = useRef<Map<string, ChatSnapshot>>(new Map());
   const loadedChatIdsRef = useRef<Set<string>>(new Set());
   const serverSnapshotVersionRef = useRef<Map<string, string>>(new Map());
@@ -2077,7 +2083,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
 
   useEffect(() => {
     activeChatIdRef.current = activeChatId;
-  }, [activeChatId]);
+    activeBrowserTabIdRef.current = activeBrowserTabId;
+  }, [activeChatId, activeBrowserTabId]);
 
   useEffect(() => {
     if (!editingMessageId) return;
@@ -2800,18 +2807,49 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     const source = new EventSource("/api/browser/live");
     source.onmessage = (event) => {
       try {
-        const data = JSON.parse(event.data) as { type?: string; action?: string; url?: string; ts?: number };
+        const data = JSON.parse(event.data) as { type?: string; action?: string; url?: string; ts?: number; tabId?: string; x?: number; y?: number; pointerKind?: string; detail?: string };
         if (data.type === "action" || data.type === "navigation") {
           const entry = { action: data.action || data.type || "", url: data.url || "", ts: data.ts || Date.now() };
           agentBrowserActiveRef.current = true;
           setAgentBrowserActivity((current) => [...current.slice(-49), entry]);
           setWorkspaceOpen(true);
           setWorkspaceTab("browser");
+          if (browserFollowAgentRef.current && data.tabId && data.tabId !== activeBrowserTabIdRef.current) {
+            setActiveBrowserTabId(data.tabId);
+          }
+          if (data.type === "navigation" && activeChatIdRef.current) {
+            void fetch(`/api/browser/history?chatId=${encodeURIComponent(activeChatIdRef.current)}`)
+              .then((r) => (r.ok ? r.json() : null))
+              .then((d) => { if (d?.history) setBrowserHistory(d.history); })
+              .catch(() => undefined);
+          }
+        } else if (data.type === "pointer" && typeof data.x === "number" && typeof data.y === "number") {
+          setAgentPointer({ x: data.x, y: data.y, kind: data.pointerKind || "click", detail: data.detail, ts: data.ts || Date.now() });
+          if (browserFollowAgentRef.current) {
+            setWorkspaceOpen(true);
+            setWorkspaceTab("browser");
+          }
         }
       } catch { /* ignore malformed */ }
     };
     return () => source.close();
   }, []);
+
+  // Fade the agent pointer overlay out after 1.2s.
+  useEffect(() => {
+    if (!agentPointer) return;
+    const timer = window.setTimeout(() => setAgentPointer(null), 1200);
+    return () => window.clearTimeout(timer);
+  }, [agentPointer]);
+
+  // Load persisted navigation history when the browser workspace tab opens.
+  useEffect(() => {
+    if (workspaceTab !== "browser" || !activeChatId) return;
+    void fetch(`/api/browser/history?chatId=${encodeURIComponent(activeChatId)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d?.history) setBrowserHistory(d.history); })
+      .catch(() => undefined);
+  }, [workspaceTab, activeChatId]);
 
   useEffect(() => {
     if (workspaceTab !== "monitor") return;
@@ -3098,6 +3136,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           favoriteModelKeys?: string[];
           modelAliases?: Record<string, string>;
           browserRealtime?: boolean;
+          browserFollowAgent?: boolean;
           browserFps?: number;
           browserViewportWidth?: number;
           browserViewportHeight?: number;
@@ -3150,6 +3189,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         }
         if (typeof settings.browserRealtime === "boolean") {
           setBrowserRealtime(settings.browserRealtime);
+        }
+        if (typeof settings.browserFollowAgent === "boolean") {
+          setBrowserFollowAgent(settings.browserFollowAgent);
+          browserFollowAgentRef.current = settings.browserFollowAgent;
         }
         if (settings.compression) {
           setCompressionEnabled(Boolean(settings.compression.enabled));
@@ -3275,8 +3318,13 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     browserFps?: number;
     browserViewportWidth?: number;
     browserViewportHeight?: number;
+    browserFollowAgent?: boolean;
   }) {
     if (next.browserRealtime !== undefined) setBrowserRealtime(next.browserRealtime);
+    if (next.browserFollowAgent !== undefined) {
+      setBrowserFollowAgent(next.browserFollowAgent);
+      browserFollowAgentRef.current = next.browserFollowAgent;
+    }
     if (next.browserFps !== undefined) setBrowserFps(next.browserFps);
     if (next.browserViewportWidth !== undefined || next.browserViewportHeight !== undefined) {
       setBrowserDefaultViewport((current) => ({
@@ -8671,7 +8719,44 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                     ))}
                   </div>
                 ) : null}
+                {browserHistory.length > 0 ? (
+                  <div className="max-h-32 shrink-0 overflow-hidden rounded-md border border-border/60 bg-muted/20">
+                    <button
+                      type="button"
+                      onClick={() => setBrowserHistoryOpen((current) => !current)}
+                      className="flex w-full items-center justify-between px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground"
+                    >
+                      <span>History · {browserHistory.length}</span>
+                      <span>{browserHistoryOpen ? "▲" : "▼"}</span>
+                    </button>
+                    {browserHistoryOpen ? (
+                      <div className="max-h-24 overflow-y-auto px-2 pb-1">
+                        {browserHistory.map((entry) => (
+                          <button
+                            key={entry.id}
+                            type="button"
+                            onClick={() => { setBrowserInput(entry.url); void performBrowserAction("navigate", { url: entry.url }); }}
+                            className="block w-full truncate text-left text-[11px] leading-relaxed text-muted-foreground hover:text-foreground"
+                            title={entry.url}
+                          >
+                            <span className="text-foreground/70">{new Date(entry.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>{" · "}
+                            {entry.title || entry.url}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
                 <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => updateBrowserSettings({ browserFollowAgent: !browserFollowAgent })}
+                    title={browserFollowAgent ? "Following the agent's browser activity — click to browse independently" : "Browsing independently — click to follow the agent"}
+                    className={`flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] transition-colors ${browserFollowAgent ? "border-sky-500/50 bg-sky-500/10 text-sky-300" : "border-border/60 bg-transparent text-muted-foreground hover:text-foreground"}`}
+                  >
+                    <span className={`size-1.5 rounded-full ${browserFollowAgent ? "bg-sky-400" : "bg-muted-foreground/40"}`} />
+                    Follow
+                  </button>
                   <Button type="button" size="icon-xs" variant="ghost" aria-label="Back" title="Back" onClick={() => void performBrowserAction("back")}><ArrowLeft className="size-3.5" /></Button>
                   <Button type="button" size="icon-xs" variant="ghost" aria-label="Reload" title="Reload" onClick={() => void performBrowserAction("reload")}><RotateCcw className="size-3.5" /></Button>
                   <Button type="button" size="icon-xs" variant="ghost" aria-label={workspaceFullscreen ? "Exit workspace fullscreen" : "Open workspace fullscreen"} title={workspaceFullscreen ? "Exit workspace fullscreen" : "Open workspace fullscreen"} onClick={() => setWorkspaceFullscreen((current) => !current)}>
@@ -8716,6 +8801,25 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                     className="hidden w-full cursor-crosshair"
                     onClick={clickBrowserScreenshot}
                   />
+                  {agentPointer ? (
+                    <div
+                      className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-1/2 transition-opacity duration-300"
+                      style={{ left: `${(agentPointer.x * 100).toFixed(2)}%`, top: `${(agentPointer.y * 100).toFixed(2)}%` }}
+                    >
+                      <div className="relative flex size-6 items-center justify-center rounded-full border-2 border-sky-400/90 bg-sky-400/15 shadow-[0_0_8px_rgba(56,189,248,0.5)]">
+                        {agentPointer.kind === "click" ? <div className="size-1.5 rounded-full bg-sky-400" /> : null}
+                        {agentPointer.kind === "type" ? <span className="text-[9px] leading-none text-sky-300">⌨</span> : null}
+                        {agentPointer.kind === "scroll" ? <span className="text-[9px] leading-none text-sky-300">↕</span> : null}
+                        {agentPointer.kind === "drag" ? <span className="text-[9px] leading-none text-sky-300">⇄</span> : null}
+                        {agentPointer.kind === "hover" ? <div className="size-1 rounded-full border border-sky-300/80" /> : null}
+                      </div>
+                      {agentPointer.kind !== "hover" ? (
+                        <span className="absolute left-1/2 top-full mt-1 -translate-x-1/2 whitespace-nowrap rounded bg-zinc-950/90 px-1.5 py-0.5 text-[9px] font-medium text-sky-300 ring-1 ring-sky-400/40">
+                          {agentPointer.kind === "type" ? `typing${agentPointer.detail ? `: ${agentPointer.detail}` : "…"}` : agentPointer.kind}
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <div
                     ref={browserScreenshotPlaceholderRef}
                     className="flex h-full min-h-48 items-center justify-center px-6 text-center text-xs text-muted-foreground"
