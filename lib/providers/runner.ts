@@ -43,6 +43,8 @@ import { runOfficialAntigravityJob } from "@/lib/providers/official-antigravity"
 import type { AgentJob } from "@/lib/jobs";
 import { getMcpServers } from "@/lib/mcp";
 import { allModes, modeById } from "@/lib/modes";
+import { compress } from "@/lib/compression";
+import { contextWindowForModel } from "@/lib/context-window";
 
 type Usage = {
   inputTokens?: number;
@@ -180,7 +182,7 @@ function providerPrompt(job: AgentJob) {
   ].filter(Boolean).join("\n\n");
 }
 
-function modelMessages(chat: Chat, job: AgentJob): ModelMessage[] {
+function modelMessages(chat: Chat, job: AgentJob, contextWindow?: number): ModelMessage[] {
   const messages: ModelMessage[] = [];
   for (const message of chat.messages) {
     const content = message.content.trim();
@@ -190,7 +192,53 @@ function modelMessages(chat: Chat, job: AgentJob): ModelMessage[] {
   if (!messages.some((message) => message.role === "user")) {
     messages.push({ role: "user", content: job.message || "Please respond." });
   }
-  return messages;
+  return compactIfNeeded(messages, contextWindow);
+}
+
+/**
+ * Auto-compaction: when the estimated token footprint of the history
+ * approaches the model's context window, older messages are compressed
+ * (tool-output style compaction keeps errors/summaries) so the run never
+ * trips over the provider's input limit. The last few exchanges stay intact.
+ */
+/** Resolve the effective context window for the job's model (catalog value
+ *  first, family inference fallback). Returns undefined when unknown —
+ *  compaction is then skipped rather than guessing. */
+function resolvedContextWindow(context: ProviderContext): number | undefined {
+  try {
+    return contextWindowForModel({ id: context.modelId });
+  } catch {
+    return undefined;
+  }
+}
+
+function compactIfNeeded(messages: ModelMessage[], contextWindow?: number): ModelMessage[] {
+  if (!contextWindow || contextWindow <= 0 || messages.length < 6) return messages;
+  const approxTokens = (value: string) => Math.ceil(value.length / 4);
+  const total = messages.reduce((sum, message) => sum + approxTokens(String(message.content || "")), 0);
+  const budget = Math.floor(contextWindow * 0.7);
+  if (total <= budget) return messages;
+  // Keep the most recent messages (last ~30% of the window) verbatim and
+  // compress everything before them into a single compact recap.
+  const protectedTail: ModelMessage[] = [];
+  let tailTokens = 0;
+  let index = messages.length;
+  while (index > 0 && tailTokens < Math.floor(contextWindow * 0.35)) {
+    index -= 1;
+    const message = messages[index];
+    protectedTail.unshift(message);
+    tailTokens += approxTokens(String(message.content || ""));
+  }
+  const head = messages.slice(0, index);
+  if (!head.length) return messages;
+  const recap = head
+    .map((message) => compress(`${message.role}: ${message.content}`, "stacked"))
+    .join("\n")
+    .slice(0, Math.floor(contextWindow * 0.25) * 4);
+  return [
+    { role: "user", content: `Compressed conversation history (older messages were auto-compacted to fit the context window):\n${recap}` },
+    ...protectedTail,
+  ];
 }
 
 function aiModel(
@@ -360,7 +408,7 @@ async function runAiSdk(context: ProviderContext): Promise<ProviderResult> {
   const result = streamText({
     model: aiModel(context.connection.providerKey, context.modelId, context.connection),
     instructions: providerPrompt(context.job),
-    messages: modelMessages(context.chat, context.job),
+    messages: modelMessages(context.chat, context.job, resolvedContextWindow(context)),
     tools,
     stopWhen: stepCountIs(50),
     abortSignal: context.signal,
@@ -399,7 +447,7 @@ async function runOAuthAiSdk(
     const result = streamText({
       model: provider.languageModel(oauthModelId),
       instructions: providerPrompt(context.job),
-      messages: modelMessages(context.chat, context.job),
+      messages: modelMessages(context.chat, context.job, resolvedContextWindow(context)),
       tools: oauthTools,
       stopWhen: stepCountIs(50),
       abortSignal: context.signal,

@@ -26,12 +26,11 @@ const TIERS_200K_1M: ContextTier[] = [
 ];
 
 const KNOWN_TIERS: Array<{ test: RegExp; tiers: ContextTier[] }> = [
-  // GLM 5.x ships a 200K default and a paid 1M long-context variant.
-  { test: /\bglm-?5/i, tiers: TIERS_200K_1M },
-  // GLM 4.6/4.7 similarly expose 200K and 1M context tiers.
-  { test: /\bglm-?4\.[6-9]/i, tiers: TIERS_200K_1M },
-  // z.ai coding-plan GLM aliases (glm5.2, glm5.1, glm5-turbo).
-  { test: /\bglm-?5\.\d|\bglm5/i, tiers: TIERS_200K_1M },
+  // NOTE: intentionally no GLM entries — z.ai GLM models expose a single
+  // context window per model id; suffix variants like "-1m" are rejected by
+  // the API. Only families with REAL selectable tiers belong here.
+  // Gemini ships real long-context variants (e.g. gemini-1.5/2.5-pro).
+  { test: /\bgemini-(1\.5|2\.5)-pro\b/i, tiers: TIERS_200K_1M },
 ];
 
 const TIER_SUFFIX_PATTERN = /-(200k|1m)$/i;
