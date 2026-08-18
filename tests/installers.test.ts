@@ -108,6 +108,14 @@ test("windows installer installs pnpm into the install directory instead of Prog
   assert.doesNotMatch(windows, /corepack prepare pnpm/);
 });
 
+test("windows services start with an absolute node path and short cmd wrappers", () => {
+  const windows = readFileSync(path.join(root, "install", "windows.ps1"), "utf8");
+  assert.match(windows, /METIS_NODE_BIN=/);
+  assert.match(windows, /\$env:METIS_NODE_BIN/);
+  assert.match(windows, /run-\$suffix\.cmd/);
+  assert.match(windows, /for \(\$attempt = 0; \$attempt -lt 45;/);
+});
+
 test("README documents the bootstrap one-liner rather than curling platform scripts into bash", () => {
   const readme = readFileSync(path.join(root, "README.md"), "utf8");
   assert.match(readme, /\/bin\/bash -c "\$\(curl -fsSL https:\/\/raw\.githubusercontent\.com\/f1shyondrugs\/metis-ai\/master\/install\.sh\)"/);

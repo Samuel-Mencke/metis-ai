@@ -190,8 +190,9 @@ $chatPassword = & $randomHex
 $secretsKey = & $randomHex
 $mcpToken = & $randomHex
 
+$nodeBin = (Get-Command node).Source
 New-Item -ItemType Directory -Force -Path $dataDir, $agentCwd | Out-Null
-@"
+$envLines = @"
 APP_NAME=Metis AI
 PORT=$port
 AI_CHAT_HOST=$aiChatHost
@@ -211,7 +212,10 @@ MCP_BEARER_TOKEN=$mcpToken
 MCP_ALLOW_REMOTE_ADMIN=false
 MCP_ENABLE_REMOTE_SERVERS=false
 MCP_ENABLE_OPTIONAL_SERVERS=false
-"@ | Set-Content -LiteralPath (Join-Path $InstallDir ".env") -Encoding utf8
+METIS_NODE_BIN=$nodeBin
+"@
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+[System.IO.File]::WriteAllText((Join-Path $InstallDir ".env"), $envLines.Trim() + [Environment]::NewLine, $utf8NoBom)
 
 Push-Location $InstallDir
 try {
@@ -234,40 +238,44 @@ try {
 $runner = Join-Path $InstallDir "run-service.ps1"
 @"
 `$ErrorActionPreference = "Stop"
-Get-Content (Join-Path `$PSScriptRoot ".env") | Where-Object { `$_ -and -not `$_.StartsWith("#") } | ForEach-Object {
+Get-Content -LiteralPath (Join-Path `$PSScriptRoot ".env") | Where-Object { `$_ -and -not `$_.StartsWith("#") } | ForEach-Object {
   `$pair = `$_ -split "=", 2
-  if (`$pair.Count -eq 2) { [Environment]::SetEnvironmentVariable(`$pair[0], `$pair[1], "Process") }
+  if (`$pair.Count -eq 2) { [Environment]::SetEnvironmentVariable(`$pair[0].Trim([char]0xFEFF), `$pair[1], "Process") }
 }
 Set-Location `$PSScriptRoot
-& (Get-Command node).Source @args
-"@ | Set-Content -LiteralPath $runner -Encoding utf8
+`$node = `$env:METIS_NODE_BIN
+if (-not `$node -or -not (Test-Path -LiteralPath `$node)) { `$node = (Get-Command node).Source }
+& `$node @args
+"@ | Set-Content -LiteralPath $runner -Encoding ascii
 
 foreach ($suffix in @("app", "worker", "mcp")) {
   $taskName = "$serviceName-$suffix"
-  try {
-    schtasks.exe /Query /TN $taskName 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-      schtasks.exe /Delete /TN $taskName /F 2>&1 | Out-Null
-    }
-  } catch {
-    # The task does not exist on a first installation.
+  cmd.exe /c "schtasks /Query /TN `"$taskName`" >nul 2>&1"
+  if ($LASTEXITCODE -eq 0) {
+    cmd.exe /c "schtasks /Delete /TN `"$taskName`" /F >nul 2>&1"
   }
   $targetArgs = switch ($suffix) {
     "app" { @("node_modules/tsx/dist/cli.mjs", "server.mjs") }
     "worker" { @("node_modules/tsx/dist/cli.mjs", "worker.ts") }
     default { @("lib/mcp-core/gateway-core.mjs") }
   }
-  $quotedTargetArgs = ($targetArgs | ForEach-Object { "`"$_`"" }) -join " "
-  $action = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$runner`" $quotedTargetArgs"
-  schtasks /Create /TN $taskName /SC ONLOGON /TR $action /F | Out-Null
-  schtasks /Run /TN $taskName | Out-Null
+  $cmdPath = Join-Path $InstallDir "run-$suffix.cmd"
+  $cmdArgs = ($targetArgs | ForEach-Object { "`"$_`"" }) -join " "
+  @(
+    "@echo off",
+    "cd /d `"%~dp0`"",
+    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"%~dp0run-service.ps1`" $cmdArgs"
+  ) -join "`r`n" | Set-Content -LiteralPath $cmdPath -Encoding ascii
+  $create = cmd.exe /c "schtasks /Create /TN `"$taskName`" /SC ONLOGON /TR `"$cmdPath`" /F"
+  if ($LASTEXITCODE -ne 0) { throw "Failed to create scheduled task ${taskName}: $create" }
+  cmd.exe /c "schtasks /Run /TN `"$taskName`"" | Out-Null
 }
-for ($attempt = 0; $attempt -lt 20; $attempt++) {
+for ($attempt = 0; $attempt -lt 45; $attempt++) {
   try {
     Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/api/status" -TimeoutSec 2 | Out-Null
     break
   } catch {
-    if ($attempt -eq 19) { throw "The application did not become healthy." }
+    if ($attempt -eq 44) { throw "The application did not become healthy." }
     Start-Sleep -Seconds 1
   }
 }

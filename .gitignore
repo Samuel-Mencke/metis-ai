@@ -11,6 +11,7 @@ data
 *.sqlite
 *.sqlite-*
 *.log
+.metis-ai-install.json
 .DS_Store
 __pycache__/
 *.py[cod]
