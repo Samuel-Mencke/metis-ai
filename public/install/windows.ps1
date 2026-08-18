@@ -150,15 +150,6 @@ if (-not $SkipRuntimeInstall) {
 }
 Require-Command git
 if ((Get-NodeMajor) -lt 22) { throw "Node.js 22 or newer is required." }
-$pnpmCommand = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
-if (-not $pnpmCommand) {
-  $corepackCommand = (Get-Command corepack.cmd -ErrorAction SilentlyContinue).Source
-  if (-not $corepackCommand) { throw "corepack is required to install pnpm." }
-  & $corepackCommand enable
-  & $corepackCommand prepare pnpm@9 --activate
-  $pnpmCommand = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
-}
-if (-not $pnpmCommand) { throw "pnpm is required." }
 
 if (Test-Path (Join-Path $InstallDir ".git")) {
   git -C $InstallDir pull --ff-only
@@ -168,6 +159,31 @@ if (Test-Path (Join-Path $InstallDir ".git")) {
   New-Item -ItemType Directory -Force -Path (Split-Path $InstallDir) | Out-Null
   git clone $RepoUrl $InstallDir
 }
+
+function Get-PnpmCommand {
+  $existing = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
+  if ($existing) { return $existing }
+  $runtimePrefix = Join-Path $InstallDir ".runtime"
+  $candidates = @(
+    (Join-Path $runtimePrefix "pnpm.cmd"),
+    (Join-Path $runtimePrefix "node_modules\.bin\pnpm.cmd")
+  )
+  foreach ($candidate in $candidates) {
+    if (Test-Path -LiteralPath $candidate) { return $candidate }
+  }
+  $npmCommand = (Get-Command npm.cmd -ErrorAction SilentlyContinue).Source
+  if (-not $npmCommand) { throw "npm is required to install pnpm without Administrator access." }
+  New-Item -ItemType Directory -Force -Path $runtimePrefix | Out-Null
+  & $npmCommand install --global --prefix $runtimePrefix pnpm@9
+  $env:Path = "$runtimePrefix;$runtimePrefix\node_modules\.bin;" + $env:Path
+  foreach ($candidate in $candidates) {
+    if (Test-Path -LiteralPath $candidate) { return $candidate }
+  }
+  $refreshed = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
+  if ($refreshed) { return $refreshed }
+  throw "pnpm is required."
+}
+$pnpmCommand = Get-PnpmCommand
 
 $randomHex = { -join (1..32 | ForEach-Object { "{0:x2}" -f (Get-Random -Maximum 256) }) }
 $chatPassword = & $randomHex
