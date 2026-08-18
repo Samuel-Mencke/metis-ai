@@ -38,6 +38,7 @@ websocketServer.on("error", (error) => {
     stack: error.stack,
   });
 });
+const remoteClientWebsocketServer = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 remoteClientWebsocketServer.on("error", (error) => {
   logError({
     level: "error",
@@ -46,7 +47,6 @@ remoteClientWebsocketServer.on("error", (error) => {
     stack: error.stack,
   });
 });
-const remoteClientWebsocketServer = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 const browserStreamSubscribers = new Map();
 
 function streamUrl(request) {
