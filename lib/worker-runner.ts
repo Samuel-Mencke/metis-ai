@@ -826,6 +826,38 @@ export async function runQueuedJob(job: AgentJob) {
                 ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
               }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be created within 90 seconds.");
             }
+            if (/already has active run|InvalidRunStateTransition/i.test(messageText)) {
+              // The persisted agent still has a live/locked run (crashed worker,
+              // concurrent send). Retry resume once after a short grace period,
+              // then start a fresh session instead of failing the job.
+              appendRunEvent(job.id, job.chatId, job.userId, "info", {
+                message: "Agent session still had an active run; retrying once before starting a new session.",
+              });
+              await new Promise((resolve) => setTimeout(resolve, 3_000));
+              try {
+                return await withTimeout(Agent.resume(job.agentId || chat.agentId!, {
+                  apiKey,
+                  model,
+                  local: { cwd: agentCwd, settingSources: ["project"] },
+                  ...(nativeTools ? { tools: nativeTools } : {}),
+                  mcpServers: getMcpServers(mcpContext),
+                  ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
+                }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be resumed within 90 seconds.");
+              } catch (retryError) {
+                appendRunEvent(job.id, job.chatId, job.userId, "info", {
+                  message: "Active run did not clear; starting a new agent session.",
+                });
+                updateChat(job.chatId, { agentId: null }, job.userId);
+                return await withTimeout(Agent.create({
+                  apiKey,
+                  model,
+                  local: { cwd: agentCwd, settingSources: ["project"] },
+                  ...(nativeTools ? { tools: nativeTools } : {}),
+                  mcpServers: getMcpServers(mcpContext),
+                  ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
+                }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be created within 90 seconds.");
+              }
+            }
             throw resumeError;
           }
         })()
