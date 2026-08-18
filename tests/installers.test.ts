@@ -110,10 +110,16 @@ test("windows installer installs pnpm into the install directory instead of Prog
 
 test("windows services start with an absolute node path and short cmd wrappers", () => {
   const windows = readFileSync(path.join(root, "install", "windows.ps1"), "utf8");
+  const uninstall = readFileSync(path.join(root, "install", "uninstall.ps1"), "utf8");
   assert.match(windows, /METIS_NODE_BIN=/);
   assert.match(windows, /\$env:METIS_NODE_BIN/);
   assert.match(windows, /run-\$suffix\.cmd/);
+  assert.match(windows, /HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run/);
+  assert.match(windows, /Start-Process/);
   assert.match(windows, /for \(\$attempt = 0; \$attempt -lt 45;/);
+  assert.doesNotMatch(windows, /throw "Failed to create scheduled task/);
+  assert.match(uninstall, /Remove-ItemProperty/);
+  assert.match(uninstall, /Stop-Process/);
 });
 
 test("README documents the bootstrap one-liner rather than curling platform scripts into bash", () => {

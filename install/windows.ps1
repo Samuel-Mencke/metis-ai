@@ -248,12 +248,11 @@ if (-not `$node -or -not (Test-Path -LiteralPath `$node)) { `$node = (Get-Comman
 & `$node @args
 "@ | Set-Content -LiteralPath $runner -Encoding ascii
 
+$runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+New-Item -Path $runKey -Force | Out-Null
+$powershellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 foreach ($suffix in @("app", "worker", "mcp")) {
   $taskName = "$serviceName-$suffix"
-  cmd.exe /c "schtasks /Query /TN `"$taskName`" >nul 2>&1"
-  if ($LASTEXITCODE -eq 0) {
-    cmd.exe /c "schtasks /Delete /TN `"$taskName`" /F >nul 2>&1"
-  }
   $targetArgs = switch ($suffix) {
     "app" { @("node_modules/tsx/dist/cli.mjs", "server.mjs") }
     "worker" { @("node_modules/tsx/dist/cli.mjs", "worker.ts") }
@@ -266,9 +265,8 @@ foreach ($suffix in @("app", "worker", "mcp")) {
     "cd /d `"%~dp0`"",
     "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"%~dp0run-service.ps1`" $cmdArgs"
   ) -join "`r`n" | Set-Content -LiteralPath $cmdPath -Encoding ascii
-  $create = cmd.exe /c "schtasks /Create /TN `"$taskName`" /SC ONLOGON /TR `"$cmdPath`" /F"
-  if ($LASTEXITCODE -ne 0) { throw "Failed to create scheduled task ${taskName}: $create" }
-  cmd.exe /c "schtasks /Run /TN `"$taskName`"" | Out-Null
+  Set-ItemProperty -Path $runKey -Name $taskName -Value "`"$cmdPath`""
+  Start-Process -FilePath $powershellExe -WorkingDirectory $InstallDir -WindowStyle Hidden -ArgumentList (@("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runner) + $targetArgs)
 }
 for ($attempt = 0; $attempt -lt 45; $attempt++) {
   try {
