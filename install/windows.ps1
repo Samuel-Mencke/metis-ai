@@ -162,28 +162,28 @@ if (Test-Path (Join-Path $InstallDir ".git")) {
 
 function Get-PnpmCommand {
   $existing = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
-  if ($existing) { return $existing }
+  if ($existing) { return [string]$existing }
   $runtimePrefix = Join-Path $InstallDir ".runtime"
   $candidates = @(
     (Join-Path $runtimePrefix "pnpm.cmd"),
     (Join-Path $runtimePrefix "node_modules\.bin\pnpm.cmd")
   )
   foreach ($candidate in $candidates) {
-    if (Test-Path -LiteralPath $candidate) { return $candidate }
+    if (Test-Path -LiteralPath $candidate) { return [string]$candidate }
   }
   $npmCommand = (Get-Command npm.cmd -ErrorAction SilentlyContinue).Source
   if (-not $npmCommand) { throw "npm is required to install pnpm without Administrator access." }
   New-Item -ItemType Directory -Force -Path $runtimePrefix | Out-Null
-  & $npmCommand install --global --prefix $runtimePrefix pnpm@9
+  & $npmCommand install --global --prefix $runtimePrefix pnpm@9 | Out-Null
   $env:Path = "$runtimePrefix;$runtimePrefix\node_modules\.bin;" + $env:Path
   foreach ($candidate in $candidates) {
-    if (Test-Path -LiteralPath $candidate) { return $candidate }
+    if (Test-Path -LiteralPath $candidate) { return [string]$candidate }
   }
   $refreshed = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
-  if ($refreshed) { return $refreshed }
+  if ($refreshed) { return [string]$refreshed }
   throw "pnpm is required."
 }
-$pnpmCommand = Get-PnpmCommand
+$pnpmCommand = [string](Get-PnpmCommand)
 
 $randomHex = { -join (1..32 | ForEach-Object { "{0:x2}" -f (Get-Random -Maximum 256) }) }
 $chatPassword = & $randomHex

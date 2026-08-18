@@ -104,7 +104,7 @@ test("platform installers collect configuration before side effects and support 
 test("windows installer installs pnpm into the install directory instead of Program Files", () => {
   const windows = readFileSync(path.join(root, "install", "windows.ps1"), "utf8");
   assert.match(windows, /Get-PnpmCommand/);
-  assert.match(windows, /--prefix \$runtimePrefix pnpm@9/);
+  assert.match(windows, /--prefix \$runtimePrefix pnpm@9 \| Out-Null/);
   assert.doesNotMatch(windows, /corepack prepare pnpm/);
 });
 
