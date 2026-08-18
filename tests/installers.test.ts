@@ -8,17 +8,48 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const installerDir = path.join(root, "public", "install");
 
 test("all platform installers and uninstallers are published", () => {
-  for (const file of ["linux.sh", "macos.sh", "windows.ps1", "uninstall.sh", "uninstall-macos.sh", "uninstall.ps1", "manifest.json"]) {
+  for (const file of [
+    "linux.sh",
+    "macos.sh",
+    "windows.ps1",
+    "uninstall.sh",
+    "uninstall-macos.sh",
+    "uninstall.ps1",
+    "manifest.json",
+    "install.sh",
+    "install.ps1",
+  ]) {
     assert.equal(existsSync(path.join(installerDir, file)), true, file);
   }
+  assert.equal(existsSync(path.join(root, "install.sh")), true, "root install.sh");
+  assert.equal(existsSync(path.join(root, "install.ps1")), true, "root install.ps1");
+});
+
+test("published installers match the install/ sources", () => {
+  for (const file of ["linux.sh", "macos.sh", "windows.ps1", "uninstall.sh", "uninstall-macos.sh", "uninstall.ps1"]) {
+    const source = readFileSync(path.join(root, "install", file), "utf8");
+    const published = readFileSync(path.join(installerDir, file), "utf8");
+    assert.equal(published, source, file);
+  }
+  assert.equal(readFileSync(path.join(installerDir, "install.sh"), "utf8"), readFileSync(path.join(root, "install.sh"), "utf8"));
+  assert.equal(readFileSync(path.join(installerDir, "install.ps1"), "utf8"), readFileSync(path.join(root, "install.ps1"), "utf8"));
 });
 
 test("installer sources do not contain this deployment's machine path", () => {
-  const files = ["linux.sh", "macos.sh", "windows.ps1", "uninstall.sh", "uninstall-macos.sh", "uninstall.ps1"];
+  const files = [
+    "install.sh",
+    "install.ps1",
+    path.join("install", "linux.sh"),
+    path.join("install", "macos.sh"),
+    path.join("install", "windows.ps1"),
+    path.join("install", "uninstall.sh"),
+    path.join("install", "uninstall-macos.sh"),
+    path.join("install", "uninstall.ps1"),
+  ];
   const localPath = ["/home", "f1shy312"].join("/");
   const localDomain = ["metis-ai", "f1shy312.com"].join(".");
   for (const file of files) {
-    const content = readFileSync(path.join(installerDir, file), "utf8");
+    const content = readFileSync(path.join(root, file), "utf8");
     assert.equal(content.includes(localPath), false, file);
     assert.equal(content.includes(localDomain), false, file);
   }
@@ -34,4 +65,47 @@ test("all platform installers expose an explicit network-host option", () => {
       assert.match(source, /0\.0\.0\.0/);
     }
   }
+});
+
+test("unix bootstrap downloads a file then execs it instead of running from a pipe", () => {
+  const bootstrap = readFileSync(path.join(root, "install.sh"), "utf8");
+  assert.match(bootstrap, /metis_install\(\)/);
+  assert.match(bootstrap, /mktemp/);
+  assert.match(bootstrap, /exec \/bin\/bash "\$tmp"/);
+  assert.match(bootstrap, /\/bin\/bash -c "\$\(curl/);
+  assert.doesNotMatch(bootstrap, /\| bash -s/);
+});
+
+test("windows bootstrap has no param\(\) so irm \| iex is valid", () => {
+  const bootstrap = readFileSync(path.join(root, "install.ps1"), "utf8");
+  assert.equal(/^\s*param\s*\(/m.test(bootstrap), false);
+  assert.match(bootstrap, /Invoke-WebRequest/);
+  assert.match(bootstrap, /-File \$dest/);
+  const windows = readFileSync(path.join(root, "install", "windows.ps1"), "utf8");
+  assert.match(windows, /^\s*param\s*\(/m);
+  assert.match(windows, /must be invoked with powershell -File/);
+});
+
+test("platform installers collect configuration before side effects and support dry-run", () => {
+  for (const file of ["linux.sh", "macos.sh"]) {
+    const content = readFileSync(path.join(root, "install", file), "utf8");
+    assert.match(content, /can_prompt/);
+    assert.match(content, /--dry-run/);
+    assert.match(content, /run-service\.sh/);
+    const dryRunAt = content.indexOf("if (( dry_run ))");
+    const cloneAt = content.indexOf("git clone");
+    assert.ok(dryRunAt >= 0 && cloneAt > dryRunAt, `${file} must dry-run before clone`);
+  }
+  const windows = readFileSync(path.join(root, "install", "windows.ps1"), "utf8");
+  assert.match(windows, /\$DryRun/);
+  assert.match(windows, /run-service\.ps1/);
+});
+
+test("README documents the bootstrap one-liner rather than curling platform scripts into bash", () => {
+  const readme = readFileSync(path.join(root, "README.md"), "utf8");
+  assert.match(readme, /\/bin\/bash -c "\$\(curl -fsSL https:\/\/raw\.githubusercontent\.com\/f1shyondrugs\/metis-ai\/master\/install\.sh\)"/);
+  assert.match(readme, /irm https:\/\/raw\.githubusercontent\.com\/f1shyondrugs\/metis-ai\/master\/install\.ps1 \| iex/);
+  assert.doesNotMatch(readme, /install\/linux\.sh \| bash/);
+  assert.doesNotMatch(readme, /install\/macos\.sh \| bash/);
+  assert.doesNotMatch(readme, /install\/windows\.ps1 \| iex/);
 });
