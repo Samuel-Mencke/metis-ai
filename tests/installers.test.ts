@@ -120,6 +120,7 @@ test("windows services start with an absolute node path and short cmd wrappers",
   assert.doesNotMatch(windows, /throw "Failed to create scheduled task/);
   assert.match(uninstall, /Remove-ItemProperty/);
   assert.match(uninstall, /Stop-Process/);
+  assert.match(uninstall, /cmd\.exe \/c "schtasks \/Delete/);
 });
 
 test("README documents the bootstrap one-liner rather than curling platform scripts into bash", () => {

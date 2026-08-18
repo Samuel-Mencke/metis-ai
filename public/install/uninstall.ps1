@@ -25,7 +25,7 @@ $rootNorm = [IO.Path]::GetFullPath($InstallDir).TrimEnd("\")
 foreach ($suffix in @("app", "worker", "mcp")) {
   $task = "$($manifest.serviceName)-$suffix"
   Invoke-Step { Remove-ItemProperty -LiteralPath $runKey -Name $task -ErrorAction SilentlyContinue } "Remove startup entry $task"
-  Invoke-Step { schtasks /Delete /TN $task /F 2>$null | Out-Null } "Delete scheduled task $task"
+  Invoke-Step { cmd.exe /c "schtasks /Delete /TN `"$task`" /F >nul 2>&1" } "Delete scheduled task $task"
 }
 Invoke-Step {
   Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
