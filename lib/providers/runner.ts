@@ -392,8 +392,10 @@ function modeMcpEnv(context: ProviderContext): Record<string, string> {
 
 async function agentToolsFor(context: ProviderContext): Promise<ToolSet> {
   const mode = modeById(context.chat.sessionState?.modeId);
-  const canRemote = mode.allowedCategories.includes("remote");
-  if (!canRemote) return {};
+  // The gateway enforces the mode policy server-side (MCP_MODE_POLICY env),
+  // so Plan/Ask modes get the bridged tool set too — restricted to their
+  // allowed categories by the gateway itself. The old `if (!canRemote) return {}`
+  // left Plan/Ask with ZERO tools on OpenAI-compatible providers.
   try {
     const bridged = await mcpBridgeTools(modeMcpEnv(context));
     return { ...bridged, ...contextHubTools({ allowWrite: mode.allowedCategories.includes("memory") }) };

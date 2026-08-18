@@ -18,6 +18,7 @@ export type McpBridgeTool = { name: string; description?: string; inputSchema?: 
 type GatewayProcess = {
   proc: ReturnType<typeof spawn>;
   requestId: number;
+  initialized: boolean;
   pending: Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>;
 };
 
@@ -34,7 +35,7 @@ function startGateway(env: Record<string, string>): GatewayProcess {
     env: { ...process.env, ...env },
     stdio: ["pipe", "pipe", "pipe"],
   });
-  const gateway: GatewayProcess = { proc, requestId: 0, pending: new Map() };
+  const gateway: GatewayProcess = { proc, requestId: 0, initialized: false, pending: new Map() };
   let buffer = "";
   proc.stdout.on("data", (chunk) => {
     buffer += String(chunk);
@@ -67,6 +68,7 @@ function startGateway(env: Record<string, string>): GatewayProcess {
       clearTimeout(pending.timer);
     }
     gateway.pending.clear();
+    gateway.initialized = false;
     if (startedProcesses.get(key) === gateway) startedProcesses.delete(key);
   });
   startedProcesses.set(key, gateway);
@@ -87,12 +89,24 @@ function callGateway(gateway: GatewayProcess, method: string, params: Record<str
 
 async function withFreshGateway<T>(env: Record<string, string>, fn: (gateway: GatewayProcess) => Promise<T>): Promise<T> {
   const gateway = startGateway(env);
+  // Initialize exactly once per gateway process — the process is reused across
+  // tool calls, so re-running the handshake per call is pure spawn tax.
+  if (!gateway.initialized) {
+    await callGateway(gateway, "initialize", INIT_PARAMS, 20_000);
+    gateway.proc.stdin?.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+    gateway.initialized = true;
+  }
   try {
     return await fn(gateway);
   } catch (error) {
     // Restart once on a dead process so long-lived worker jobs recover.
     if (gateway.proc.exitCode !== null) {
       const fresh = startGateway(env);
+      if (!fresh.initialized) {
+        await callGateway(fresh, "initialize", INIT_PARAMS, 20_000);
+        fresh.proc.stdin?.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+        fresh.initialized = true;
+      }
       return await fn(fresh);
     }
     throw error;
@@ -116,8 +130,6 @@ export async function mcpBridgeTools(
   options: { include?: string[]; exclude?: string[] } = {},
 ): Promise<ToolSet> {
   const definitions = await withFreshGateway(env, async (gateway) => {
-    await callGateway(gateway, "initialize", INIT_PARAMS, 20_000);
-    gateway.proc.stdin?.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
     const result = await callGateway(gateway, "tools/list", {}, 20_000) as { tools?: McpBridgeTool[] };
     return result?.tools || [];
   });
@@ -130,8 +142,6 @@ export async function mcpBridgeTools(
     if (include && !include.has(definition.name)) continue;
     const bridgedExecute = async (args: Record<string, unknown>) => {
       const result = await withFreshGateway(env, async (gateway) => {
-        await callGateway(gateway, "initialize", INIT_PARAMS, 20_000);
-        gateway.proc.stdin?.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
         return callGateway(gateway, "tools/call", { name: definition.name, arguments: args || {} }, 300_000);
       });
       const record = result as { content?: Array<{ type?: string; text?: string }> };
