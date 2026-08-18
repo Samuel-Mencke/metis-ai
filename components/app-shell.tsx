@@ -1613,6 +1613,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const routeView = searchParams.get("view");
   const [authed, setAuthed] = useState<boolean | null>(null);
   const authedRef = useRef<boolean | null>(null);
+
+  useEffect(() => {
+    installGlobalClientTelemetry();
+  }, []);
   const [username, setUsername] = useState(clientConfig.username);
   const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState("");
@@ -1756,6 +1760,18 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [editValue, setEditValue] = useState("");
 
   const [input, setInput] = useState("");
+  const setInputGuarded = useCallback((value: string) => {
+    setInput((prev) => {
+      if (prev && !value) {
+        reportUxEvent("composer_reset_while_nonempty", {
+          prevLength: prev.length,
+          busy: busyRef.current,
+        });
+      }
+      return value;
+    });
+  }, []);
+  const busyRef = useRef(false);
   const [composerMultiline, setComposerMultiline] = useState(false);
   const [references, setReferences] = useState<ReferenceItem[]>([]);
   const [referenceMenu, setReferenceMenu] = useState<{
@@ -1772,6 +1788,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [selectionAction, setSelectionAction] = useState<{ text: string; x: number; y: number } | null>(null);
   const [composerHeight, setComposerHeight] = useState(0);
   const [busy, setBusy] = useState(false);
+  const setBusySynced = useCallback((value: boolean) => {
+    busyRef.current = value;
+    setBusy(value);
+  }, []);
   const [runningChatIds, setRunningChatIds] = useState<string[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
   const [draggedQueueId, setDraggedQueueId] = useState<string | null>(null);
@@ -3480,7 +3500,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     setBrowserInput(activeTab?.url || "");
     setLiveStatus("");
     if (snap.queueMessage) setLiveStatus(snap.queueMessage);
-    setBusy(
+    setBusySynced(
       Boolean(
         runtimeRef.current.has(id) ||
           snap.runStatus === "running" ||
@@ -3504,7 +3524,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       setAutomationsOpen(false);
       const previousChatId = activeChatIdRef.current;
       persistActiveSnapshot();
-      setBusy(Boolean(previousChatId && runtimeRef.current.has(previousChatId)));
+      setBusySynced(Boolean(previousChatId && runtimeRef.current.has(previousChatId)));
       setAttentionChatIds((current) => current.filter((id) => id !== previousChatId));
       activeChatIdRef.current = null;
       if (!opts?.skipNav) navigateChat(null);
@@ -3530,7 +3550,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       }
       setActiveChatIncognito(false);
       setIncognito(false);
-      setBusy(false);
+      setBusySynced(false);
       setChatTitle("New chat");
       setModeId("agent");
       setAgentId(undefined);
@@ -3625,7 +3645,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       setActiveWorkspaceId(null);
       setWorkspaces([]);
       setChatTitle("Loading…");
-      setBusy(Boolean(runtimeRef.current.get(id)));
+      setBusySynced(Boolean(runtimeRef.current.get(id)));
       setPendingQuestion(null);
       setQuestionAnswers([]);
       setQuestionCustom([]);
@@ -3730,7 +3750,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             setRemoteFileCwd(normalizeWorkDirectory(session.fileCwd || session.remoteCwd, workspaceDefaultCwd));
             pendingQuestionIdRef.current = next.pendingQuestion?.questionId ?? null;
             setPendingQuestion(next.pendingQuestion ?? null);
-            setBusy(
+            setBusySynced(
               next.runStatus === "running" ||
                 next.runStatus === "waiting_input" ||
                 next.runStatus === "waiting_for_user" ||
@@ -4097,7 +4117,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             data.chat.pendingQuestion.questions.map(() => false),
           );
         }
-        setBusy(
+        setBusySynced(
           runtimeRef.current.has(activeChatId) ||
             data.chat.runStatus === "running" ||
             waitingForInput,
@@ -4894,7 +4914,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         })),
       );
       setLiveStatus("");
-      setBusy(false);
+      setBusySynced(false);
       setPendingFiles((prev) => {
         for (const file of prev) {
           if (file.previewUrl) URL.revokeObjectURL(file.previewUrl);
@@ -5207,7 +5227,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       if (!response.ok) throw new Error(body.error || "Could not cancel the question.");
       pendingQuestionIdRef.current = null;
       setPendingQuestion(null);
-      setBusy(false);
+      setBusySynced(false);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not cancel the question.");
     } finally {
@@ -5247,7 +5267,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || "Could not resume the interrupted run.");
       setRecoveryStatus("restored");
-      setBusy(true);
+      setBusySynced(true);
       toast.success("Run queued for manual resume");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not resume the interrupted run.");
@@ -5266,7 +5286,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         ...(restoredAttachments.length ? { storedAttachments: [...restoredAttachments] } : {}),
       },
     ]);
-    setInput("");
+    setInputGuarded("");
     setReferenceText("");
     setReferences([]);
     clearPendingFiles();
@@ -5281,7 +5301,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     const activeId = activeChatIdRef.current;
     if (activeId) runtimeRef.current.get(activeId)?.abortController.abort();
     if (activeId) clearChatRunning(activeId);
-    setBusy(false);
+    setBusySynced(false);
     setLiveStatus("");
     window.setTimeout(() => {
       void send(
@@ -5350,7 +5370,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         body: JSON.stringify({ chatId: activeId }),
       }).catch(() => undefined);
     }
-    setBusy(false);
+    setBusySynced(false);
     setLiveStatus("");
   }
 
@@ -5390,7 +5410,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
       runtimeRef.current.get(chatId)?.abortController.abort();
       clearChatRunning(chatId);
-      setBusy(false);
+      setBusySynced(false);
       setActiveSubagent((current) => current ? { ...current, status: "cancelled" } : current);
       setMessages((messages) =>
         messages.map((message) => ({
@@ -5461,12 +5481,18 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       duplicate,
     });
     if (action === "ignore") return;
+    if (action === "queue") {
+      reportUxEvent("send_rejected", {
+        reason: duplicate ? "duplicate_fingerprint" : decideReasonForAction(action, { sendInFlightRef, busy, pendingQuestion, hasComposerContent }),
+      });
+    }
     if (text) lastSendFingerprintRef.current = { text, at: Date.now() };
     if (action === "queue") {
       queueCurrentMessage(text, filesToSend);
       return;
     }
     sendInFlightRef.current = true;
+    const sendStartedAt = Date.now();
     try {
       await sendInner(
         e,
@@ -5481,7 +5507,27 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       );
     } finally {
       sendInFlightRef.current = false;
+      reportUxEvent("send_completed", {
+        durationMs: Date.now() - sendStartedAt,
+        ok: true,
+      });
     }
+  }
+
+  function decideReasonForAction(
+    action: string,
+    ctx: {
+      sendInFlightRef: { current: boolean };
+      busy: boolean;
+      pendingQuestion: unknown;
+      hasComposerContent: boolean;
+    },
+  ): string {
+    if (ctx.sendInFlightRef.current) return "lock_held";
+    if (ctx.pendingQuestion) return "pending_question";
+    if (ctx.busy) return "busy";
+    if (!ctx.hasComposerContent) return "empty";
+    return action;
   }
 
   async function sendInner(
@@ -5515,23 +5561,30 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       (busy && force === false && !isOverride)
     ) {
       if (!isOverride && hasComposerContent && (busy || pendingQuestion)) {
+        reportUxEvent("send_queued", {
+          reason: pendingQuestion ? "pending_question" : "busy",
+        });
         queueCurrentMessage(text, filesToSend);
+      } else if (!hasComposerContent) {
+        reportUxEvent("send_rejected", { reason: "empty" });
       }
       return;
     }
     if (!modelId.trim()) {
+      reportUxEvent("send_rejected", { reason: "no_model" });
       toast.error("Select a model first");
       return;
     }
 
     const chatId = await ensureChatId();
     if (!chatId) {
+      reportUxEvent("send_rejected", { reason: "chat_create_failed" });
       toast.error("Could not create chat");
       return;
     }
 
     if (!isOverride) {
-      setInput("");
+      setInputGuarded("");
       draftInputRef.current = "";
       window.setTimeout(() => textareaRef.current?.focus(), 0);
       void fetch("/api/preferences", {
@@ -5546,7 +5599,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
     if (!force) queueDrainBlockedRef.current = false;
-    setBusy(true);
+    setBusySynced(true);
     setRecoveryStatus(null);
     setLiveStatus("");
 
@@ -5652,7 +5705,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               : x,
           ),
         );
-        if (activeChatIdRef.current === chatId) setBusy(false);
+        if (activeChatIdRef.current === chatId) setBusySynced(false);
         return;
       }
 
@@ -6025,7 +6078,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                   setQuestionCustom(questions.map(() => ""));
                   setQuestionCustomActive(questions.map(() => false));
                 }
-                setBusy(true);
+                setBusySynced(true);
               }
               notifyAttention(
                 chatId,
@@ -6244,7 +6297,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         clearChatRunning(chatId);
       }
       if (activeChatIdRef.current === chatId && !pendingQuestionIdRef.current) {
-        setBusy(false);
+        setBusySynced(false);
         setLiveStatus("");
       }
       void loadChats();
