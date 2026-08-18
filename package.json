@@ -20,7 +20,7 @@
     "lint": "eslint .",
     "test": "pnpm run test:providers && pnpm run test:shared && tsx --test scripts/security.test.ts tests/installers.test.ts",
     "test:providers": "tsx --test tests/providers.test.ts tests/uploads.test.ts tests/modes.test.ts",
-    "test:shared": "tsx --test tests/shared-context.test.ts tests/recovery.test.ts tests/agent-trace.test.ts tests/context-window.test.ts tests/tool-call-display.test.ts tests/worker-scheduler.test.ts tests/tool-search.test.ts",
+    "test:shared": "tsx --test tests/shared-context.test.ts tests/recovery.test.ts tests/agent-trace.test.ts tests/context-window.test.ts tests/tool-call-display.test.ts tests/worker-scheduler.test.ts tests/tool-search.test.ts tests/composer-send.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

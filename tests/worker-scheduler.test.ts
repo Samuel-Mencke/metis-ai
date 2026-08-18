@@ -11,15 +11,15 @@ test("queue wait is omitted when a worker slot is still free", () => {
 test("queue wait is shown only when this run cannot start yet", () => {
   assert.equal(
     describeQueueWait(2, 0, 2),
-    "Max workers reached (2). Waiting for other chats to finish before starting this one.",
+    "Max workers reached (2). Waiting for a free worker slot.",
   );
   assert.equal(
     describeQueueWait(0, 2, 2),
-    "Waiting for 2 queued runs in other chats before starting.",
+    "Waiting for a free worker slot (2 runs ahead, 2 parallel chats).",
   );
   assert.equal(
     describeQueueWait(2, 2, 2),
-    "Waiting for 2 queued runs in other chats before starting.",
+    "Waiting for a free worker slot (2 runs ahead, 2 parallel chats).",
   );
 });
 

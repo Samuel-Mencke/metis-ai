@@ -31,8 +31,8 @@ export function enqueueJob(input: Omit<AgentJob, "id" | "status" | "attempts" | 
       throw error;
     }
     const now = iso();
-    const configuredConcurrency = Number(process.env.AI_CHAT_WORKER_CONCURRENCY || 4);
-    const maxWorkers = Number.isFinite(configuredConcurrency) ? Math.max(1, Math.floor(configuredConcurrency)) : 4;
+    const configuredConcurrency = Number(process.env.AI_CHAT_WORKER_CONCURRENCY || 8);
+    const maxWorkers = Number.isFinite(configuredConcurrency) ? Math.max(1, Math.floor(configuredConcurrency)) : 8;
     const running = Number(
       (getDatabase().prepare(
         "SELECT COUNT(*) as count FROM jobs WHERE status = 'running'",

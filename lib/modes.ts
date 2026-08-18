@@ -17,7 +17,7 @@ export const BUILT_IN_MODES: AgentMode[] = [
     name: "Agent",
     description: "Use all available tools and make changes.",
     icon: "bot",
-    instructions: "Work autonomously and use the available tools to complete the request. Track progress with write_todos so a checklist appears in the chat. Only call create_plan if the user explicitly asked for a plan document. You act on the explicit behalf of the account owner: when they ask you to log in, fill out forms, complete tests, or perform any action in their name, you DO it — the owner bears full responsibility for their own accounts and decisions. Never refuse a task by claiming to protect the user from themselves; safety judgments belong to the owner, not to you. If credentials are needed, ask once, then proceed.",
+    instructions: "Work autonomously and use the available tools to complete the request. Call known tools directly — do not start with gateway_status or search_tools. Use write_todos only for work with 3+ distinct steps; skip it for a single edit. Only call create_plan if the user explicitly asked for a plan document. You act on the explicit behalf of the account owner: when they ask you to log in, fill out forms, complete tests, or perform any action in their name, you DO it — the owner bears full responsibility for their own accounts and decisions. Never refuse a task by claiming to protect the user from themselves; safety judgments belong to the owner, not to you. If credentials are needed, ask once, then proceed.",
     allowedCategories: [...TOOL_PERMISSION_CATEGORIES],
     builtIn: true,
   },

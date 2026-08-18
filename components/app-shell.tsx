@@ -103,6 +103,12 @@ import { ContextUsageCircle, PlanUsageGauge, usePlanUsageSnapshot, usageForSelec
 import { contextWindowForModel, resolveContextTotal } from "@/lib/context-window";
 import { ToolCallGroup, type ToolCallData } from "@/components/tool-call-chip";
 import { layoutAssistantParts, remoteClientHostnameMap } from "@/lib/tool-call-display";
+import {
+  composerLiveText,
+  decideComposerSend,
+  isDuplicateComposerSend,
+  shouldIgnoreComposerEnter,
+} from "@/lib/composer-send";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -3500,6 +3506,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       chatLoadAbortRef.current = null;
       chatLoadRequestRef.current += 1;
       setLoadingChatId(null);
+      pendingQuestionIdRef.current = null;
       setPendingQuestion(null);
       setQuestionAnswers([]);
       setQuestionCustom([]);
@@ -3606,6 +3613,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       setMessageOffset(0);
       setHasEarlierMessages(false);
       setLoadingEarlierMessages(false);
+      pendingQuestionIdRef.current = null;
       setPendingQuestion(null);
       setLiveStatus("");
       setActiveWorkspaceId(null);
@@ -3714,6 +3722,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             setActiveTerminalTabId(loadedActiveTerminalTabId);
             setRemoteTerminalCwd(loadedTerminalTabs.find((tab) => tab.id === loadedActiveTerminalTabId)?.cwd || workspaceDefaultCwd);
             setRemoteFileCwd(normalizeWorkDirectory(session.fileCwd || session.remoteCwd, workspaceDefaultCwd));
+            pendingQuestionIdRef.current = next.pendingQuestion?.questionId ?? null;
             setPendingQuestion(next.pendingQuestion ?? null);
             setBusy(
               next.runStatus === "running" ||
@@ -4070,6 +4079,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           data.chat.runStatus === "waiting_input" ||
           data.chat.runStatus === "waiting_for_user" ||
           Boolean(data.chat.pendingQuestion);
+        pendingQuestionIdRef.current = data.chat.pendingQuestion?.questionId ?? null;
         setPendingQuestion(data.chat.pendingQuestion ?? null);
         if (
           data.chat.pendingQuestion &&
@@ -5164,6 +5174,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(data.error || `HTTP ${res.status}`);
       }
+      pendingQuestionIdRef.current = null;
       setPendingQuestion(null);
       if (activeChatIdRef.current) {
         setAttentionChatIds((current) =>
@@ -5188,6 +5199,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || "Could not cancel the question.");
+      pendingQuestionIdRef.current = null;
       setPendingQuestion(null);
       setBusy(false);
     } catch (error) {
@@ -5404,17 +5416,63 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     onAccepted?: () => void,
     storedAttachmentsOverride?: MsgAttachment[],
   ) {
+    if (
+      e &&
+      "key" in e &&
+      shouldIgnoreComposerEnter({
+        key: e.key,
+        shiftKey: e.shiftKey,
+        repeat: e.repeat,
+        isComposing: e.nativeEvent.isComposing,
+        keyCode: e.nativeEvent.keyCode,
+      })
+    ) {
+      return;
+    }
     e?.preventDefault();
-    if (sendInFlightRef.current && !force) return;
-    const text = (textOverride ?? input).trim();
-    if (!force && text) {
-      const last = lastSendFingerprintRef.current;
-      if (last.text === text && Date.now() - last.at < 1000) return;
-      lastSendFingerprintRef.current = { text, at: Date.now() };
+    const isOverride = textOverride !== undefined;
+    const text = (textOverride ?? composerLiveText(textareaRef.current?.innerText, input)).trim();
+    const filesToSend = attachmentsOverride ?? pendingFiles;
+    const referencesToSend = incognito ? [] : (referencesOverride ?? references);
+    const storedAttachmentsToSend = storedAttachmentsOverride ?? restoredAttachments;
+    const hasComposerContent =
+      Boolean(text) ||
+      filesToSend.length > 0 ||
+      storedAttachmentsToSend.length > 0 ||
+      referencesToSend.length > 0 ||
+      !incognito && Boolean((referenceTextOverride ?? referenceText).trim());
+    if (pendingQuestionIdRef.current && !pendingQuestion) {
+      pendingQuestionIdRef.current = null;
+    }
+    const duplicate = isDuplicateComposerSend(text, lastSendFingerprintRef.current);
+    const action = decideComposerSend({
+      force,
+      isOverride,
+      hasContent: hasComposerContent,
+      sendInFlight: sendInFlightRef.current,
+      busy,
+      waitingForQuestion: Boolean(pendingQuestion),
+      duplicate,
+    });
+    if (action === "ignore") return;
+    if (text) lastSendFingerprintRef.current = { text, at: Date.now() };
+    if (action === "queue") {
+      queueCurrentMessage(text, filesToSend);
+      return;
     }
     sendInFlightRef.current = true;
     try {
-    await sendInner(e, textOverride, attachmentsOverride, force, referenceTextOverride, referencesOverride, messageIdOverride, onAccepted, storedAttachmentsOverride);
+      await sendInner(
+        e,
+        textOverride,
+        attachmentsOverride,
+        force,
+        referenceTextOverride,
+        referencesOverride,
+        messageIdOverride,
+        onAccepted,
+        storedAttachmentsOverride,
+      );
     } finally {
       sendInFlightRef.current = false;
     }
@@ -5431,7 +5489,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     onAccepted?: () => void,
     storedAttachmentsOverride?: MsgAttachment[],
   ) {
-    const text = (textOverride ?? input).trim();
+    const text = (textOverride ?? composerLiveText(textareaRef.current?.innerText, input)).trim();
     const filesToSend = attachmentsOverride ?? pendingFiles;
     const referencesToSend = incognito ? [] : (referencesOverride ?? references);
     const storedAttachmentsToSend = storedAttachmentsOverride ?? restoredAttachments;
@@ -5442,12 +5500,15 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       storedAttachmentsToSend.length > 0 ||
       referencesToSend.length > 0 ||
       !incognito && Boolean((referenceTextOverride ?? referenceText).trim());
+    if (pendingQuestionIdRef.current && !pendingQuestion) {
+      pendingQuestionIdRef.current = null;
+    }
     if (
-      (pendingQuestionIdRef.current && !isOverride) ||
+      (pendingQuestion && !isOverride) ||
       (!hasComposerContent) ||
       (busy && force === false && !isOverride)
     ) {
-      if (busy && !isOverride && hasComposerContent) {
+      if (!isOverride && hasComposerContent && (busy || pendingQuestion)) {
         queueCurrentMessage(text, filesToSend);
       }
       return;
@@ -6972,6 +7033,18 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               return;
             }
             if (e.key === "Enter" && !e.shiftKey) {
+              if (
+                shouldIgnoreComposerEnter({
+                  key: e.key,
+                  shiftKey: e.shiftKey,
+                  repeat: e.repeat,
+                  isComposing: e.nativeEvent.isComposing,
+                  keyCode: e.nativeEvent.keyCode,
+                })
+              ) {
+                if (e.repeat) e.preventDefault();
+                return;
+              }
               e.preventDefault();
               void send(e);
             }
@@ -7815,7 +7888,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           <>
             <div
               ref={messagesScrollRef}
-              className="min-h-0 flex-1 overflow-y-auto"
+              className="messages-composer-mask min-h-0 flex-1 overflow-y-auto"
+              style={{ ["--composer-mask-size" as string]: `${Math.max(56, composerHeight)}px` }}
               onMouseUp={() => {
                 const selection = window.getSelection();
                 const text = selection?.toString().trim() || "";
@@ -7831,7 +7905,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             >
               <div
                 className="mx-auto w-full max-w-2xl space-y-6 px-4 pt-6 sm:px-6"
-                style={{ paddingBottom: Math.max(144, composerHeight + 80) }}
+                style={{ paddingBottom: Math.max(144, composerHeight + 24) }}
               >
                 {recoveryStatus === "needs_attention" ? (
                   <div className={cn(
@@ -7944,7 +8018,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                             </div>
                           </div>
                         ) : (
-                        <div className="max-w-[85%] space-y-2 rounded-3xl bg-secondary/80 px-4 py-2.5 text-[15px] leading-relaxed">
+                        <div className="max-w-[85%] space-y-2 overflow-hidden rounded-3xl bg-secondary/80 px-4 py-2.5 text-[15px] leading-relaxed">
                           {m.attachments && m.attachments.length > 0 ? (
                             <div className="flex max-w-full gap-2 overflow-x-auto pb-1">
                               {m.attachments.map((att) => {
@@ -7991,6 +8065,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                                     className={cn(
                                       "overflow-hidden transition-[max-height] duration-300 ease-out",
                                       longUserMessage && !fullyExpanded && (expanded ? "max-h-[28rem]" : "max-h-56"),
+                                      longUserMessage && !fullyExpanded && "user-message-collapse-mask",
                                     )}
                                   >
                                     <div className="whitespace-pre-wrap">
@@ -7998,7 +8073,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                                     </div>
                                   </div>
                                   {longUserMessage && !fullyExpanded ? (
-                                    <div className="pointer-events-none absolute inset-x-0 bottom-0 flex translate-y-1/2 justify-center bg-gradient-to-t from-secondary/80 via-secondary/65 to-transparent pb-1 pt-8">
+                                    <div className="pointer-events-none absolute inset-x-0 bottom-1 flex justify-center">
                                       <Button
                                         type="button"
                                         size="xs"
@@ -8475,7 +8550,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
 
             {/* Floating composer */}
             <div ref={composerContainerRef} className="pointer-events-none absolute inset-x-0 bottom-0 z-20">
-              <div className="pointer-events-none bg-gradient-to-t from-background via-background/90 to-transparent pb-4 pt-16">
+              <div className="pointer-events-none pb-4 pt-3">
                 <div className="pointer-events-auto relative mx-auto w-full max-w-2xl px-4 sm:px-6">
                   {showScrollDown || hasCurrentAttention ? (
                     <Button

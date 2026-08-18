@@ -1,29 +1,37 @@
 "use client";
 
 import {
+  BookOpen,
   Bot,
   Brain,
-  Cable,
   ChevronRight,
   Code2,
-  ClipboardList,
   FilePenLine,
-  FileSearch,
+  FolderOpen,
   Globe2,
   ListTodo,
   LoaderCircle,
   ExternalLink,
-  Palette,
+  Search,
   StickyNote,
   Terminal,
   Trash2,
+  Wrench,
 } from "lucide-react";
 import { memo, useState } from "react";
 import { cn } from "@/lib/utils";
 import { PlanWorkspaceCard } from "@/components/plan-workspace-card";
 import { planLooksParallelizable } from "@/lib/modes";
 import { CanvasWorkspaceCard } from "@/components/canvas-workspace-card";
-import { isToolRunning, todosFromToolPayload, toolCallHeadline, toolGroupLabel } from "@/lib/tool-call-display";
+import {
+  compactFileDiff,
+  isToolRunning,
+  todosFromToolPayload,
+  toolCallHeadline,
+  toolGroupLabel,
+  truncateToolText,
+  type ToolActionIcon,
+} from "@/lib/tool-call-display";
 
 const toolCallTriggerClass =
   "inline-flex max-w-full cursor-pointer items-center gap-1 appearance-none rounded-none border-0 bg-transparent p-0 text-left text-[11px] font-light text-muted-foreground/70 shadow-none ring-0 outline-none transition-colors hover:bg-transparent hover:text-muted-foreground focus-visible:ring-0";
@@ -59,7 +67,20 @@ type ToolCallProps = ToolCallData & {
   onOpenRaw?: () => void;
   autoExpand?: boolean;
   locked?: boolean;
+  nested?: boolean;
   hostnames?: Record<string, string>;
+};
+
+const ACTION_ICONS: Record<ToolActionIcon, typeof BookOpen> = {
+  folder: FolderOpen,
+  search: Search,
+  read: BookOpen,
+  edit: FilePenLine,
+  shell: Terminal,
+  mcp: Wrench,
+  browser: Globe2,
+  subagent: Bot,
+  other: Globe2,
 };
 
 function formatStructuredValue(value: unknown, indent = 0): string {
@@ -111,11 +132,11 @@ function formatToolOutput(value?: string): string {
     ) {
       return (parsed as { plan: string }).plan;
     }
-    return typeof parsed === "string" ? parsed : formatStructuredValue(parsed);
+    return truncateToolText(typeof parsed === "string" ? parsed : formatStructuredValue(parsed));
   } catch {
     // Tool output is often plain text.
   }
-  return value;
+  return truncateToolText(value);
 }
 
 function displayedDiffStats(diff?: ToolCallData["diff"], input?: string) {
@@ -262,6 +283,7 @@ export const ToolCallChip = memo(function ToolCallChip({
   onOpenRaw,
   autoExpand = false,
   locked = false,
+  nested = false,
   todos,
   hostnames,
 }: ToolCallProps) {
@@ -269,24 +291,11 @@ export const ToolCallChip = memo(function ToolCallChip({
   const running = isToolRunning(status);
   const expanded = locked ? autoExpand : autoExpand || userOpen;
   const todoItems = todos?.length ? todos : todosFromToolPayload(input, result);
-
-  const config = {
-    plan: { label: "Plan", icon: ClipboardList },
-    edit: { label: "File edit", icon: FilePenLine },
-    read: { label: "Read", icon: FileSearch },
-    shell: { label: "Shell", icon: Terminal },
-    subagent: { label: "Subagent", icon: Bot },
-    mcp: { label: "MCP", icon: Cable },
-    canvas: { label: "Canvas", icon: Palette },
-    note: { label: "Note", icon: StickyNote },
-    todo: { label: "Tasks", icon: ListTodo },
-    browser: { label: "Browser", icon: Globe2 },
-    memory: { label: "Memory", icon: Brain },
-    other: { label: name.replaceAll("_", " "), icon: Globe2 },
-  }[kind ?? "other"];
   const deleteTool = /(^|[._:/-])(delete|remove|unlink)(?=[._:/-]|$)/i.test(name);
-  const Icon = deleteTool && kind === "edit" ? Trash2 : config.icon;
   const headline = toolCallHeadline({ name, kind, input, detail, path, hostnames });
+  const Icon = deleteTool && (kind === "edit" || headline.icon === "edit")
+    ? Trash2
+    : ACTION_ICONS[headline.icon];
   const clickable = kind === "edit" && Boolean(diff || path);
   const subagentClickable = kind === "subagent";
   const workspaceClickable = kind === "plan" || kind === "canvas" || kind === "browser";
@@ -437,7 +446,7 @@ export const ToolCallChip = memo(function ToolCallChip({
         >
           {running ? (
             <LoaderCircle className="size-3 shrink-0 animate-spin" />
-          ) : (
+          ) : nested ? null : (
             <ChevronRight className={cn("size-3 shrink-0 transition-transform", expanded && "rotate-90")} />
           )}
           <Icon className="size-3 shrink-0 opacity-70" />
@@ -521,7 +530,7 @@ export const ToolCallChip = memo(function ToolCallChip({
           {kind === "edit" && diff ? (
             <section>
               <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground/60">File diff</p>
-              <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono">{`Before:\n${diff.before || "(empty)"}\n\nAfter:\n${diff.after || "(empty)"}`}</pre>
+              <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono">{compactFileDiff(diff.before, diff.after)}</pre>
             </section>
           ) : null}
           {result || detail ? (
@@ -611,22 +620,22 @@ export const ToolCallGroup = memo(function ToolCallGroup({
       tool.kind !== "todo" &&
       (includePlans || tool.kind !== "plan"),
   );
-  const groupTitle = toolGroupLabel(regularTools.length, regularTools.map((tool) => tool.kind));
-  const showStack = Boolean(live);
-  const groupOpen = userOpen || Boolean(autoExpand && !showStack);
+  const groupTitle = toolGroupLabel(regularTools);
+  const groupOpen = userOpen || Boolean(live) || Boolean(autoExpand);
   const lastToolId = regularTools[regularTools.length - 1]?.id;
-  const renderTool = (tool: ToolCallData) => (
+  const renderTool = (tool: ToolCallData, nested = false) => (
     <ToolCallChip
       {...tool}
       hostnames={hostnames}
+      nested={nested}
       onOpenDiff={() => onOpenDiff?.(tool)}
       onOpenSubagent={() => onOpenSubagent?.(tool)}
       onOpenWorkspace={() => onOpenWorkspace?.(tool)}
       onBuildPlan={(plan, options) => onBuildPlan?.(tool, plan, options)}
       buildDisabled={buildDisabled}
       onOpenRaw={() => onOpenRaw?.(tool)}
-      autoExpand={showStack && tool.id === lastToolId}
-      locked={showStack}
+      autoExpand={!nested && Boolean(live) && tool.id === lastToolId}
+      locked={!nested && Boolean(live)}
     />
   );
   if (regularTools.length === 0) {
@@ -655,7 +664,7 @@ export const ToolCallGroup = memo(function ToolCallGroup({
       {todoTools.map((tool) => (
         <div key={tool.id}>{renderTool(tool)}</div>
       ))}
-      {regularTools.length === 1 || showStack ? (
+      {regularTools.length === 1 ? (
         <div className="flex flex-col">
           {regularTools.map((tool) => (
             <div key={tool.id}>{renderTool(tool)}</div>
@@ -668,13 +677,17 @@ export const ToolCallGroup = memo(function ToolCallGroup({
             className={toolCallTriggerClass}
             onClick={() => setUserOpen((open) => !open)}
           >
-            <ChevronRight className={cn("size-3 shrink-0 transition-transform", groupOpen && "rotate-90")} />
+            {regularTools.some((tool) => isToolRunning(tool.status)) ? (
+              <LoaderCircle className="size-3 shrink-0 animate-spin" />
+            ) : (
+              <ChevronRight className={cn("size-3 shrink-0 transition-transform", groupOpen && "rotate-90")} />
+            )}
             <span className="truncate">{groupTitle}</span>
           </button>
           {groupOpen ? (
-            <div className="mt-0.5 space-y-0.5 pl-4">
+            <div className="mt-0.5 space-y-0 pl-4">
               {regularTools.map((tool) => (
-                <div key={tool.id}>{renderTool(tool)}</div>
+                <div key={tool.id}>{renderTool(tool, true)}</div>
               ))}
             </div>
           ) : null}

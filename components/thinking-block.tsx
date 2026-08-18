@@ -35,6 +35,12 @@ export function ThinkingBlock({
   if (!text) return null;
 
   const durationLabel = formatDuration(durationMs);
+  const durationMsValue = durationMs ?? 0;
+  const thoughtLabel = done
+    ? durationLabel && durationMsValue >= 2500
+      ? `Thought ${durationLabel}`
+      : "Thought briefly"
+    : "Thinking";
 
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="mb-2">
@@ -50,10 +56,8 @@ export function ThinkingBlock({
             open && "rotate-90",
           )}
         />
-        <span>Thinking</span>
-        {durationLabel ? (
-          <span className="text-muted-foreground/60">· {durationLabel}</span>
-        ) : !done ? (
+        <span>{thoughtLabel}</span>
+        {!done ? (
           <span className="text-muted-foreground/60">…</span>
         ) : null}
       </CollapsibleTrigger>

@@ -8,11 +8,13 @@ export function describeQueueWait(running: number, queuedAhead: number, maxWorke
   const workers = Number.isFinite(maxWorkers) ? Math.max(1, Math.floor(maxWorkers)) : 1;
   const freeSlots = Math.max(0, workers - Math.max(0, running));
   const ahead = Math.max(0, queuedAhead);
+  // Only surface a wait when this job cannot take a free slot. Queued jobs
+  // that still fit in remaining workers start on the next poll — no banner.
   if (ahead < freeSlots) return undefined;
   if (ahead === 0) {
-    return `Max workers reached (${workers}). Waiting for other chats to finish before starting this one.`;
+    return `Max workers reached (${workers}). Waiting for a free worker slot.`;
   }
-  return `Waiting for ${ahead} queued run${ahead === 1 ? "" : "s"} in other chats before starting.`;
+  return `Waiting for a free worker slot (${ahead} run${ahead === 1 ? "" : "s"} ahead, ${workers} parallel chats).`;
 }
 
 export async function waitForSchedulerTick(

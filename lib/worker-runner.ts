@@ -874,6 +874,7 @@ export async function runQueuedJob(job: AgentJob) {
     const prompt = [
       `Current agent mode: ${activeMode.name}\n${activeMode.instructions}`,
       "Working style: precise, technically fluent, proactive. Act with your tools instead of describing steps. Reply in the user's language — German in, German out. No filler phrases. On clear orders decide and act yourself; ask back only when genuinely ambiguous or destructive.",
+      "Tool discipline: Call known tools directly. Do not begin a task with gateway_status or search_tools. search_tools is only for unknown child-MCP capabilities; gateway_status is only for diagnosing the gateway. Skip write_todos unless the task has 3+ distinct steps — never rewrite a finished checklist. File edits must pass the smallest unique snippet, never the whole file. read_file must use offset+limit around the relevant region. Use context_profile or context_search, not both. Do not narrate tool-by-tool progress in the user-visible reply.",
       `Available mode IDs for request_mode_change: ${availableModes || "agent (Agent), plan (Plan), ask (Ask)"}. Use the exact ID before the parentheses; never invent values such as "Code". For implementation or file changes, request modeId "agent".`,
       "Response recommendation rule: when the result is incomplete, uses demo/stub endpoints, or still lacks real integrations, clearly say what is and is not implemented, then always provide 1–3 concise, concrete next-step recommendations in exactly one ```suggestions fenced block so the UI can render clickable actions. End by asking whether to implement the recommended next step. Do not present demo functionality as production-ready.",
       ...(activeMode.id !== "agent"
@@ -890,7 +891,7 @@ export async function runQueuedJob(job: AgentJob) {
         : [
             "Personal context: the context_search / context_profile / context_remember MCP tools access the owner's shared context hub (devices, services, projects, preferences). When a task touches the owner's infrastructure, projects, or devices, consult them FIRST instead of asking the user. Do not dump contents unprompted; cite only what the query returned. Store newly learned durable preferences (how the owner wants things) via context_remember. list_memories/add_memory manage lightweight in-app memories the same way.",
             `Current chat keywords: ${chat.keywords?.join(", ") || "(none)"}`,
-            `Existing workspaces:\n${chat.workspaces?.map((item) => `[${item.type}] ${item.name} (link: workspace://${item.type}/${item.id})\n${item.content}`).join("\n\n") || "(none)"}`,
+            `Existing workspaces:\n${chat.workspaces?.map((item) => `[${item.type}] ${item.name} (workspace://${item.type}/${item.id})`).join("\n") || "(none)"}`,
           ]),
       ...(job.incognito || chat.incognito ? [] : [
       "When referring to an existing or newly created plan/canvas, include its exact Markdown link using workspace://plan/<id> or workspace://canvas/<id>.",
@@ -898,7 +899,7 @@ export async function runQueuedJob(job: AgentJob) {
       "Use list_notes or search_notes when you need note IDs before linking them.",
       "When you use browser results, selected references, or other verifiable web sources, cite the exact URL immediately after the sentence it supports using the format [Source: Website title](URL). At the end, put every source used in exactly one fenced block starting with ```sources, with one Markdown link per line. Never invent URLs; if no verifiable source is available, do not create a sources block.",
       "To create a plan or canvas, call the MCP tools create_plan or create_canvas with title and content. Use an empty content string for a blank workspace, and do not claim creation without a completed tool call.",
-      "Progress tracking: call write_todos with a short checklist and keep statuses updated so it renders in the chat. In Agent mode do not call create_plan unless the user asked for a plan document or you are in Plan mode.",
+      "Progress tracking: call write_todos only for multi-step work (3+ steps) and keep statuses updated so it renders in the chat. In Agent mode do not call create_plan unless the user asked for a plan document or you are in Plan mode.",
       "For memories, use list_memories to retrieve the current user's entries, add_memory only for useful durable facts or preferences, and edit_memory with the exact memory id to change an existing entry. Never claim a memory was changed without a completed tool call.",
       "To edit an existing workspace, call edit_plan or edit_canvas with its exact id and the changed title/content. Do not create a duplicate when the user asked to edit.",
       "When the chat topic is clear or changes, silently call update_chat_keywords with 3-8 concise, non-sensitive search terms using mode=add. Do not mention this metadata maintenance in the main response. Use search_chats when you need to locate an earlier chat by title, keyword, or message content.",

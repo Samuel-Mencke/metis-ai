@@ -175,6 +175,16 @@ function stringField(record: Record<string, unknown> | undefined, key: string): 
   return trimmed || undefined;
 }
 
+function numberField(record: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = record?.[key];
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
 function looksLikeShellCommand(value: string): boolean {
   const trimmed = value.trim();
   if (!trimmed || looksLikeStructuredPayload(trimmed)) return false;
@@ -265,7 +275,87 @@ function resolveHostname(
 
 function humanToolName(name: string): string {
   if (name === "call_mcp_tool") return "tool";
-  return name;
+  return name.replaceAll("_", " ");
+}
+
+function basenamePath(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, "");
+  const parts = trimmed.split(/[\\/]/).filter(Boolean);
+  return parts.at(-1) || trimmed;
+}
+
+function extractLineRange(args: Record<string, unknown>): string | undefined {
+  const start = numberField(args, "offset")
+    ?? numberField(args, "startLine")
+    ?? numberField(args, "start_line")
+    ?? numberField(args, "line");
+  const limit = numberField(args, "limit");
+  const end = numberField(args, "endLine")
+    ?? numberField(args, "end_line")
+    ?? (start != null && limit != null ? start + Math.max(limit, 1) - 1 : undefined);
+  if (start == null) return undefined;
+  if (end != null && end !== start) return `L${start}-${end}`;
+  return `L${start}`;
+}
+
+function extractSearchPattern(args: Record<string, unknown>): string | undefined {
+  return stringField(args, "pattern")
+    || stringField(args, "query")
+    || stringField(args, "search_term")
+    || stringField(args, "glob_pattern")
+    || stringField(args, "regex");
+}
+
+export type ToolActionIcon =
+  | "folder"
+  | "search"
+  | "read"
+  | "edit"
+  | "shell"
+  | "mcp"
+  | "browser"
+  | "subagent"
+  | "other";
+
+export type ToolActionCategory = "file" | "search" | "edit" | "shell" | "browser" | "tool";
+
+export function resolveToolAction(name?: string, kind?: string): {
+  verb: string;
+  icon: ToolActionIcon;
+  category: ToolActionCategory;
+} {
+  const value = (name || "").toLowerCase();
+  if (kind === "subagent" || /(subagent|delegate)/.test(value)) {
+    return { verb: "Delegated", icon: "subagent", category: "tool" };
+  }
+  if (kind === "browser" || /(browser_|navigate|playwright|webfetch|web_fetch)/.test(value)) {
+    return { verb: "Browsed", icon: "browser", category: "browser" };
+  }
+  if (kind === "shell" || SHELL_TOOL_NAMES.has(value) || /(execute_command|terminal)/.test(value)) {
+    return { verb: "Ran", icon: "shell", category: "shell" };
+  }
+  if (kind === "edit" || /(write_file|edit_file|delete_file|apply_patch|strreplace)/.test(value)) {
+    return { verb: /delete|remove|unlink/.test(value) ? "Deleted" : "Edited", icon: "edit", category: "edit" };
+  }
+  if (/(grep|ripgrep)/.test(value)) {
+    return { verb: "Grepped", icon: "search", category: "search" };
+  }
+  if (/(search_tools|get_mcp_tools|list_mcp|search_registry)/.test(value)) {
+    return { verb: "Searched", icon: "mcp", category: "search" };
+  }
+  if (/(web_search|context_search|exa_|github_search)/.test(value) || (kind === "mcp" && value.includes("search"))) {
+    return { verb: "Searched", icon: "search", category: "search" };
+  }
+  if (/(list_directory|glob|listdir)/.test(value)) {
+    return { verb: "Explored", icon: "folder", category: "file" };
+  }
+  if (kind === "read" || /(read_file|read_lints|^read$)/.test(value)) {
+    return { verb: "Read", icon: "read", category: "file" };
+  }
+  if (kind === "mcp" || value.includes("mcp") || value === "call_mcp_tool") {
+    return { verb: "Used", icon: "mcp", category: "tool" };
+  }
+  return { verb: "Used", icon: "other", category: "tool" };
 }
 
 export function toolCallHeadline(input: {
@@ -275,54 +365,62 @@ export function toolCallHeadline(input: {
   detail?: string;
   path?: string;
   hostnames?: Record<string, string>;
-}): { title: string; preview?: string; remote?: boolean } {
+}): { title: string; preview?: string; remote?: boolean; icon: ToolActionIcon; verb: string } {
   const payload = parseJsonObject(input.input) || parseJsonObject(input.detail);
   const unwrapped = unwrapToolPayload(input.name, payload);
   const args = unwrapped.args;
   const toolName = unwrapped.toolName === "call_mcp_tool" ? input.name : unwrapped.toolName;
+  const action = resolveToolAction(toolName, input.kind);
   const command = extractCommand(args, input.kind === "shell" ? input.input : undefined);
   const filePath = extractPath(args, input.path);
   const remote = isRemoteTool(toolName, args);
   const hostname = remote ? resolveHostname(args, input.hostnames) : undefined;
-  const commandOrPath = command || filePath;
+  const pattern = extractSearchPattern(args);
+  const lineRange = extractLineRange(args);
   const fallbackName = humanToolName(toolName === "call_mcp_tool" ? input.name : toolName);
+  const shortPath = filePath ? basenamePath(filePath) : undefined;
 
   let core: string;
-  if (input.kind === "shell" || SHELL_TOOL_NAMES.has(toolName) || (command && (toolName === "execute_command" || input.name === "execute_command"))) {
-    core = command || fallbackName;
-  } else if (input.kind === "read" || input.kind === "edit" || PATH_TOOL_NAMES.has(toolName)) {
-    core = filePath || fallbackName;
-  } else if (commandOrPath && (remote || input.kind === "mcp")) {
-    core = commandOrPath;
+  if (action.category === "shell") {
+    core = command ? `${action.verb} ${command}` : action.verb;
+  } else if (action.verb === "Grepped") {
+    core = pattern ? `${action.verb} ${pattern}` : action.verb;
+  } else if (action.verb === "Searched" && /(search_tools|get_mcp_tools|list_mcp)/i.test(toolName)) {
+    core = "Searched MCP tools";
+  } else if (action.verb === "Explored") {
+    core = shortPath || pattern ? `${action.verb} ${shortPath || pattern}` : action.verb;
+  } else if (action.category === "file" || action.category === "edit") {
+    const target = shortPath || fallbackName;
+    core = `${action.verb} ${target}${lineRange ? ` ${lineRange}` : ""}`;
+  } else if (command || filePath) {
+    core = `${action.verb} ${command || shortPath || filePath}`;
+  } else if (pattern) {
+    core = `${action.verb} ${pattern}`;
   } else {
-    core = fallbackName;
+    core = fallbackName === "tool" ? `${action.verb} tool` : fallbackName;
   }
 
   const title = remote && hostname ? `${hostname}: ${core}` : core;
   const previewSource = [
+    action.verb === "Grepped" ? filePath : undefined,
+    action.verb === "Searched" ? pattern : undefined,
     stringField(args, "description"),
-    stringField(args, "query"),
     input.detail,
-  ].find((value) => value && value !== command && value !== filePath && value !== core);
+  ].find((value) => {
+    if (!value) return false;
+    if (value === command || value === filePath || value === core || value === shortPath) return false;
+    if (pattern && value === pattern && core.includes(pattern)) return false;
+    return true;
+  });
   const preview = compactToolPreview(previewSource);
   return {
     title,
+    icon: action.icon,
+    verb: action.verb,
     ...(preview && preview !== title && preview !== core ? { preview } : {}),
     ...(remote ? { remote: true } : {}),
   };
 }
-
-const KIND_GROUP_LABELS: Record<string, string> = {
-  mcp: "MCP tools",
-  read: "reads",
-  edit: "edits",
-  shell: "commands",
-  browser: "browser tools",
-  subagent: "subagents",
-  memory: "memory updates",
-  todo: "tasks",
-  other: "tools",
-};
 
 export function remoteClientHostnameMap(
   clients: Array<{ id: string; hostname?: string; name?: string; os?: string }>,
@@ -338,14 +436,67 @@ export function remoteClientHostnameMap(
   return map;
 }
 
-export function toolGroupLabel(count: number, kinds: Array<string | undefined>): string {
-  if (count <= 0) return "Tools";
-  if (count === 1) return "Tool";
-  const normalized = kinds.map((kind) => kind || "other");
-  const unique = new Set(normalized);
-  if (unique.size === 1) {
-    const kind = normalized[0];
-    return `Used ${count} ${KIND_GROUP_LABELS[kind] ?? "tools"}`;
+function countedLabel(count: number, one: string, many: string): string {
+  return count === 1 ? `1 ${one}` : `${count} ${many}`;
+}
+
+export function truncateToolText(value: string, max = 2400): string {
+  if (value.length <= max) return value;
+  const keepHead = Math.max(800, Math.floor(max * 0.7));
+  const keepTail = Math.max(400, max - keepHead - 80);
+  const omitted = value.length - keepHead - keepTail;
+  return `${value.slice(0, keepHead)}\n… [${omitted} chars omitted]\n${value.slice(-keepTail)}`;
+}
+
+export function compactFileDiff(before?: string, after?: string, contextLines = 2): string {
+  if (before == null && after == null) return "";
+  if ((before ?? "") === (after ?? "")) return "(no line changes)";
+  const beforeLines = (before ?? "").split("\n");
+  const afterLines = (after ?? "").split("\n");
+  let start = 0;
+  while (start < beforeLines.length && start < afterLines.length && beforeLines[start] === afterLines[start]) {
+    start += 1;
   }
-  return `Used ${count} tools`;
+  let beforeEnd = beforeLines.length;
+  let afterEnd = afterLines.length;
+  while (beforeEnd > start && afterEnd > start && beforeLines[beforeEnd - 1] === afterLines[afterEnd - 1]) {
+    beforeEnd -= 1;
+    afterEnd -= 1;
+  }
+  const from = Math.max(0, start - contextLines);
+  const afterTo = Math.min(afterLines.length, afterEnd + contextLines);
+  const lines = [`@@ -${from + 1},${Math.min(beforeLines.length, beforeEnd + contextLines) - from} +${from + 1},${afterTo - from} @@`];
+  for (let index = from; index < start; index += 1) lines.push(` ${beforeLines[index]}`);
+  for (let index = start; index < beforeEnd; index += 1) lines.push(`-${beforeLines[index]}`);
+  for (let index = start; index < afterEnd; index += 1) lines.push(`+${afterLines[index]}`);
+  for (let index = afterEnd; index < afterTo; index += 1) lines.push(` ${afterLines[index]}`);
+  return truncateToolText(lines.join("\n"), 4000);
+}
+
+export function toolGroupLabel(tools: Array<{ name?: string; kind?: string }>): string {
+  if (tools.length <= 0) return "Tools";
+  if (tools.length === 1) return "Tool";
+
+  const counts: Record<ToolActionCategory, number> = {
+    file: 0,
+    search: 0,
+    edit: 0,
+    shell: 0,
+    browser: 0,
+    tool: 0,
+  };
+  for (const tool of tools) {
+    counts[resolveToolAction(tool.name, tool.kind).category] += 1;
+  }
+
+  const parts: string[] = [];
+  if (counts.file) {
+    parts.push(counts.file === 1 ? "Explored 1 file" : `Explored ${counts.file} files`);
+  }
+  if (counts.search) parts.push(countedLabel(counts.search, "search", "searches"));
+  if (counts.edit) parts.push(countedLabel(counts.edit, "edit", "edits"));
+  if (counts.shell) parts.push(countedLabel(counts.shell, "command", "commands"));
+  if (counts.browser) parts.push(countedLabel(counts.browser, "browser tool", "browser tools"));
+  if (counts.tool) parts.push(countedLabel(counts.tool, "tool", "tools"));
+  return parts.join(", ") || "Tools";
 }

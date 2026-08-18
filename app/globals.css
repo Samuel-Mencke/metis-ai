@@ -549,6 +549,32 @@
   }
 }
 
+/* Fade the content itself instead of painting a second fill color over bubbles. */
+.messages-composer-mask {
+  --composer-mask-size: 4.5rem;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    #000 0%,
+    #000 calc(100% - var(--composer-mask-size)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    #000 0%,
+    #000 calc(100% - var(--composer-mask-size)),
+    transparent 100%
+  );
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+}
+
+.user-message-collapse-mask {
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 calc(100% - 3.25rem), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0%, #000 calc(100% - 3.25rem), transparent 100%);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .streaming-token-fade,
   .sidebar-panel-enter,

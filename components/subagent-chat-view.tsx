@@ -105,7 +105,7 @@ export function SubagentChatView({ tool, onBack, onCancel, cancelling = false, s
         ) : null}
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="messages-composer-mask min-h-0 flex-1 overflow-y-auto" style={{ ["--composer-mask-size" as string]: "9rem" }}>
         <div className="mx-auto w-full max-w-2xl space-y-6 px-4 pt-6 sm:px-6" style={{ paddingBottom: 144 }}>
           {tool.subagent?.prompt || tool.input ? (
             <div className="flex flex-col items-end gap-1">
@@ -155,7 +155,7 @@ export function SubagentChatView({ tool, onBack, onCancel, cancelling = false, s
         </div>
       </div>
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20">
-        <div className="pointer-events-none bg-gradient-to-t from-background via-background/90 to-transparent pb-4 pt-16">
+        <div className="pointer-events-none pb-4 pt-3">
           <div className="pointer-events-auto relative mx-auto w-full max-w-2xl px-4 sm:px-6">
             <div className="relative flex w-full items-center gap-2 rounded-3xl border border-border/50 bg-card/80 p-2 text-sm text-muted-foreground shadow-[0_8px_40px_-12px_rgba(0,0,0,0.4)] backdrop-blur-xl">
               <div className="flex min-h-10 min-w-0 flex-1 items-center gap-3 rounded-2xl px-3 py-2">

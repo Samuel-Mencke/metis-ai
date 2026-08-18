@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  compactFileDiff,
   compactToolPreview,
   isToolRunning,
   layoutAssistantParts,
@@ -8,6 +9,7 @@ import {
   todosFromToolPayload,
   toolCallHeadline,
   toolGroupLabel,
+  truncateToolText,
 } from "../lib/tool-call-display";
 
 type LayoutTool = { id: string; name?: string; kind?: string; status?: string };
@@ -17,10 +19,31 @@ test("compactToolPreview hides JSON payloads from titles", () => {
   assert.equal(compactToolPreview("ls -la src"), "ls -la src");
 });
 
-test("toolGroupLabel names MCP batches like GPT tool summaries", () => {
-  assert.equal(toolGroupLabel(4, ["mcp", "mcp", "mcp", "mcp"]), "Used 4 MCP tools");
-  assert.equal(toolGroupLabel(3, ["read", "mcp", "shell"]), "Used 3 tools");
-  assert.equal(toolGroupLabel(2, ["read", "read"]), "Used 2 reads");
+test("toolGroupLabel summarizes Cursor-style file/search/tool counts", () => {
+  assert.equal(
+    toolGroupLabel([
+      { kind: "mcp" },
+      { kind: "mcp" },
+      { kind: "mcp" },
+      { kind: "mcp" },
+    ]),
+    "4 tools",
+  );
+  assert.equal(
+    toolGroupLabel([
+      { name: "read_file", kind: "read" },
+      { name: "grep", kind: "read" },
+      { name: "search_tools", kind: "mcp" },
+    ]),
+    "Explored 1 file, 2 searches",
+  );
+  assert.equal(
+    toolGroupLabel([
+      { name: "read_file", kind: "read" },
+      { name: "list_directory", kind: "read" },
+    ]),
+    "Explored 2 files",
+  );
 });
 
 test("isToolRunning recognizes in-flight statuses", () => {
@@ -95,7 +118,7 @@ test("toolCallHeadline uses the local shell command as the title", () => {
     kind: "shell",
     input: JSON.stringify({ command: "ollama pull x" }),
   });
-  assert.equal(headline.title, "ollama pull x");
+  assert.equal(headline.title, "Ran ollama pull x");
   assert.equal(headline.remote, undefined);
 });
 
@@ -109,7 +132,7 @@ test("toolCallHeadline unwraps call_mcp_tool execute_command on a remote client"
     }),
     hostnames: { abc: "DESKTOP-PD4H5G9" },
   });
-  assert.equal(headline.title, "DESKTOP-PD4H5G9: ollama pull x");
+  assert.equal(headline.title, "DESKTOP-PD4H5G9: Ran ollama pull x");
   assert.equal(headline.remote, true);
 });
 
@@ -123,7 +146,7 @@ test("toolCallHeadline labels a remote read with hostname and path", () => {
     }),
     hostnames: { abc: "DESKTOP-PD4H5G9" },
   });
-  assert.equal(headline.title, "DESKTOP-PD4H5G9: C:\\Users\\sam\\file.txt");
+  assert.equal(headline.title, "DESKTOP-PD4H5G9: Read file.txt");
   assert.equal(headline.remote, true);
 });
 
@@ -133,7 +156,7 @@ test("toolCallHeadline uses the nested MCP tool name instead of call_mcp_tool", 
     kind: "mcp",
     input: JSON.stringify({ tool: "search_tools", arguments: { query: "browser" } }),
   });
-  assert.match(headline.title, /search[_ ]tools/i);
+  assert.equal(headline.title, "Searched MCP tools");
   assert.doesNotMatch(headline.title, /call_mcp_tool/i);
   assert.equal(headline.preview, "browser");
 });
@@ -151,7 +174,26 @@ test("remoteClientHostnameMap maps client ids and windows pc alias", () => {
       input: JSON.stringify({ command: "hostname", target: "pc" }),
       hostnames: map,
     }).title,
-    "DESKTOP-PD4H5G9: hostname",
+    "DESKTOP-PD4H5G9: Ran hostname",
+  );
+});
+
+test("toolCallHeadline includes read line ranges and grep patterns", () => {
+  assert.equal(
+    toolCallHeadline({
+      name: "read_file",
+      kind: "read",
+      input: JSON.stringify({ path: "/home/samuel/metis-ai/app/globals.css", offset: 280, limit: 150 }),
+    }).title,
+    "Read globals.css L280-429",
+  );
+  assert.equal(
+    toolCallHeadline({
+      name: "grep",
+      kind: "read",
+      input: JSON.stringify({ pattern: "toolGroupLabel", path: "/home/samuel/metis-ai" }),
+    }).title,
+    "Grepped toolGroupLabel",
   );
 });
 
@@ -167,4 +209,21 @@ test("todosFromToolPayload reads todo lists from tool JSON", () => {
   assert.equal(todos?.length, 2);
   assert.equal(todos?.[0]?.content, "Fix composer");
   assert.equal(todosFromToolPayload('{"status":"ok"}'), undefined);
+});
+
+test("compactFileDiff shows only the changed hunk", () => {
+  const before = ["keep", "old line", "tail"].join("\n");
+  const after = ["keep", "new line", "tail"].join("\n");
+  const diff = compactFileDiff(before, after, 1);
+  assert.match(diff, /^-old line$/m);
+  assert.match(diff, /^\+new line$/m);
+  assert.equal(diff.includes("Before:"), false);
+});
+
+test("truncateToolText keeps head and tail", () => {
+  const value = `${"a".repeat(2000)}UNIQUE_MIDDLE${"b".repeat(2000)}`;
+  const truncated = truncateToolText(value, 1200);
+  assert.ok(truncated.length < value.length);
+  assert.match(truncated, /chars omitted/);
+  assert.equal(truncated.includes("UNIQUE_MIDDLE"), false);
 });
