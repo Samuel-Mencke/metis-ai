@@ -32,9 +32,20 @@ Invoke-Step {
     Where-Object { $_.Name -eq "node.exe" -and $_.CommandLine -and $_.CommandLine.IndexOf($rootNorm, [StringComparison]::OrdinalIgnoreCase) -ge 0 } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 } "Stop running Metis node processes"
+function Remove-Tree([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  $target = $Path
+  if ($target -notlike "\\?\*") { $target = "\\?\$Path" }
+  for ($i = 0; $i -lt 8; $i++) {
+    cmd.exe /c "rmdir /s /q `"$target`"" | Out-Null
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    Start-Sleep -Seconds 2
+  }
+  throw "Failed to remove $Path"
+}
 $shouldKeepData = $KeepData -and -not $RemoveData
 if (-not $shouldKeepData -and $manifest.dataDir -and ([IO.Path]::GetFullPath($manifest.dataDir) -ne [IO.Path]::GetFullPath($InstallDir))) {
-  Invoke-Step { Remove-Item -LiteralPath $manifest.dataDir -Recurse -Force } "Remove data directory"
+  Invoke-Step { Remove-Tree ([IO.Path]::GetFullPath($manifest.dataDir)) } "Remove data directory"
 }
-Invoke-Step { Remove-Item -LiteralPath $InstallDir -Recurse -Force } "Remove installation directory"
+Invoke-Step { Start-Sleep -Seconds 1; Remove-Tree $rootNorm } "Remove installation directory"
 Write-Host "Metis AI uninstalled. Data kept: $shouldKeepData"

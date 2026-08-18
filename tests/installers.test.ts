@@ -121,6 +121,7 @@ test("windows services start with an absolute node path and short cmd wrappers",
   assert.match(uninstall, /Remove-ItemProperty/);
   assert.match(uninstall, /Stop-Process/);
   assert.match(uninstall, /cmd\.exe \/c "schtasks \/Delete/);
+  assert.match(uninstall, /function Remove-Tree/);
 });
 
 test("README documents the bootstrap one-liner rather than curling platform scripts into bash", () => {
