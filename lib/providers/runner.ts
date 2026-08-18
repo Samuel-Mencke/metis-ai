@@ -45,6 +45,7 @@ import { getMcpServers } from "@/lib/mcp";
 import { allModes, modeById } from "@/lib/modes";
 import { compress } from "@/lib/compression";
 import { contextWindowForModel } from "@/lib/context-window";
+import { logError } from "@/lib/error-logs";
 
 type Usage = {
   inputTokens?: number;
@@ -175,7 +176,8 @@ function providerPrompt(job: AgentJob) {
     "Response recommendation rule: when the result is incomplete, uses demo/stub endpoints, or still lacks real integrations, clearly distinguish implemented from missing functionality, then provide 1–3 concise, concrete next-step recommendations and ask whether to implement the recommended next step. Never present demo functionality as production-ready.",
     "Remote-client tools are available in this run when supported by the provider. Use list_remote_clients first, then target remote operations with target=client:<remote-client-id>; do not use server paths for client files.",
     "When you use browser results, selected references, or other verifiable web sources, cite the exact URL immediately after the sentence it supports using the format [Source: Website title](URL). At the end, put every source used in exactly one fenced block starting with ```sources, with one Markdown link per line. Never invent URLs; if no verifiable source is available, do not create a sources block.",
-    "Personal context: the context_search / context_profile / context_remember tools, when available in this run, access the owner's shared context hub (devices, services, projects, preferences). When a task touches the owner's infrastructure, projects, or devices, consult them FIRST instead of asking the user. Do not dump contents unprompted; cite only what the query returned. Store newly learned durable preferences (how the owner wants things) via context_remember.",
+        "If the user reports a UI/UX bug or something feels broken, inspect list_recent_errors first, diagnose, then fix it in the repo.",
+"Personal context: the context_search / context_profile / context_remember tools, when available in this run, access the owner's shared context hub (devices, services, projects, preferences). When a task touches the owner's infrastructure, projects, or devices, consult them FIRST instead of asking the user. Do not dump contents unprompted; cite only what the query returned. Store newly learned durable preferences (how the owner wants things) via context_remember.",
     references ? `Selected references:\n${references}` : "",
     job.referenceText ? `Referenced context:\n${job.referenceText}` : "",
     buildAttachmentPrompt(job.chatId, job.attachments),
@@ -1060,6 +1062,15 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       : error instanceof Error
         ? error.message
         : "Provider run failed.";
+    void logError({
+      level: "error",
+      source: "worker",
+      chatId: job.chatId,
+      userId: job.userId || undefined,
+      message: `Provider run failed (${definition.key}): ${message}`,
+      stack: error instanceof Error ? error.stack : undefined,
+      context: { jobId: job.id, provider: definition.key, modelId: parsed.modelId },
+    });
     if (cancelled) {
       updateChat(job.chatId, { runStatus: "cancelled", runUpdatedAt: new Date().toISOString() }, job.userId);
       updateJob(job.id, { status: "cancelled", error: message });

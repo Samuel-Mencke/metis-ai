@@ -22,6 +22,7 @@ const {
   authenticateClientMessage,
   attachRemoteClient,
 } = await import("./lib/remote-client-gateway.ts");
+const { logError } = await import("./lib/error-logs.ts");
 
 const port = Number(process.env.PORT || 3100);
 const host = process.env.AI_CHAT_HOST?.trim() || "127.0.0.1";
@@ -29,6 +30,22 @@ const dev = process.env.NODE_ENV !== "production";
 const nextApp = next({ dev, hostname: host, port });
 const handle = nextApp.getRequestHandler();
 const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+websocketServer.on("error", (error) => {
+  logError({
+    level: "error",
+    source: "ws",
+    message: `Browser WebSocket server error: ${error.message}`,
+    stack: error.stack,
+  });
+});
+remoteClientWebsocketServer.on("error", (error) => {
+  logError({
+    level: "error",
+    source: "ws",
+    message: `Remote-client WebSocket server error: ${error.message}`,
+    stack: error.stack,
+  });
+});
 const remoteClientWebsocketServer = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 const browserStreamSubscribers = new Map();
 
@@ -264,12 +281,28 @@ remoteClientWebsocketServer.on("connection", (socket, request) => {
 
 await nextApp.prepare();
 const server = http.createServer(async (request, response) => {
-  const url = streamUrl(request);
-  if (url.pathname === "/__internal/browser-engine") {
-    await handleBrowserEngine(request, response);
-    return;
+  try {
+    const url = streamUrl(request);
+    if (url.pathname === "/__internal/browser-engine") {
+      await handleBrowserEngine(request, response);
+      return;
+    }
+    await handle(request, response);
+  } catch (error) {
+    logError({
+      level: "error",
+      source: "ws",
+      message: `Stream request handler failed: ${error instanceof Error ? error.message : String(error)}`,
+      stack: error instanceof Error ? error.stack : undefined,
+      context: { url: request.url },
+    });
+    if (!response.headersSent) {
+      response.writeHead(500, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: "Stream request failed" }));
+    } else {
+      response.destroy();
+    }
   }
-  await handle(request, response);
 });
 server.on("upgrade", async (request, socket, head) => {
   const url = streamUrl(request);
@@ -300,7 +333,14 @@ server.on("upgrade", async (request, socket, head) => {
         height: url.searchParams.get("height"),
       });
     });
-  } catch {
+  } catch (error) {
+    logError({
+      level: "error",
+      source: "ws",
+      message: `WebSocket upgrade failed: ${error instanceof Error ? error.message : String(error)}`,
+      stack: error instanceof Error ? error.stack : undefined,
+      context: { pathname: url.pathname },
+    });
     socket.destroy();
   }
 });

@@ -13,6 +13,7 @@ import {
 import { getUserAgentCwd, getMcpServers } from "@/lib/mcp";
 import { resolveAgentPath } from "@/lib/revert";
 import { appendRunEvent, enqueueJob, getJob, touchJob, updateJob } from "@/lib/db-jobs";
+import { logError } from "@/lib/error-logs";
 import { isModelAllowed } from "@/lib/model-access";
 import { buildAttachmentPrompt } from "@/lib/uploads";
 import type { AgentJob } from "@/lib/jobs";
@@ -889,7 +890,8 @@ export async function runQueuedJob(job: AgentJob) {
               "Automation run: execute autonomously without waiting for the user. Never call ask_user, request_mode_change, wait, subagent_status, or any confirmation/user-approval tool. If information is missing, make a safe reasonable assumption and continue; if the task cannot be completed safely, explain that in the final response.",
             ]
         : [
-            "Personal context: the context_search / context_profile / context_remember MCP tools access the owner's shared context hub (devices, services, projects, preferences). When a task touches the owner's infrastructure, projects, or devices, consult them FIRST instead of asking the user. Do not dump contents unprompted; cite only what the query returned. Store newly learned durable preferences (how the owner wants things) via context_remember. list_memories/add_memory manage lightweight in-app memories the same way.",
+                        "If the user reports a UI/UX bug or something feels broken, inspect list_recent_errors first, diagnose, then fix it in the repo.",
+"Personal context: the context_search / context_profile / context_remember MCP tools access the owner's shared context hub (devices, services, projects, preferences). When a task touches the owner's infrastructure, projects, or devices, consult them FIRST instead of asking the user. Do not dump contents unprompted; cite only what the query returned. Store newly learned durable preferences (how the owner wants things) via context_remember. list_memories/add_memory manage lightweight in-app memories the same way.",
             `Current chat keywords: ${chat.keywords?.join(", ") || "(none)"}`,
             `Existing workspaces:\n${chat.workspaces?.map((item) => `[${item.type}] ${item.name} (workspace://${item.type}/${item.id})`).join("\n") || "(none)"}`,
           ]),
@@ -1333,6 +1335,15 @@ export async function runQueuedJob(job: AgentJob) {
     else emit("done", { status: result.status, agentId: agent.agentId });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Agent run failed.";
+    void logError({
+      level: "error",
+      source: "worker",
+      chatId: job.chatId,
+      userId: job.userId || undefined,
+      message: `Agent run failed: ${message}`,
+      stack: error instanceof Error ? error.stack : undefined,
+      context: { jobId: job.id, runId: job.runId },
+    });
     const finalJob = getJob(job.id);
     if (finalJob?.status !== "cancelled" && finalJob?.status !== "interrupted") {
       upsertMessage(job.chatId, {

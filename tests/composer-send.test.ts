@@ -78,3 +78,19 @@ test("decideComposerSend queues follow-ups while a run is in flight instead of d
     "queue",
   );
 });
+
+import { __resetClientTelemetryForTests, __queuedClientTelemetryForTests, reportUxEvent } from "../lib/client-telemetry";
+
+test("reportUxEvent records dedupe and lock reason telemetry without visible UI", () => {
+  __resetClientTelemetryForTests();
+  reportUxEvent("send_rejected", { reason: "duplicate_fingerprint", duplicate: true });
+  reportUxEvent("send_rejected", { reason: "lock_held", duplicate: false });
+  const queued = __queuedClientTelemetryForTests();
+  assert.equal(queued.length, 2);
+  assert.equal(queued[0].message, "ux:send_rejected");
+  assert.equal((queued[0].context?.detail as { reason?: string })?.reason, "duplicate_fingerprint");
+  assert.equal((queued[1].context?.detail as { reason?: string })?.reason, "lock_held");
+  // Identical event kind+message is deduped within 60s.
+  reportUxEvent("send_rejected", { reason: "duplicate_fingerprint", duplicate: true });
+  assert.equal(__queuedClientTelemetryForTests().length, 2);
+});

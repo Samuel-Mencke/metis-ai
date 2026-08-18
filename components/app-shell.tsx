@@ -109,6 +109,12 @@ import {
   isDuplicateComposerSend,
   shouldIgnoreComposerEnter,
 } from "@/lib/composer-send";
+import {
+  installGlobalClientTelemetry,
+  reportClientError,
+  reportUxEvent,
+  setTelemetrySession,
+} from "@/lib/client-telemetry";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -6202,6 +6208,9 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     } catch (err) {
       if ((err as Error).name !== "AbortError") {
         const msg = err instanceof Error ? err.message : "Request failed";
+        reportClientError(`send stream failed: ${msg}`, {
+          stack: err instanceof Error ? err.stack : undefined,
+        });
         setMessages((m) =>
           m.map((x) =>
             x.id === asstId

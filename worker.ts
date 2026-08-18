@@ -13,6 +13,7 @@ import {
 } from "@/lib/automations";
 import { enqueueJob } from "@/lib/db-jobs";
 import { waitForSchedulerTick } from "@/lib/worker-scheduler";
+import { logError } from "@/lib/error-logs";
 
 const pollMs = Number(process.env.AI_CHAT_WORKER_POLL_MS || 500);
 const configuredConcurrency = Number(process.env.AI_CHAT_WORKER_CONCURRENCY || 8);
@@ -31,6 +32,19 @@ function runJobInIsolatedProcess(jobId: string) {
   return new Promise<void>((resolveProcess, reject) => {
     const markFailed = (message: string) => {
       updateJob(jobId, { status: "error", error: message });
+      try {
+        const failedJob = getJob(jobId);
+        void logError({
+          level: "error",
+          source: "worker",
+          chatId: failedJob?.chatId,
+          userId: failedJob?.userId || undefined,
+          message: `Worker process failed: ${message}`,
+          context: { jobId, stderrTail: stderr.slice(-2000) },
+        });
+      } catch {
+        // Logging must never block job failure handling.
+      }
       const job = getJob(jobId);
       if (job) {
         appendRunEvent(job.id, job.chatId, job.userId, "error", { message });
