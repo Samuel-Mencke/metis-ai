@@ -663,9 +663,11 @@ const MODE_STORAGE_KEY = `${clientConfig.storagePrefix}_mode`;
 const SIDEBAR_WIDTH_STORAGE_KEY = `${clientConfig.storagePrefix}_sidebar_width`;
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 420;
+const CHAT_MIN_WIDTH = 640;
 const WORKSPACE_WIDTH_STORAGE_KEY = `${clientConfig.storagePrefix}_workspace_width_compact`;
 const WORKSPACE_MIN_WIDTH = 280;
 const WORKSPACE_MAX_WIDTH = 720;
+const WORKSPACE_SQUEEZE_MIN_WIDTH = 200;
 const NOTIFICATIONS_STORAGE_KEY = `${clientConfig.storagePrefix}_notifications_enabled`;
 const SOUND_CUES_STORAGE_KEY = `${clientConfig.storagePrefix}_sound_cues_enabled`;
 const FINISH_SOUND_STORAGE_KEY = `${clientConfig.storagePrefix}_finish_sound`;
@@ -1746,7 +1748,6 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [automationsOpen, setAutomationsOpen] = useState(false);
   const [focusedNoteId, setFocusedNoteId] = useState<string | null>(null);
   const [workspaceFullscreen, setWorkspaceFullscreen] = useState(false);
-  const workspaceAutoCollapsedSidebarRef = useRef(false);
   const [remoteTerminalCwd, setRemoteTerminalCwd] = useState(workspaceDefaultCwd);
   const [remoteFileCwd, setRemoteFileCwd] = useState(workspaceDefaultCwd);
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
@@ -1902,24 +1903,25 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       ? Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, saved))
       : 240;
   });
+  const [viewportWidth, setViewportWidth] = useState(() =>
+    typeof window === "undefined" ? 1280 : window.innerWidth,
+  );
 
   useEffect(() => {
-    if (typeof window === "undefined" || window.innerWidth < 768) return;
-    const syncSidebarForWorkspace = () => {
-      const needsSpace = workspaceOpen && !workspaceFullscreen &&
-        window.innerWidth < sidebarWidth + workspaceWidth + 640;
-      if (needsSpace && desktopSidebarOpen) {
-        workspaceAutoCollapsedSidebarRef.current = true;
-        setDesktopSidebarOpen(false);
-      } else if (!workspaceOpen && workspaceAutoCollapsedSidebarRef.current) {
-        workspaceAutoCollapsedSidebarRef.current = false;
-        setDesktopSidebarOpen(true);
-      }
-    };
-    syncSidebarForWorkspace();
-    window.addEventListener("resize", syncSidebarForWorkspace);
-    return () => window.removeEventListener("resize", syncSidebarForWorkspace);
-  }, [desktopSidebarOpen, sidebarWidth, workspaceFullscreen, workspaceOpen, workspaceWidth]);
+    const onResize = () => setViewportWidth(window.innerWidth);
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  const layoutSidebarWidth =
+    viewportWidth >= 768 && desktopSidebarOpen ? sidebarWidth : 0;
+  const displayedWorkspaceWidth = (() => {
+    if (!workspaceOpen || workspaceFullscreen) return workspaceWidth;
+    const remaining = viewportWidth - layoutSidebarWidth - CHAT_MIN_WIDTH;
+    if (remaining >= workspaceWidth) return workspaceWidth;
+    return Math.max(WORKSPACE_SQUEEZE_MIN_WIDTH, remaining);
+  })();
 
   useEffect(() => {
     if (desktopSidebarOpen) {
@@ -7609,7 +7611,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         </SheetContent>
       </Sheet>
 
-      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col md:min-w-[640px]">
         {/* Thin top bar */}
         <header className="relative z-20 flex h-12 shrink-0 items-center gap-2 border-b border-border/30 bg-background/90 px-3 backdrop-blur-xl md:px-4">
           <Button
@@ -8485,14 +8487,26 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       {!notesOpen && workspaceMounted ? (
         <aside
           className={cn(
-            "workspace-surface relative flex min-h-0 w-full shrink-0 flex-col overflow-hidden border-l border-border/30 bg-background/95 max-md:absolute max-md:inset-0 max-md:z-30 max-md:!w-full",
+            "workspace-surface relative flex min-h-0 w-full shrink-0 flex-col overflow-hidden border-l border-border/30 bg-background/95 transition-[width] duration-200 max-md:absolute max-md:inset-0 max-md:z-30 max-md:!w-full",
             workspaceFullscreen && "fixed inset-[1%] z-50 !w-auto rounded-xl border border-border shadow-2xl ring-1 ring-foreground/10",
             workspaceOpen ? "workspace-panel-enter" : "workspace-panel-exit",
           )}
-          style={workspaceFullscreen ? undefined : { width: `min(100%, ${workspaceWidth}px)` }}
+          style={workspaceFullscreen ? undefined : { width: `min(100%, ${displayedWorkspaceWidth}px)` }}
         >
           {workspaceFullscreen ? null : (
-            <WorkspaceResizeHandle width={workspaceWidth} onWidthChange={setWorkspaceWidth} />
+            <WorkspaceResizeHandle
+              width={displayedWorkspaceWidth}
+              onWidthChange={(width) => {
+                const remaining = viewportWidth - layoutSidebarWidth - CHAT_MIN_WIDTH;
+                const maxWidth = Math.max(
+                  WORKSPACE_MIN_WIDTH,
+                  Math.min(WORKSPACE_MAX_WIDTH, remaining),
+                );
+                setWorkspaceWidth(
+                  Math.min(maxWidth, Math.max(WORKSPACE_MIN_WIDTH, width)),
+                );
+              }}
+            />
           )}
           <div className="flex shrink-0 items-center gap-1 border-b border-border/30 px-2 py-1.5">
             <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto">
