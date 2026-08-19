@@ -46,15 +46,25 @@ export async function performSharedBrowserAction(
     headers["X-Chat-Password"] = process.env.CHAT_PASSWORD?.trim() || "";
   }
 
-  const response = await fetch(
-    `http://127.0.0.1:${config.port}/__internal/browser-engine`,
-    {
-      method: "POST",
-      headers,
-      body: JSON.stringify(action),
-      cache: "no-store",
-    },
-  );
+  let response: Response;
+  try {
+    response = await fetch(
+      `http://127.0.0.1:${config.port}/__internal/browser-engine`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(action),
+        cache: "no-store",
+        signal: AbortSignal.timeout(90_000),
+      },
+    );
+  } catch (error) {
+    throw new Error(
+      error instanceof Error && error.name === "TimeoutError"
+        ? "Browser action timed out"
+        : "Browser engine is unreachable",
+    );
+  }
   const data = (await response.json().catch(() => ({}))) as
     | SharedBrowserResult
     | { error?: string };

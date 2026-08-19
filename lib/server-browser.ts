@@ -218,10 +218,17 @@ function tabIdFor(state: BrowserContextState, requested?: string) {
   return tabId;
 }
 
+async function screenshotPage(page: Page, options: { type: "png" } | { type: "jpeg"; quality: number }) {
+  return page.screenshot({ ...options, timeout: 15_000 });
+}
+
 async function pageInfo(state: BrowserContextState, tabId: string) {
   const page = state.tabs.get(tabId)!;
   const url = page.url();
-  const faviconHref = await page.locator('link[rel~="icon"], link[rel="shortcut icon"]').first().getAttribute("href").catch(() => null);
+  const faviconHref = await page.evaluate(() => {
+    const el = document.querySelector('link[rel~="icon"], link[rel="shortcut icon"]');
+    return el?.getAttribute("href") || null;
+  }).catch(() => null);
   let favicon: string | undefined;
   if (faviconHref) {
     try {
@@ -272,7 +279,7 @@ export async function captureBrowserFrame(
     url: url === "about:blank" ? "" : url,
     title: info.title,
     viewport: page.viewportSize() || DEFAULT_VIEWPORT,
-    data: await page.screenshot({ type: "jpeg", quality: Math.max(35, Math.min(90, quality)) }),
+    data: await screenshotPage(page, { type: "jpeg", quality: Math.max(35, Math.min(90, quality)) }),
   };
 }
 
@@ -367,7 +374,7 @@ async function performBrowserActionUnlocked(ownerId: string, chatId: string, act
   recordOrigin(ownerId, page.url());
   const result = await resultFor(state, tabId);
   if (action.action === "screenshot" || action.action === "navigate" || action.action === "click" || action.action === "type" || action.action === "press" || action.action === "reload" || action.action === "back" || action.action === "forward" || action.action === "select_tab" || action.action === "scroll" || action.action === "resize") {
-    result.screenshot = (await page.screenshot({ type: "png" })).toString("base64");
+    result.screenshot = (await screenshotPage(page, { type: "png" })).toString("base64");
   }
   if (action.action === "snapshot") {
     result.snapshot = (await page.locator("body").ariaSnapshot().catch(() => page.locator("body").innerText().catch(() => ""))).slice(0, MAX_SNAPSHOT_LENGTH);

@@ -733,7 +733,9 @@ async function readJsonResponse<T>(response: Response): Promise<T> {
     throw new Error(
       response.status === 404
         ? "Browser API not found. Open Metis AI through its application server, not a static frontend server."
-        : `Browser API returned an unexpected response (${response.status}).`,
+        : response.status === 504
+          ? "Browser timed out waiting for the page. Try again or reload the tab."
+          : `Browser API returned an unexpected response (${response.status}).`,
     );
   }
   try {
