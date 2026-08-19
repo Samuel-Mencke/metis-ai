@@ -18,7 +18,7 @@
     "build": "next build",
     "start": "tsx server.mjs",
     "lint": "eslint .",
-    "test": "pnpm run test:providers && pnpm run test:shared && tsx --test scripts/security.test.ts tests/installers.test.ts",
+    "test": "pnpm run test:providers && pnpm run test:shared && tsx --test scripts/security.test.ts tests/installers.test.ts tests/tool-kind.test.ts tests/browser.test.ts tests/live-agent-events.test.ts tests/agent-identity.test.ts tests/worker-concurrency.test.ts",
     "test:providers": "tsx --test tests/providers.test.ts tests/uploads.test.ts tests/modes.test.ts",
     "test:shared": "tsx --test tests/shared-context.test.ts",
     "typecheck": "tsc --noEmit"

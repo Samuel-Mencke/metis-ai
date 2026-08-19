@@ -5637,6 +5637,9 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               }),
             );
           } else if (event === "thinking") {
+            if (activeChatIdRef.current === chatId && payload.done !== true) {
+              setLiveStatus("Thinking…");
+            }
             setMessages((m) =>
               m.map((x) => {
                 if (x.id !== asstId) return x;

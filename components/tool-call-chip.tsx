@@ -645,9 +645,10 @@ export const ToolCallGroup = memo(function ToolCallGroup({
   autoExpand?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const working = tools.some((tool) => tool.status === "running");
   useEffect(() => {
-    setExpanded(autoExpand);
-  }, [autoExpand]);
+    setExpanded(autoExpand || working);
+  }, [autoExpand, working]);
   const planTools = includePlans ? tools.filter((tool) => tool.kind === "plan") : [];
   const noteTools = tools.filter((tool) => tool.kind === "note");
   const regularTools = tools.filter(
@@ -658,7 +659,6 @@ export const ToolCallGroup = memo(function ToolCallGroup({
     ? mcpDisplayInfo(first.name, first.input, first.detail)
     : undefined;
   const label = firstMcpInfo?.label || first?.name.replaceAll("_", " ") || "Tools";
-  const working = tools.some((tool) => tool.status === "running");
   const renderTool = (tool: ToolCallData) => (
     <ToolCallChip
       {...tool}
@@ -668,7 +668,7 @@ export const ToolCallGroup = memo(function ToolCallGroup({
       onBuildPlan={(plan) => onBuildPlan?.(tool, plan)}
       buildDisabled={buildDisabled}
       onOpenRaw={() => onOpenRaw?.(tool)}
-      autoExpand={autoExpand}
+      autoExpand={autoExpand || working}
     />
   );
   if (regularTools.length === 0) {

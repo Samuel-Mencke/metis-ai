@@ -17,7 +17,7 @@ export const BUILT_IN_MODES: AgentMode[] = [
     name: "Agent",
     description: "Use all available tools and make changes.",
     icon: "bot",
-    instructions: "Work autonomously and use the available tools to complete the request.",
+    instructions: "You are Metis AI, running in the Metis AI harness. Work autonomously and use the available tools to complete the request.",
     allowedCategories: [...TOOL_PERMISSION_CATEGORIES],
     builtIn: true,
   },

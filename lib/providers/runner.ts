@@ -42,6 +42,8 @@ import { runOfficialAntigravityJob } from "@/lib/providers/official-antigravity"
 import type { AgentJob } from "@/lib/jobs";
 import { getMcpServers } from "@/lib/mcp";
 import { allModes, modeById } from "@/lib/modes";
+import { classifyTool, toolDetailFromArgs } from "@/lib/tool-kind";
+import { metisAgentIdentity } from "@/lib/agent-identity";
 
 type Usage = {
   inputTokens?: number;
@@ -63,6 +65,7 @@ type ProviderContext = {
   signal: AbortSignal;
   onText: (value: string) => void;
   onTool: (tool: ToolPart) => void;
+  onThinking: (data: { text?: string; replace?: boolean; done?: boolean; durationMs?: number }) => void;
   onStream: (data: Record<string, unknown>) => void;
 };
 
@@ -139,6 +142,18 @@ function providerRemoteTools(context: ProviderContext): ToolSet {
   return tools;
 }
 
+function providerLanguageTools(context: ProviderContext): ToolSet {
+  const tools: ToolSet = { ...providerRemoteTools(context) };
+  if (context.connection.providerKey !== "xai") return tools;
+  const client = createXai({
+    apiKey: context.connection.secret,
+    ...(context.connection.baseUrl ? { baseURL: context.connection.baseUrl } : {}),
+  });
+  tools.web_search = client.tools.webSearch() as never;
+  tools.x_search = client.tools.xSearch() as never;
+  return tools;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -169,8 +184,9 @@ function providerPrompt(job: AgentJob) {
       ].filter(Boolean).join("\n")).join("\n")
     : "";
   return [
-    "You are a provider inside a private AI chat application.",
+    metisAgentIdentity(),
     "Answer the user directly and do not claim to have used tools you were not given.",
+    "If web_search or x_search are available, use them for current documentation or facts instead of narrating that you are researching.",
     "Response recommendation rule: when the result is incomplete, uses demo/stub endpoints, or still lacks real integrations, clearly distinguish implemented from missing functionality, then provide 1–3 concise, concrete next-step recommendations and ask whether to implement the recommended next step. Never present demo functionality as production-ready.",
     "Remote-client tools are available in this run when supported by the provider. Use list_remote_clients first, then target remote operations with target=client:<remote-client-id>; do not use server paths for client files.",
     "When you use browser results, selected references, or other verifiable web sources, cite the exact URL immediately after the sentence it supports using the format [Source: Website title](URL). At the end, put every source used in exactly one fenced block starting with ```sources, with one Markdown link per line. Never invent URLs; if no verifiable source is available, do not create a sources block.",
@@ -221,7 +237,7 @@ function aiModel(
     return createGoogle({ apiKey: secret, ...(baseURL ? { baseURL } : {}) }).chat(modelId);
   }
   if (providerKey === "xai") {
-    return createXai({ apiKey: secret, ...(baseURL ? { baseURL } : {}) }).chat(modelId);
+    return createXai({ apiKey: secret, ...(baseURL ? { baseURL } : {}) }).responses(modelId);
   }
   if (providerKey === "openrouter") {
     return createOpenRouter({
@@ -277,6 +293,8 @@ async function consumeAiStream(
       if (part.type === "text-delta") {
         textProduced = true;
         context.onText(part.text);
+      } else if (part.type === "reasoning-delta") {
+        context.onThinking({ text: part.text, replace: false, done: false });
       } else if (part.type === "error") {
         providerError = streamErrorText(part.error);
       } else if (part.type === "finish") {
@@ -285,8 +303,11 @@ async function consumeAiStream(
         context.onTool({
           id: part.toolCallId,
           name: part.toolName,
-          status: "completed",
-          kind: "other",
+          status: "running",
+          kind: classifyTool(part.toolName),
+          ...(toolDetailFromArgs("input" in part ? part.input : undefined)
+            ? { detail: toolDetailFromArgs("input" in part ? part.input : undefined) }
+            : {}),
           ...("input" in part && part.input !== undefined ? { input: JSON.stringify(part.input) } : {}),
         });
       } else if (part.type === "tool-result") {
@@ -294,7 +315,7 @@ async function consumeAiStream(
           id: part.toolCallId,
           name: part.toolName,
           status: "completed",
-          kind: "other",
+          kind: classifyTool(part.toolName),
           ...("result" in part && part.result !== undefined ? { result: JSON.stringify(part.result) } : {}),
         });
       }
@@ -329,7 +350,7 @@ async function runAiSdk(context: ProviderContext): Promise<ProviderResult> {
     model: aiModel(context.connection.providerKey, context.modelId, context.connection),
     instructions: providerPrompt(context.job),
     messages: modelMessages(context.chat, context.job),
-    tools: providerRemoteTools(context),
+    tools: providerLanguageTools(context),
     stopWhen: stepCountIs(20),
     abortSignal: context.signal,
   });
@@ -367,7 +388,7 @@ async function runOAuthAiSdk(
       model: provider.languageModel(oauthModelId),
       instructions: providerPrompt(context.job),
       messages: modelMessages(context.chat, context.job),
-      tools: providerRemoteTools(context),
+      tools: providerLanguageTools(context),
       stopWhen: stepCountIs(20),
       abortSignal: context.signal,
     });
@@ -902,14 +923,21 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       name: tool.name,
       status: tool.status,
       kind: tool.kind,
+      ...(tool.detail ? { detail: tool.detail } : {}),
       ...(tool.input ? { input: tool.input } : {}),
       ...(tool.result ? { result: tool.result } : {}),
     });
   };
+  const onThinking = (data: { text?: string; replace?: boolean; done?: boolean; durationMs?: number }) => {
+    emit("thinking", data);
+    if (data.done !== true) {
+      emit("status", { status: "running", message: "Thinking…" });
+    }
+  };
 
   appendMessage(job.chatId, { id: assistantMessageId, role: "assistant", content: "" });
   emit("assistantId", { messageId: assistantMessageId });
-  emit("status", { status: "running", provider: definition.key });
+  emit("status", { status: "running", message: "Starting model…" });
   updateChat(job.chatId, {
     runStatus: "running",
     runUpdatedAt: new Date().toISOString(),
@@ -925,6 +953,7 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       signal: controller.signal,
       onText,
       onTool,
+      onThinking,
       onStream: (data) => emit("stream", data),
     });
     const cancelled = controller.signal.aborted || getJob(job.id)?.status === "cancelled";
