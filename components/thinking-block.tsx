@@ -39,12 +39,12 @@ export function ThinkingBlock({
         aria-expanded={expanded}
         onClick={() => setExpanded((value) => !value)}
         className={cn(
-          "flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-xs text-muted-foreground",
-          "transition-colors hover:bg-muted/20 hover:text-muted-foreground",
+          "group flex w-full cursor-pointer items-center gap-2 px-1 py-0.5 text-left text-xs text-muted-foreground",
+          "transition-colors hover:text-foreground",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         )}
       >
-        <ChevronRight className={cn("size-3 shrink-0 text-muted-foreground/60 transition-transform", expanded && "rotate-90")} />
+        <ChevronRight className={cn("size-3 shrink-0 text-current opacity-50 transition-[opacity,transform] group-hover:opacity-100", expanded && "rotate-90")} />
         <span className="truncate font-medium text-muted-foreground">Thinking</span>
         {durationLabel ? (
           <span className="shrink-0 text-muted-foreground/70">· {durationLabel}</span>

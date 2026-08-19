@@ -362,7 +362,7 @@ export const ToolCallChip = memo(function ToolCallChip({
   if (kind === "todo" && todos?.length) {
     const completed = todos.filter((todo) => todo.status === "completed" || todo.status === "done").length;
     return (
-      <div className="my-2 w-full rounded-md border border-border/50 bg-muted/15 px-2.5 py-2">
+      <div className="my-2 w-full px-1 py-0.5">
         <div className="mb-1.5 flex items-center gap-2 text-xs">
           <ListTodo className="size-3.5 text-blue-400" />
           <span className="font-medium text-foreground/80">Tasks</span>
@@ -397,7 +397,7 @@ export const ToolCallChip = memo(function ToolCallChip({
   if (kind === "memory") {
     const memoryOutput = formatToolOutput(result || detail || input) || "Memory updated";
     return (
-      <div className="my-2 flex w-full items-start gap-2 rounded-md border border-violet-400/30 bg-violet-400/10 px-2.5 py-2 text-xs">
+      <div className="my-1 flex w-full items-start gap-2 px-1 py-0.5 text-xs">
         <Brain className="mt-0.5 size-3.5 shrink-0 text-violet-400" />
         <div className="min-w-0">
           <p className="font-medium text-violet-300">Memory update</p>
@@ -523,13 +523,12 @@ export const ToolCallChip = memo(function ToolCallChip({
             }
           }}
           className={cn(
-            "my-2 flex w-full max-w-full items-center gap-2 rounded-md border px-2 py-1 text-left transition-colors",
-            "border-border/50 bg-muted/15 text-xs text-muted-foreground hover:bg-muted/30 active:bg-muted/40",
-            "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            "my-1 group flex w-full max-w-full cursor-pointer items-center gap-2 px-1 py-0.5 text-left text-xs text-muted-foreground transition-colors",
+            "cursor-pointer hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           )}
         >
       {detailsToggleable ? (
-        <ChevronRight className={cn("size-3 shrink-0 text-muted-foreground/50 transition-transform", expanded && "rotate-90")} />
+        <ChevronRight className={cn("size-3 shrink-0 text-current opacity-50 transition-[opacity,transform] group-hover:opacity-100", expanded && "rotate-90")} />
       ) : null}
       <span className={cn("flex size-4 shrink-0 items-center justify-center", config.color)}>
         {running ? <LoaderCircle className="size-3 animate-spin" /> : <Icon className="size-3" />}
@@ -582,7 +581,7 @@ export const ToolCallChip = memo(function ToolCallChip({
           ) : null}
         </div>
       {expanded ? (
-        <div className="my-1 min-w-0 max-w-full max-h-72 space-y-2 overflow-x-hidden overflow-y-auto rounded-md border border-border/40 bg-muted/20 px-2.5 py-2 text-[11px] leading-4 text-foreground/80">
+        <div className="my-1 min-w-0 max-w-full max-h-72 space-y-2 overflow-x-hidden overflow-y-auto pl-7 pr-1 text-[11px] leading-4 text-muted-foreground">
           {input ? (
             <section>
               <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Request</p>
@@ -776,9 +775,9 @@ export const ToolCallGroup = memo(function ToolCallGroup({
             type="button"
             aria-expanded={expanded}
             onClick={() => setExpanded((value) => !value)}
-            className="flex w-full items-center gap-2 rounded-md border border-border/50 bg-muted/15 px-2 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/30"
+            className="group flex w-full cursor-pointer items-center gap-2 px-1 py-0.5 text-left text-xs text-muted-foreground transition-colors hover:text-foreground"
           >
-            <ChevronRight className={cn("size-3 shrink-0 transition-transform", expanded && "rotate-90")} />
+            <ChevronRight className={cn("size-3 shrink-0 text-current opacity-50 transition-[opacity,transform] group-hover:opacity-100", expanded && "rotate-90")} />
             <span className="truncate text-foreground/75">{label}</span>
             {working ? (
               <span className="ml-auto flex items-center" aria-label="Working">
