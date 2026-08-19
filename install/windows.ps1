@@ -204,6 +204,7 @@ AI_CHAT_ROOT=$InstallDir
 AI_CHAT_INSTALL_DIR=$InstallDir
 AI_CHAT_PUBLIC_URL=$publicUrl
 AI_CHAT_SERVICE_NAME=$serviceName
+AI_CHAT_WORKER_CONCURRENCY=25
 AI_CHAT_MCP_STATE_DIR=$(Join-Path $dataDir "mcp-state")
 AI_CHAT_SECRETS_KEY=$secretsKey
 MCP_PORT=$mcpPort

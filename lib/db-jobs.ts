@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { getDatabase, parseData, transaction } from "@/lib/sqlite";
 import type { AgentJob, JobStatus } from "@/lib/jobs";
 import { updateChat } from "@/lib/db-store";
+import { workerConcurrency } from "@/lib/worker-concurrency";
 
 const iso = () => new Date().toISOString();
 const RUN_EVENT_RETENTION = 10_000;
@@ -30,8 +31,7 @@ export function enqueueJob(input: Omit<AgentJob, "id" | "status" | "attempts" | 
       throw error;
     }
     const now = iso();
-    const configuredConcurrency = Number(process.env.AI_CHAT_WORKER_CONCURRENCY || 4);
-    const maxWorkers = Number.isFinite(configuredConcurrency) ? Math.max(1, Math.floor(configuredConcurrency)) : 4;
+    const maxWorkers = workerConcurrency();
     const running = Number(
       (getDatabase().prepare(
         "SELECT COUNT(*) as count FROM jobs WHERE status = 'running'",

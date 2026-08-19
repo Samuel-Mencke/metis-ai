@@ -62,6 +62,7 @@ test("all platform installers expose an explicit network-host option", () => {
     for (const source of [content, publicContent]) {
       assert.match(source, /Host web application on local network/);
       assert.match(source, /AI_CHAT_HOST/);
+      assert.match(source, /AI_CHAT_WORKER_CONCURRENCY[^\n]*25/);
       assert.match(source, /0\.0\.0\.0/);
     }
   }

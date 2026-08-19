@@ -11,10 +11,10 @@ import {
   startAutomationRun,
 } from "@/lib/automations";
 import { enqueueJob } from "@/lib/db-jobs";
+import { workerConcurrency } from "@/lib/worker-concurrency";
 
 const pollMs = Number(process.env.AI_CHAT_WORKER_POLL_MS || 500);
-const configuredConcurrency = Number(process.env.AI_CHAT_WORKER_CONCURRENCY || 4);
-const concurrency = Number.isFinite(configuredConcurrency) ? Math.max(1, configuredConcurrency) : 4;
+const concurrency = workerConcurrency();
 const configuredMaxJobMs = Number(process.env.AI_CHAT_WORKER_MAX_JOB_MS || 30 * 60 * 1000);
 const maxJobMs = Number.isFinite(configuredMaxJobMs)
   ? Math.max(60_000, configuredMaxJobMs)
