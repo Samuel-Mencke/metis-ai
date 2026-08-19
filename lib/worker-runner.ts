@@ -29,6 +29,7 @@ import type { AgentMode, MessagePart, ToolPermissionCategory } from "@/lib/store
 import { compress, type CompressionMode } from "@/lib/compression";
 import { classifyTool, toolDetailFromArgs } from "@/lib/tool-kind";
 import { metisAgentIdentity } from "@/lib/agent-identity";
+import { sanitizeModelParams } from "@/lib/feature-flags";
 
 const AGENT_INIT_TIMEOUT_MS = 90_000;
 const AGENT_INACTIVITY_TIMEOUT_MS = 5 * 60_000;
@@ -586,7 +587,7 @@ export async function runQueuedJob(job: AgentJob) {
   const configuredSubagentModel = job.extendedModelId ||
     (globalModelSettings.subagentModelEnabled ? globalModelSettings.subagentModelId : undefined);
   const configuredSubagentModelParams = configuredSubagentModel
-    ? globalModelSettings.modelParamsByModel?.[configuredSubagentModel] || []
+    ? sanitizeModelParams(globalModelSettings.modelParamsByModel?.[configuredSubagentModel] || []) || []
     : [];
   const customSubagentDefinitions = configuredSubagentModel
     ? Object.fromEntries(
@@ -685,9 +686,9 @@ export async function runQueuedJob(job: AgentJob) {
     return workspace;
   };
   try {
-    const modelParams = job.modelParams?.length
-      ? job.modelParams
-      : chat.modelParams;
+    const modelParams = sanitizeModelParams(
+      job.modelParams?.length ? job.modelParams : chat.modelParams,
+    );
     const model = {
       id: requestedModelId,
       ...(modelParams?.length ? { params: modelParams } : {}),
@@ -1160,7 +1161,7 @@ export async function runQueuedJob(job: AgentJob) {
           modeId: job.modeId,
           modelId: job.modelId,
           extendedModelId: job.extendedModelId,
-          modelParams: job.modelParams,
+          modelParams: sanitizeModelParams(job.modelParams),
         });
         createdChats.push({ id: child.id, title: child.title });
         emit("chat", {

@@ -9,7 +9,6 @@ import {
 } from "@/components/ui/popover";
 import { JailbreakPromptPicker } from "@/components/jailbreak-prompt-picker";
 import { cn } from "@/lib/utils";
-import { UNCENSORED_PARAMETER } from "@/lib/model-params";
 import type {
   ModelInfo,
   ModelParamSelection,
@@ -39,12 +38,7 @@ export function ModelOptionsMenu({
   onInsertPrompt,
   className,
 }: Props) {
-  const parameters = [
-    ...(model.parameters ?? []),
-    ...((model.parameters ?? []).some((parameter) => parameter.id === "uncensored")
-      ? []
-      : [UNCENSORED_PARAMETER]),
-  ];
+  const parameters = model.parameters ?? [];
 
   function paramValue(id: string): string {
     return modelParams.find((p) => p.id === id)?.value ?? "";

@@ -37,7 +37,7 @@ let inflight: Promise<Data | null> | null = null;
 async function loadData(): Promise<Data | null> {
   if (dataCache) return dataCache;
   if (inflight) return inflight;
-  inflight = fetch("/prompts.json")
+  inflight = fetch("/api/prompts")
     .then((r) => (r.ok ? r.json() : null))
     .then((d) => {
       dataCache = d;

@@ -1,6 +1,7 @@
 import { Cursor } from "@cursor/sdk";
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { filterAllowedModels } from "@/lib/model-access";
+import { isUncensoredEnabled } from "@/lib/feature-flags";
 import { UNCENSORED_PARAMETER } from "@/lib/model-params";
 import {
   findActiveConnection,
@@ -44,6 +45,13 @@ export type ModelInfo = {
   defaultParams?: ModelParamSelection[];
   contextWindow?: number;
 };
+
+function withUncensoredParameter(parameters: ModelParameter[] = []) {
+  const without = parameters.filter((parameter) => parameter.id !== "uncensored");
+  if (!isUncensoredEnabled()) return without;
+  if (parameters.some((parameter) => parameter.id === "uncensored")) return parameters;
+  return [...without, UNCENSORED_PARAMETER];
+}
 
 function contextWindowOf(value: unknown) {
   if (!value || typeof value !== "object") return undefined;
@@ -93,7 +101,6 @@ export async function GET(req: Request) {
             displayName: v.displayName,
           })),
         }));
-        const hasUncensored = cursorParams.some((p) => p.id === "uncensored");
         return {
           id: m.id,
           displayName: m.displayName || m.id,
@@ -102,9 +109,7 @@ export async function GET(req: Request) {
           providerName: "Cursor",
           source: "cursor",
           description: m.description,
-          parameters: hasUncensored
-            ? cursorParams
-            : [...cursorParams, UNCENSORED_PARAMETER],
+          parameters: withUncensoredParameter(cursorParams),
           defaultParams: (defaultVariant?.params ?? [])
             .filter((p) => p.id !== "cyber")
             .map((p) => ({ id: p.id, value: p.value })),
@@ -134,11 +139,13 @@ export async function GET(req: Request) {
         tags: "tags" in model && Array.isArray(model.tags) ? model.tags : undefined,
         ...(contextWindowOf(model) ? { contextWindow: contextWindowOf(model) } : {}),
         capabilities: model.capabilities as Record<string, boolean> | undefined,
-        parameters: model.parameters?.map((parameter) => ({
-          id: parameter.id,
-          displayName: parameter.displayName,
-          values: parameter.values.map((value) => ({ ...value })),
-        })),
+        parameters: withUncensoredParameter(
+          model.parameters?.map((parameter) => ({
+            id: parameter.id,
+            displayName: parameter.displayName,
+            values: parameter.values.map((value) => ({ ...value })),
+          })) ?? [],
+        ),
         defaultParams: model.defaultParams?.map((parameter) => ({ ...parameter })),
       })),
     );

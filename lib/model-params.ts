@@ -15,8 +15,7 @@ export type ModelParameter = {
   values: ModelParamValue[];
 };
 
-/** Boolean toggle appended to every model so uncensored mode can be flipped
- *  per-chat like `effort` / `fast` / `context`. */
+/** Appended to models only when METIS_ENABLE_UNCENSORED is on. */
 export const UNCENSORED_PARAMETER: ModelParameter = {
   id: "uncensored",
   displayName: "Uncensored",

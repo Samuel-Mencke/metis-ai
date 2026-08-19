@@ -3,6 +3,7 @@ import { enqueueJob, getActiveJob } from "@/lib/db-jobs";
 import { appendMessage, getChat, titleFromMessage, updateChat } from "@/lib/db-store";
 import { isModelAllowed } from "@/lib/model-access";
 import { getPinnedNotes, resolveReferences, type ContextReference } from "@/lib/context";
+import { sanitizeModelParams } from "@/lib/feature-flags";
 import {
   MAX_ATTACHMENTS,
   resolveUploadPath,
@@ -145,6 +146,7 @@ export async function POST(req: Request) {
       titleSource: "default",
     }, ownerId);
   }
+  const modelParams = sanitizeModelParams(body.modelParams);
   let job;
   try {
     job = enqueueJob({
@@ -156,7 +158,7 @@ export async function POST(req: Request) {
       ...(references.length ? { references } : {}),
       ...(body.agentId ? { agentId: body.agentId } : {}),
       ...(requestedModelId ? { modelId: requestedModelId } : {}),
-      ...(body.modelParams ? { modelParams: body.modelParams } : {}),
+      ...(modelParams?.length ? { modelParams } : {}),
       ...((stored.length ? stored : storedAttachments).length
         ? { attachments: stored.length ? stored : storedAttachments }
         : {}),

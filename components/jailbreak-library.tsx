@@ -47,7 +47,7 @@ export default function JailbreakLibrary() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch("/prompts.json")
+    fetch("/api/prompts")
       .then((r) => {
         if (!r.ok) throw new Error("HTTP " + r.status);
         return r.json();
@@ -123,7 +123,7 @@ export default function JailbreakLibrary() {
   if (error) {
     return (
       <div className="flex min-h-dvh items-center justify-center p-8 text-sm text-muted-foreground">
-          Could not load prompts.json: {error}
+          Could not load prompts: {error}
       </div>
     );
   }
