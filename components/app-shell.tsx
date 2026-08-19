@@ -98,8 +98,7 @@ import {
   type ModelInfo,
   type ModelParamSelection,
 } from "@/components/settings-panel";
-import { ThinkingBlock } from "@/components/thinking-block";
-import { PlanToolCallCard, ToolCallGroup, type ToolCallData } from "@/components/tool-call-chip";
+import { PlanToolCallCard, ToolCallGroup, type ActivityEntry, type ToolCallData } from "@/components/tool-call-chip";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -8015,36 +8014,33 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                           return (
                             <>
                         {messageParts.map((part, pi, parts) => {
-                          if (part.type === "thinking") {
-                            return (
-                              <ThinkingBlock
-                                key={`thinking-${pi}`}
-                                text={part.content}
-                                done={
-                                  Boolean(part.done) ||
-                                  Boolean(m.thinkingDone) ||
-                                  !m.streaming
-                                }
-                                durationMs={
-                                  part.durationMs ?? m.thinkingDurationMs
-                                }
-                              />
-                            );
-                          }
-                          if (part.type === "tool") {
-                            const currentTool = part as ToolCallData;
-                            const previousTool = parts[pi - 1]?.type === "tool"
-                              ? parts[pi - 1] as ToolCallData
-                              : undefined;
-                            if (previousTool) return null;
-                            const groupedTools: ToolCallData[] = [];
-                            for (let toolIndex = pi; toolIndex < parts.length && parts[toolIndex]?.type === "tool"; toolIndex += 1) {
-                              groupedTools.push(parts[toolIndex] as ToolCallData);
+                          if (part.type === "thinking" || part.type === "tool") {
+                            const previous = parts[pi - 1];
+                            if (previous?.type === "thinking" || previous?.type === "tool") return null;
+                            const activity: ActivityEntry[] = [];
+                            for (let index = pi; index < parts.length && (parts[index]?.type === "thinking" || parts[index]?.type === "tool"); index += 1) {
+                              const current = parts[index];
+                              if (current.type === "thinking") {
+                                activity.push({
+                                  type: "thinking",
+                                  thinking: {
+                                    text: current.content,
+                                    done: Boolean(current.done) || Boolean(m.thinkingDone) || !m.streaming,
+                                    durationMs: current.durationMs,
+                                  },
+                                });
+                                continue;
+                              }
+                              activity.push({ type: "tool", tool: current as ToolCallData });
+                            }
+                            const firstThinking = activity.find((entry) => entry.type === "thinking");
+                            if (firstThinking?.type === "thinking" && firstThinking.thinking.durationMs == null && m.thinkingDurationMs != null) {
+                              firstThinking.thinking.durationMs = m.thinkingDurationMs;
                             }
                             return (
                               <ToolCallGroup
-                                key={`tools-${part.id}`}
-                                tools={groupedTools.filter((tool) => tool.kind !== "plan")}
+                                key={`activity-${part.type === "tool" ? part.id : `thinking-${pi}`}`}
+                                activity={activity}
                                 onOpenDiff={(tool) =>
                                   setActiveDiff({
                                     name: tool.name,

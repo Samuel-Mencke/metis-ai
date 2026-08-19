@@ -4,7 +4,6 @@ import { FormEvent, Suspense, useEffect, useState } from "react";
 import { AudioLines, ChevronDown, ClipboardList, FileText, Image as ImageIcon, Link2, LockKeyhole, LogIn, MessageSquareShare, Palette, Video } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import { Markdown } from "@/components/markdown";
-import { ThinkingBlock } from "@/components/thinking-block";
 import { ToolCallGroup, type ToolCallData } from "@/components/tool-call-chip";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -231,9 +230,9 @@ function SharedMessageView({
         </div>
       ) : (
         <div className="text-[15px] leading-relaxed text-foreground/95">
-          {message.thinking ? <ThinkingBlock text={message.thinking} done /> : null}
-          {tools.length ? (
+          {message.thinking || tools.length ? (
             <ToolCallGroup
+              thinking={message.thinking ? [{ text: message.thinking, done: true }] : []}
               tools={tools}
               includePlans
               autoExpand={false}

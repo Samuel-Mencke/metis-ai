@@ -7,7 +7,6 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Markdown } from "@/components/markdown";
 import { ToolCallGroup } from "@/components/tool-call-chip";
-import { ThinkingBlock } from "@/components/thinking-block";
 
 type Props = {
   tool: ToolPart;
@@ -114,8 +113,14 @@ export function SubagentChatView({ tool, onBack, onCancel, cancelling = false, s
               </div>
             </div>
           ) : null}
-          {tool.subagent?.thinking ? (
-            <ThinkingBlock text={tool.subagent.thinking} done={tool.status !== "running"} />
+          {tool.subagent?.thinking || tool.subagent?.tools?.length ? (
+            <ToolCallGroup
+              thinking={tool.subagent?.thinking ? [{
+                text: tool.subagent.thinking,
+                done: tool.status !== "running",
+              }] : []}
+              tools={tool.subagent?.tools ?? []}
+            />
           ) : null}
           {messages.map((message, index) => (
             <div
@@ -138,12 +143,6 @@ export function SubagentChatView({ tool, onBack, onCancel, cancelling = false, s
               )}
             </div>
           ))}
-          {tool.subagent?.tools?.length ? (
-            <ToolCallGroup
-              tools={tool.subagent.tools}
-              autoExpand={tool.status === "running"}
-            />
-          ) : null}
           {!messages.length && tool.result ? (
             <div className="text-[15px] leading-relaxed text-foreground/95">
               <Markdown content={readableSubagentText(tool.result)} />

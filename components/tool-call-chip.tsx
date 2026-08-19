@@ -22,6 +22,7 @@ import { memo, useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { PlanWorkspaceCard } from "@/components/plan-workspace-card";
 import { CanvasWorkspaceCard } from "@/components/canvas-workspace-card";
+import { ThinkingBlock, formatThinkingDuration } from "@/components/thinking-block";
 
 export type ToolCallData = {
   id: string;
@@ -296,10 +297,19 @@ function toolDisplayInfo(kind: ToolCallData["kind"], name: string, input?: strin
       ? inputPath || readableName
       : readableName;
   const output = detail?.replace(/\s+/g, " ").trim();
+  const extra = command && primary !== command ? command : output;
   return {
     label: primary || kind || name.replaceAll("_", " "),
-    detail: command && primary !== command ? command : output,
+    detail: extra && !isSameCompactText(primary, extra) ? extra : undefined,
   };
+}
+
+function isSameCompactText(left?: string, right?: string) {
+  if (!left || !right) return false;
+  const a = left.replace(/\s+/g, " ").trim().toLowerCase();
+  const b = right.replace(/\s+/g, " ").trim().replace(/…$/u, "").trim().toLowerCase();
+  if (!a || !b) return false;
+  return a === b || a.startsWith(b) || b.startsWith(a);
 }
 
 export const ToolCallChip = memo(function ToolCallChip({
@@ -321,11 +331,11 @@ export const ToolCallChip = memo(function ToolCallChip({
   autoExpand = false,
   todos,
 }: ToolCallProps) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(Boolean(autoExpand));
   const running = ["running", "in_progress", "pending", "started", "executing", "queued"].includes(status.toLowerCase());
 
   useEffect(() => {
-    setExpanded(autoExpand);
+    if (autoExpand) setExpanded(true);
   }, [autoExpand]);
 
   const config = {
@@ -348,6 +358,7 @@ export const ToolCallChip = memo(function ToolCallChip({
   const clickable = kind === "edit" && Boolean(diff || path);
   const subagentClickable = kind === "subagent";
   const workspaceClickable = kind === "plan" || kind === "canvas" || kind === "browser";
+  const detailsToggleable = !clickable && !subagentClickable && !workspaceClickable;
   if (kind === "todo" && todos?.length) {
     const completed = todos.filter((todo) => todo.status === "completed" || todo.status === "done").length;
     return (
@@ -395,7 +406,6 @@ export const ToolCallChip = memo(function ToolCallChip({
       </div>
     );
   }
-  const rawOutput = result || detail || input || "";
   const plan = kind === "plan" ? planInfo(input, result, detail) : null;
   const mcpInfo = kind === "mcp" ? mcpDisplayInfo(name, input, detail) : undefined;
   const displayName = kind === "plan"
@@ -405,10 +415,13 @@ export const ToolCallChip = memo(function ToolCallChip({
     ? toolDisplayInfo(kind, name, input, detail, path)
     : undefined;
   const compactName = genericInfo?.label || displayName;
-  const previewText = mcpInfo?.detail || genericInfo?.detail || path || (subagent?.prompt || rawOutput)?.replace(/\s+/g, " ").trim();
-  const compactDetail = previewText && previewText.length > 120
-    ? `${previewText.slice(0, 117)}…`
-    : previewText;
+  const previewText = mcpInfo?.detail
+    || genericInfo?.detail
+    || (kind === "subagent" ? subagent?.prompt : undefined)
+    || (kind === "shell" ? formatToolOutput(result) : undefined);
+  const compactDetail = previewText && !isSameCompactText(compactName, previewText)
+    ? (previewText.length > 120 ? `${previewText.slice(0, 117)}…` : previewText)
+    : undefined;
   const diffStats = displayedDiffStats(diff, input);
   if (kind === "plan" && !running && plan) {
     return (
@@ -491,8 +504,9 @@ export const ToolCallChip = memo(function ToolCallChip({
   return (
     <div>
       <div
-          role={clickable || subagentClickable || workspaceClickable ? "button" : undefined}
-          tabIndex={clickable || subagentClickable || workspaceClickable ? 0 : undefined}
+          role={clickable || subagentClickable || workspaceClickable || detailsToggleable ? "button" : undefined}
+          tabIndex={clickable || subagentClickable || workspaceClickable || detailsToggleable ? 0 : undefined}
+          aria-expanded={detailsToggleable ? expanded : undefined}
           onClick={() => {
             if (clickable) onOpenDiff?.();
             else if (subagentClickable) onOpenSubagent?.();
@@ -500,29 +514,32 @@ export const ToolCallChip = memo(function ToolCallChip({
             else setExpanded((value) => !value);
           }}
           onKeyDown={(event) => {
-            if ((clickable || subagentClickable || workspaceClickable) && (event.key === "Enter" || event.key === " ")) {
+            if ((clickable || subagentClickable || workspaceClickable || detailsToggleable) && (event.key === "Enter" || event.key === " ")) {
               event.preventDefault();
               if (clickable) onOpenDiff?.();
               else if (subagentClickable) onOpenSubagent?.();
               else if (workspaceClickable && onOpenWorkspace) onOpenWorkspace();
+              else setExpanded((value) => !value);
             }
           }}
           className={cn(
             "my-2 flex w-full max-w-full items-center gap-2 rounded-md border px-2 py-1 text-left transition-colors",
             "border-border/50 bg-muted/15 text-xs text-muted-foreground hover:bg-muted/30 active:bg-muted/40",
-            (clickable || subagentClickable || workspaceClickable) && "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           )}
         >
+      {detailsToggleable ? (
+        <ChevronRight className={cn("size-3 shrink-0 text-muted-foreground/50 transition-transform", expanded && "rotate-90")} />
+      ) : null}
       <span className={cn("flex size-4 shrink-0 items-center justify-center", config.color)}>
         {running ? <LoaderCircle className="size-3 animate-spin" /> : <Icon className="size-3" />}
       </span>
-      <div className="min-w-0 flex-1 truncate">
-        <div className="flex min-w-0 items-center gap-1.5">
+      <div className="flex min-w-0 flex-1 items-center gap-1.5">
           <span className={cn("shrink-0 font-medium", deleteTool ? "text-rose-400" : config.color)}>
             {toolLabel}
           </span>
           {compactName && compactName.toLocaleLowerCase() !== toolLabel.toLocaleLowerCase() ? (
-            <span className="truncate text-foreground/75">{compactName}</span>
+            <span className="min-w-0 truncate text-foreground/75">{compactName}</span>
           ) : null}
           {kind === "subagent" && subagent?.model ? (
             <span className="shrink-0 text-[10px] text-muted-foreground/70">{subagent.model}</span>
@@ -532,8 +549,9 @@ export const ToolCallChip = memo(function ToolCallChip({
               +{diffStats.additions} -{diffStats.deletions}
             </span>
           ) : null}
-        </div>
-        {compactDetail && !path ? <span className="ml-1 text-[11px] text-muted-foreground/65">· {compactDetail}</span> : null}
+          {compactDetail && !path ? (
+            <span className="min-w-0 truncate text-[11px] text-muted-foreground/65">· {compactDetail}</span>
+          ) : null}
       </div>
       {workspaceClickable ? (
         <button
@@ -623,8 +641,20 @@ export function PlanToolCallCard({
   );
 }
 
+export type ActivityThinking = {
+  text: string;
+  done?: boolean;
+  durationMs?: number;
+};
+
+export type ActivityEntry =
+  | { type: "thinking"; thinking: ActivityThinking }
+  | { type: "tool"; tool: ToolCallData };
+
 export const ToolCallGroup = memo(function ToolCallGroup({
   tools,
+  thinking = [],
+  activity,
   onOpenDiff,
   onOpenSubagent,
   onOpenWorkspace,
@@ -634,7 +664,9 @@ export const ToolCallGroup = memo(function ToolCallGroup({
   includePlans = true,
   autoExpand = false,
 }: {
-  tools: ToolCallData[];
+  tools?: ToolCallData[];
+  thinking?: ActivityThinking[];
+  activity?: ActivityEntry[];
   onOpenDiff?: (tool: ToolCallData) => void;
   onOpenSubagent?: (tool: ToolCallData) => void;
   onOpenWorkspace?: (tool: ToolCallData) => void;
@@ -644,21 +676,52 @@ export const ToolCallGroup = memo(function ToolCallGroup({
   includePlans?: boolean;
   autoExpand?: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const working = tools.some((tool) => tool.status === "running");
+  const [expanded, setExpanded] = useState(Boolean(autoExpand));
   useEffect(() => {
-    setExpanded(autoExpand || working);
-  }, [autoExpand, working]);
-  const planTools = includePlans ? tools.filter((tool) => tool.kind === "plan") : [];
-  const noteTools = tools.filter((tool) => tool.kind === "note");
-  const regularTools = tools.filter(
-    (tool) => tool.kind !== "note" && (includePlans || tool.kind !== "plan"),
-  );
+    if (autoExpand) setExpanded(true);
+  }, [autoExpand]);
+
+  const entries: ActivityEntry[] = activity ?? [
+    ...thinking.map((item) => ({ type: "thinking" as const, thinking: item })),
+    ...(tools ?? []).map((tool) => ({ type: "tool" as const, tool })),
+  ];
+  const allTools = entries.filter((entry): entry is { type: "tool"; tool: ToolCallData } => entry.type === "tool").map((entry) => entry.tool);
+  const thinkingItems = entries
+    .filter((entry): entry is { type: "thinking"; thinking: ActivityThinking } => entry.type === "thinking")
+    .map((entry) => entry.thinking);
+  const planTools = includePlans ? allTools.filter((tool) => tool.kind === "plan") : [];
+  const noteTools = allTools.filter((tool) => tool.kind === "note");
+  const regularEntries = entries.filter((entry) => {
+    if (entry.type === "thinking") return Boolean(entry.thinking.text?.trim()) || entry.thinking.done === false;
+    if (entry.tool.kind === "note") return false;
+    if (!includePlans && entry.tool.kind === "plan") return false;
+    return true;
+  });
+  const regularTools = regularEntries
+    .filter((entry): entry is { type: "tool"; tool: ToolCallData } => entry.type === "tool")
+    .map((entry) => entry.tool);
   const first = regularTools[0];
   const firstMcpInfo = first?.kind === "mcp"
     ? mcpDisplayInfo(first.name, first.input, first.detail)
     : undefined;
-  const label = firstMcpInfo?.label || first?.name.replaceAll("_", " ") || "Tools";
+  const working = regularTools.some((tool) => tool.status === "running")
+    || thinkingItems.some((item) => item.done === false);
+  const thinkingMs = thinkingItems.reduce((sum, item) => sum + (item.durationMs ?? 0), 0);
+  const durationLabel = formatThinkingDuration(thinkingMs);
+  const thinkingDone = thinkingItems.length === 0 || thinkingItems.every((item) => item.done !== false);
+  const thinkLabel = thinkingItems.length === 0
+    ? null
+    : thinkingDone
+      ? (durationLabel ? `Thought for ${durationLabel}` : "Thought")
+      : "Thinking";
+  const toolLabel = regularTools.length === 0
+    ? null
+    : regularTools.length === 1
+      ? (firstMcpInfo?.label || first?.name.replaceAll("_", " ") || "Tool")
+      : `${regularTools.length} tools`;
+  const label = [thinkLabel, toolLabel].filter(Boolean).join(" · ") || "Activity";
+  const useDropdown = thinkingItems.some((item) => item.text?.trim() || item.done === false) || regularTools.length > 1;
+
   const renderTool = (tool: ToolCallData) => (
     <ToolCallChip
       {...tool}
@@ -668,10 +731,26 @@ export const ToolCallGroup = memo(function ToolCallGroup({
       onBuildPlan={(plan) => onBuildPlan?.(tool, plan)}
       buildDisabled={buildDisabled}
       onOpenRaw={() => onOpenRaw?.(tool)}
-      autoExpand={autoExpand || working}
+      autoExpand={autoExpand}
     />
   );
-  if (regularTools.length === 0) {
+  const renderEntry = (entry: ActivityEntry, index: number) => {
+    if (entry.type === "thinking") {
+      if (!entry.thinking.text?.trim() && entry.thinking.done !== false) return null;
+      return (
+        <ThinkingBlock
+          key={`thinking-${index}`}
+          text={entry.thinking.text || "…"}
+          done={entry.thinking.done !== false}
+          durationMs={entry.thinking.durationMs}
+          embedded
+        />
+      );
+    }
+    return <div key={entry.tool.id}>{renderTool(entry.tool)}</div>;
+  };
+
+  if (regularEntries.length === 0) {
     return (
       <>
         {planTools.map((tool) => (
@@ -691,16 +770,16 @@ export const ToolCallGroup = memo(function ToolCallGroup({
       {noteTools.map((tool) => (
         <div key={tool.id}>{renderTool(tool)}</div>
       ))}
-      {regularTools.length === 1 ? renderTool(regularTools[0]) : (
-        <div className="my-4 w-full">
+      {!useDropdown ? renderTool(regularTools[0]) : (
+        <div className="my-2 w-full">
           <button
             type="button"
+            aria-expanded={expanded}
             onClick={() => setExpanded((value) => !value)}
             className="flex w-full items-center gap-2 rounded-md border border-border/50 bg-muted/15 px-2 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/30"
           >
             <ChevronRight className={cn("size-3 shrink-0 transition-transform", expanded && "rotate-90")} />
             <span className="truncate text-foreground/75">{label}</span>
-            <span className="shrink-0 text-muted-foreground/70">+{regularTools.length - 1}</span>
             {working ? (
               <span className="ml-auto flex items-center" aria-label="Working">
                 <LoaderCircle className="size-3.5 animate-spin text-muted-foreground/80" />
@@ -708,10 +787,8 @@ export const ToolCallGroup = memo(function ToolCallGroup({
             ) : null}
           </button>
           {expanded ? (
-            <div className="mt-1 space-y-1 pl-3">
-              {regularTools.map((tool) => (
-                <div key={tool.id}>{renderTool(tool)}</div>
-              ))}
+            <div className="mt-1 space-y-2 pl-3">
+              {regularEntries.map((entry, index) => renderEntry(entry, index))}
             </div>
           ) : null}
         </div>
