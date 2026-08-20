@@ -17,7 +17,7 @@ export type SseEvent =
         name: string;
         status: string;
         detail?: string;
-        kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "other";
+        kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "automation" | "other";
         path?: string;
         input?: string;
         result?: string;

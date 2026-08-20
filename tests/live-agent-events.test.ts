@@ -12,6 +12,7 @@ test("cursor worker forwards live tool and thinking updates from onDelta", () =>
   assert.match(source, /tool-call-started/);
   assert.match(source, /thinking-delta/);
   assert.match(source, /markSendProgress/);
+  assert.match(source, /resolveMcpToolName/);
   assert.doesNotMatch(
     source,
     /if \(cancellationRequested \|\| update\.type !== "text-delta"\) return;/,

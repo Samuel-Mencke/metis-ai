@@ -1,15 +1,23 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { CalendarClock, CheckCircle2, Clock3, Pause, Pencil, Play, Plus, Trash2, XCircle } from "lucide-react";
+import { CalendarClock, CheckCircle2, Clock3, LoaderCircle, MoreHorizontal, Pause, Pencil, Play, Plus, Trash2, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import type { ModelInfo } from "@/components/settings-panel";
 import type { AgentMode } from "@/lib/store";
+import { cn } from "@/lib/utils";
 
 type AutomationRun = {
   id: string;
@@ -19,6 +27,7 @@ type AutomationRun = {
   completedAt?: string;
   resultPreview?: string;
   error?: string;
+  manual?: boolean;
 };
 
 type Automation = {
@@ -48,6 +57,7 @@ type AutomationsPanelProps = {
   models: ModelInfo[];
   modes: AgentMode[];
   selectedModelId?: string;
+  highlightId?: string | null;
 };
 
 function dateText(value?: string) {
@@ -62,13 +72,14 @@ function scheduleText(automation: Automation) {
   return `Every ${automation.schedule.everyMinutes} minutes`;
 }
 
-export function AutomationsPanel({ activeChatId, onOpenChat, models, modes, selectedModelId }: AutomationsPanelProps) {
+export function AutomationsPanel({ activeChatId, onOpenChat, models, modes, selectedModelId, highlightId }: AutomationsPanelProps) {
   const [automations, setAutomations] = useState<Automation[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Automation | null>(null);
+  const [runningId, setRunningId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [prompt, setPrompt] = useState("");
   const [scheduleKind, setScheduleKind] = useState<"once" | "interval" | "days" | "monthly">("interval");
@@ -99,6 +110,15 @@ export function AutomationsPanel({ activeChatId, onOpenChat, models, modes, sele
     const timer = window.setInterval(() => void load(true), 10_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!highlightId) return;
+    void load(true).then(() => {
+      window.requestAnimationFrame(() => {
+        document.getElementById(`automation-${highlightId}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      });
+    });
+  }, [highlightId]);
 
   const latestCompleted = useMemo(
     () => automations.flatMap((automation) => (automation.runs || []).map((run) => ({ automation, run })))
@@ -205,19 +225,34 @@ export function AutomationsPanel({ activeChatId, onOpenChat, models, modes, sele
       headers: body ? { "Content-Type": "application/json" } : undefined,
       body: body ? JSON.stringify(body) : undefined,
     });
-    const data = (await response.json().catch(() => ({}))) as { error?: string };
+    const data = (await response.json().catch(() => ({}))) as { error?: string; chatId?: string };
     if (!response.ok) throw new Error(data.error || "Automation action failed");
     await load(true);
+    return data;
+  }
+
+  async function runNow(automation: Automation) {
+    setRunningId(automation.id);
+    try {
+      const data = await action(automation.id, "PATCH", { action: "run" });
+      toast.success(`Running “${automation.name}”`);
+      if (data.chatId) onOpenChat(data.chatId);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not run automation");
+    } finally {
+      setRunningId(null);
+    }
   }
 
   return (
-    <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
-      <div className="flex items-center justify-between rounded-lg border border-border/40 bg-card/50 px-3 py-2">
+    <div className="flex h-full min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center justify-between rounded-lg border border-border/40 bg-card/50 px-3 py-2">
         <span className="flex items-center gap-2 text-xs font-medium"><CalendarClock className="size-4 text-primary" />Automations</span>
         <Button type="button" size="icon-xs" variant="ghost" title="New automation" onClick={() => { resetForm(); setFormOpen(true); }}>
           <Plus className="size-4" />
         </Button>
       </div>
+      <div className="mt-3 flex min-h-0 flex-1 flex-col overflow-hidden">
 
       <Dialog open={formOpen} onOpenChange={setFormOpen}>
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
@@ -277,10 +312,25 @@ export function AutomationsPanel({ activeChatId, onOpenChat, models, modes, sele
         }}
       />
 
-      {loading ? <p className="p-3 text-xs text-muted-foreground">Loading automations…</p> : null}
-      {!loading && automations.length === 0 ? <p className="p-3 text-xs text-muted-foreground">No automations yet.</p> : null}
-      {automations.map((automation) => (
-        <section key={automation.id} className="space-y-2 rounded-lg border border-border/40 bg-card/40 p-3">
+      {loading ? (
+        <div className="flex h-full min-h-[420px] flex-1 items-center justify-center" role="status" aria-label="Loading automations">
+          <div className="flex items-center gap-3 text-sm text-muted-foreground">
+            <LoaderCircle className="size-5 animate-spin" />
+            <span>Loading automations…</span>
+          </div>
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+          {automations.length === 0 ? <p className="p-3 text-xs text-muted-foreground">No automations yet.</p> : null}
+          {automations.map((automation) => (
+        <section
+          key={automation.id}
+          id={`automation-${automation.id}`}
+          className={cn(
+            "space-y-2 rounded-lg border bg-card/40 p-3",
+            highlightId === automation.id ? "border-teal-400/70 ring-1 ring-teal-400/30" : "border-border/40",
+          )}
+        >
           <div className="flex items-start gap-2">
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 text-xs font-medium">
@@ -290,14 +340,43 @@ export function AutomationsPanel({ activeChatId, onOpenChat, models, modes, sele
               </div>
               <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">{automation.prompt}</p>
             </div>
-            <div className="flex shrink-0 gap-1">
-              <Button type="button" size="icon-xs" variant="ghost" title="Edit" onClick={() => editAutomation(automation)}><Pencil className="size-3" /></Button>
-              {automation.status === "active" ? (
-                <Button type="button" size="icon-xs" variant="ghost" title="Pause" onClick={() => void action(automation.id, "PATCH", { action: "pause" })}><Pause className="size-3" /></Button>
-              ) : (
-                <Button type="button" size="icon-xs" variant="ghost" title="Resume" onClick={() => void action(automation.id, "PATCH", { action: "resume" })}><Play className="size-3" /></Button>
-              )}
-              <Button type="button" size="icon-xs" variant="ghost" title="Delete" onClick={() => setDeleteTarget(automation)}><Trash2 className="size-3 text-destructive" /></Button>
+            <div className="flex shrink-0">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button type="button" size="icon-xs" variant="ghost" aria-label={`Actions for ${automation.name}`}>
+                    <MoreHorizontal className="size-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem
+                    disabled={runningId === automation.id || (automation.runs || []).some((run) => run.status === "queued" || run.status === "running")}
+                    onClick={() => void runNow(automation)}
+                  >
+                    <Play className="size-3.5" />
+                    {runningId === automation.id ? "Starting…" : "Run now"}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => editAutomation(automation)}>
+                    <Pencil className="size-3.5" />
+                    Edit
+                  </DropdownMenuItem>
+                  {automation.status === "active" ? (
+                    <DropdownMenuItem onClick={() => void action(automation.id, "PATCH", { action: "pause" })}>
+                      <Pause className="size-3.5" />
+                      Pause
+                    </DropdownMenuItem>
+                  ) : (
+                    <DropdownMenuItem onClick={() => void action(automation.id, "PATCH", { action: "resume" })}>
+                      <Play className="size-3.5" />
+                      Resume
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem variant="destructive" onClick={() => setDeleteTarget(automation)}>
+                    <Trash2 className="size-3.5" />
+                    Delete
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           </div>
           <div className="text-[10px] text-muted-foreground">{scheduleText(automation)} · next {dateText(automation.nextRunAt)}</div>
@@ -314,6 +393,7 @@ export function AutomationsPanel({ activeChatId, onOpenChat, models, modes, sele
                 <button key={run.id} type="button" className="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[10px] hover:bg-muted/40" onClick={() => onOpenChat(run.chatId)}>
                   <span className={run.status === "completed" ? "text-emerald-400" : run.status === "error" ? "text-destructive" : "text-amber-400"}>●</span>
                   <span className="min-w-0 flex-1 truncate">{dateText(run.completedAt || run.createdAt)}</span>
+                  {run.manual ? <span className="text-muted-foreground">manual</span> : null}
                   <span className="text-muted-foreground">{run.status}</span>
                 </button>
               ))}
@@ -321,6 +401,9 @@ export function AutomationsPanel({ activeChatId, onOpenChat, models, modes, sele
           ) : null}
         </section>
       ))}
+        </div>
+      )}
+    </div>
     </div>
   );
 }

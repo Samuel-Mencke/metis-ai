@@ -4,6 +4,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Code2, Fullscreen, Minimize2, ZoomIn, ZoomOut } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { fitMermaidSvg, isMermaidErrorSvg, prepareMermaidSource } from "@/lib/mermaid";
 
 type View = { x: number; y: number; zoom: number };
 
@@ -33,12 +34,20 @@ export function MermaidDiagram({
           securityLevel: "strict",
           theme: "dark",
           fontFamily: "inherit",
+          suppressErrorRendering: true,
+          flowchart: { useMaxWidth: true, htmlLabels: false, wrappingWidth: 280 },
         });
-        const id = `mermaid-${reactId}-${Math.abs(hashCode(code))}`;
-        const result = await mermaid.render(id, code);
+        const source = prepareMermaidSource(code);
+        const id = `mermaid-${reactId}-${Math.abs(hashCode(source))}`;
+        const result = await mermaid.render(id, source);
         if (!cancelled) {
-          setSvg(result.svg);
-          setError("");
+          if (!result.svg || isMermaidErrorSvg(result.svg)) {
+            setSvg("");
+            setError("This flowchart could not be rendered. Switch to Code to edit it.");
+          } else {
+            setSvg(fitMermaidSvg(result.svg));
+            setError("");
+          }
         }
       } catch (cause) {
         if (!cancelled) {
@@ -112,17 +121,19 @@ export function MermaidDiagram({
       <code>{code}</code>
     </pre>
   ) : error ? (
-    <p className="p-3 text-xs text-destructive" data-mermaid-source={code}>{error}</p>
+    <div className="px-3 py-2 pr-28 text-xs text-muted-foreground" data-mermaid-source={code}>
+      {error}
+    </div>
   ) : (
     <div
-      className="overflow-auto p-3"
+      className="mermaid-diagram overflow-x-auto p-3 pr-28"
       data-mermaid-source={code}
       dangerouslySetInnerHTML={svg ? { __html: svg } : undefined}
     />
   );
 
   const card = (
-    <div className="group relative my-2 overflow-hidden rounded-lg border border-border/40 bg-muted/10" data-editor-control="mermaid">
+    <div className="group relative my-2 max-w-full overflow-hidden rounded-lg border border-border/40 bg-muted/10" data-editor-control="mermaid">
       {toolbar}
       {diagram}
     </div>

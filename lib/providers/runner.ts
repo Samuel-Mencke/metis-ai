@@ -42,7 +42,7 @@ import { runOfficialAntigravityJob } from "@/lib/providers/official-antigravity"
 import type { AgentJob } from "@/lib/jobs";
 import { getMcpServers } from "@/lib/mcp";
 import { allModes, modeById } from "@/lib/modes";
-import { classifyTool, toolDetailFromArgs } from "@/lib/tool-kind";
+import { classifyTool, resolveMcpToolName, toolDetailFromArgs } from "@/lib/tool-kind";
 import { metisAgentIdentity } from "@/lib/agent-identity";
 
 type Usage = {
@@ -300,22 +300,24 @@ async function consumeAiStream(
       } else if (part.type === "finish") {
         finishReason = part.finishReason;
       } else if (part.type === "tool-call") {
+        const toolName = resolveMcpToolName(part.toolName, "input" in part ? part.input : undefined);
         context.onTool({
           id: part.toolCallId,
-          name: part.toolName,
+          name: toolName,
           status: "running",
-          kind: classifyTool(part.toolName),
+          kind: classifyTool(toolName, "input" in part ? part.input : undefined),
           ...(toolDetailFromArgs("input" in part ? part.input : undefined)
             ? { detail: toolDetailFromArgs("input" in part ? part.input : undefined) }
             : {}),
           ...("input" in part && part.input !== undefined ? { input: JSON.stringify(part.input) } : {}),
         });
       } else if (part.type === "tool-result") {
+        const toolName = resolveMcpToolName(part.toolName, "input" in part ? part.input : undefined);
         context.onTool({
           id: part.toolCallId,
-          name: part.toolName,
+          name: toolName,
           status: "completed",
-          kind: classifyTool(part.toolName),
+          kind: classifyTool(toolName, "input" in part ? part.input : undefined),
           ...("result" in part && part.result !== undefined ? { result: JSON.stringify(part.result) } : {}),
         });
       }

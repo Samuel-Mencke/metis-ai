@@ -4,6 +4,7 @@ import {
   Bot,
   Brain,
   Cable,
+  CalendarClock,
   ChevronRight,
   Code2,
   ClipboardList,
@@ -20,16 +21,18 @@ import {
 } from "lucide-react";
 import { memo, useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
+import { AutomationCard } from "@/components/automation-card";
 import { PlanWorkspaceCard } from "@/components/plan-workspace-card";
 import { CanvasWorkspaceCard } from "@/components/canvas-workspace-card";
 import { ThinkingBlock, formatThinkingDuration } from "@/components/thinking-block";
+import { parseAutomationCard } from "@/lib/tool-kind";
 
 export type ToolCallData = {
   id: string;
   name: string;
   status: string;
   detail?: string;
-  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "other";
+  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "automation" | "other";
   path?: string;
   diff?: { before?: string; after?: string; additions?: number; deletions?: number };
   input?: string;
@@ -232,6 +235,17 @@ function noteInfo(input?: string, result?: string, detail?: string) {
   return null;
 }
 
+function automationInfo(name: string, input?: string, result?: string, detail?: string) {
+  return parseAutomationCard(name, result, input, detail);
+}
+
+function isAutomationCardTool(tool: ToolCallData) {
+  if (["running", "in_progress", "pending", "started", "executing", "queued"].includes(tool.status.toLowerCase())) {
+    return false;
+  }
+  return Boolean(automationInfo(tool.name, tool.input, tool.result, tool.detail));
+}
+
 function mcpDisplayInfo(name: string, input?: string, detail?: string) {
   const source = input || detail;
   let values: Record<string, unknown> = {};
@@ -350,6 +364,7 @@ export const ToolCallChip = memo(function ToolCallChip({
     todo: { label: "Tasks", icon: ListTodo, color: "text-blue-400", border: "border-blue-400/30", bg: "bg-blue-400/10" },
     browser: { label: "Browser", icon: Globe2, color: "text-cyan-400", border: "border-cyan-400/30", bg: "bg-cyan-400/10" },
     memory: { label: "Memory", icon: Brain, color: "text-violet-400", border: "border-violet-400/30", bg: "bg-violet-400/10" },
+    automation: { label: "Automation", icon: CalendarClock, color: "text-teal-300", border: "border-teal-400/30", bg: "bg-teal-400/10" },
     other: { label: name.replaceAll("_", " "), icon: Globe2, color: "text-muted-foreground", border: "border-border/50", bg: "bg-muted/20" },
   }[kind ?? "other"];
   const deleteTool = /(^|[._:/-])(delete|remove|unlink)(?=[._:/-]|$)/i.test(name);
@@ -499,6 +514,21 @@ export const ToolCallChip = memo(function ToolCallChip({
           </a>
         </div>
       </section>
+    );
+  }
+  const automation = !running ? automationInfo(name, input, result, detail) : null;
+  if (automation) {
+    return (
+      <AutomationCard
+        actionLabel={automation.actionLabel}
+        title={automation.title}
+        prompt={automation.prompt}
+        scheduleLabel={automation.scheduleLabel}
+        automationLink={automation.automationLink}
+        onOpen={() => {
+          window.dispatchEvent(new CustomEvent("ai-chat:open-automations", { detail: { id: automation.id } }));
+        }}
+      />
     );
   }
   return (
@@ -690,9 +720,11 @@ export const ToolCallGroup = memo(function ToolCallGroup({
     .map((entry) => entry.thinking);
   const planTools = includePlans ? allTools.filter((tool) => tool.kind === "plan") : [];
   const noteTools = allTools.filter((tool) => tool.kind === "note");
+  const automationTools = allTools.filter((tool) => isAutomationCardTool(tool));
   const regularEntries = entries.filter((entry) => {
     if (entry.type === "thinking") return Boolean(entry.thinking.text?.trim()) || entry.thinking.done === false;
     if (entry.tool.kind === "note") return false;
+    if (isAutomationCardTool(entry.tool)) return false;
     if (!includePlans && entry.tool.kind === "plan") return false;
     return true;
   });
@@ -758,6 +790,9 @@ export const ToolCallGroup = memo(function ToolCallGroup({
         {noteTools.map((tool) => (
           <div key={tool.id}>{renderTool(tool)}</div>
         ))}
+        {automationTools.map((tool) => (
+          <div key={tool.id}>{renderTool(tool)}</div>
+        ))}
       </>
     );
   }
@@ -767,6 +802,9 @@ export const ToolCallGroup = memo(function ToolCallGroup({
         <div key={tool.id}>{renderTool(tool)}</div>
       ))}
       {noteTools.map((tool) => (
+        <div key={tool.id}>{renderTool(tool)}</div>
+      ))}
+      {automationTools.map((tool) => (
         <div key={tool.id}>{renderTool(tool)}</div>
       ))}
       {!useDropdown ? renderTool(regularTools[0]) : (

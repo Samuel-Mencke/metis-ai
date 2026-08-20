@@ -27,7 +27,7 @@ import { createSnapshot } from "@/lib/shared-context";
 import { allModes, modeById } from "@/lib/modes";
 import type { AgentMode, MessagePart, ToolPermissionCategory } from "@/lib/store";
 import { compress, type CompressionMode } from "@/lib/compression";
-import { classifyTool, toolDetailFromArgs } from "@/lib/tool-kind";
+import { classifyTool, resolveMcpToolName, toolDetailFromArgs } from "@/lib/tool-kind";
 import { metisAgentIdentity } from "@/lib/agent-identity";
 import { sanitizeModelParams } from "@/lib/feature-flags";
 
@@ -86,13 +86,15 @@ function toolNameFromDelta(update: {
   const args = asRecord(toolCall.args);
   const typeName = typeof toolCall.type === "string" ? toolCall.type : "";
   if (typeName === "mcp") {
-    return (
+    return resolveMcpToolName(
+      typeName,
+      args,
       (typeof args.toolName === "string" && args.toolName) ||
-      (typeof args.providerIdentifier === "string" && args.providerIdentifier) ||
-      "mcp"
+        (typeof args.providerIdentifier === "string" && args.providerIdentifier) ||
+        "mcp",
     );
   }
-  return typeName || "tool";
+  return resolveMcpToolName(typeName || "tool", args);
 }
 
 type ProvidedAttachment = {
@@ -440,6 +442,49 @@ function extractWorkspace(value: string) {
   return visit(value);
 }
 
+function extractAutomation(value: string) {
+  const visit = (candidate: unknown, depth = 0): { id: string; name: string } | null => {
+    if (depth > 8 || candidate == null) return null;
+    if (typeof candidate === "string") {
+      const plain = candidate.trim();
+      if (!plain) return null;
+      try {
+        return visit(JSON.parse(plain), depth + 1);
+      } catch {
+        const link = plain.match(/automation:\/\/([^/?#\s]+)/i);
+        return link ? { id: decodeURIComponent(link[1]), name: "Automation" } : null;
+      }
+    }
+    if (Array.isArray(candidate)) {
+      for (const item of candidate) {
+        const result = visit(item, depth + 1);
+        if (result) return result;
+      }
+      return null;
+    }
+    if (typeof candidate !== "object") return null;
+    const parsed = candidate as Record<string, unknown>;
+    const nested = parsed.automation && typeof parsed.automation === "object" && !Array.isArray(parsed.automation)
+      ? parsed.automation as Record<string, unknown>
+      : parsed.value && typeof parsed.value === "object" && !Array.isArray(parsed.value)
+        ? parsed.value as Record<string, unknown>
+        : {};
+    const id = [nested.id, parsed.id]
+      .find((item): item is string => typeof item === "string" && item.trim().length > 0);
+    if (!id) {
+      for (const key of ["automation", "value", "content", "text", "result"]) {
+        const result = visit(parsed[key], depth + 1);
+        if (result) return result;
+      }
+      return null;
+    }
+    const name = [nested.name, parsed.name]
+      .find((item): item is string => typeof item === "string" && item.trim().length > 0);
+    return { id: id.trim(), name: name?.trim() || "Automation" };
+  };
+  return visit(value);
+}
+
 function extractSuggestions(value: string) {
   const match = value.match(/```suggestions\s*\n([\s\S]*?)```/i);
   if (!match) return { text: value, suggestions: [] as string[] };
@@ -558,6 +603,7 @@ export async function runQueuedJob(job: AgentJob) {
   const providedAttachments: ProvidedAttachment[] = [];
   const createdWorkspaces: WorkspaceItem[] = [];
   const createdChats: Array<{ id: string; title: string }> = [];
+  const createdAutomations: Array<{ id: string; name: string }> = [];
   const globalModelSettings = getGlobalModelSettings(job.userId);
   const compressionSettings = globalModelSettings.compression;
   const compressionEnabled = Boolean(compressionSettings?.enabled) && !job.incognito && !chat.incognito;
@@ -738,6 +784,7 @@ export async function runQueuedJob(job: AgentJob) {
       "When referring to an existing or newly created plan/canvas, include its exact Markdown link using workspace://plan/<id> or workspace://canvas/<id>.",
       "When referring to an existing or newly created note, include its exact Markdown link using note://<id>, for example [Note title](note://note-id). Notes must be clickable links, not only bold text.",
       "Use list_notes or search_notes when you need note IDs before linking them.",
+      "To create an automation, call create_automation with name, prompt, and schedule (kind: once | interval | days | monthly). Recurring minute schedules must be at least 60. Use list_automations, update_automation, pause_automation, resume_automation, and delete_automation for existing ones. Do not claim an automation was created without a completed tool call. When referring to an automation, include its exact Markdown link using automation://<id>, for example [Name](automation://id).",
       "When you use browser results, selected references, or other verifiable web sources, cite the exact URL immediately after the sentence it supports using the format [Source: Website title](URL). At the end, put every source used in exactly one fenced block starting with ```sources, with one Markdown link per line. Never invent URLs; if no verifiable source is available, do not create a sources block.",
       "To create a plan or canvas, call the MCP tools create_plan or create_canvas with title and content. Use an empty content string for a blank workspace, and do not claim creation without a completed tool call.",
       "For memories, use list_memories to retrieve the current user's entries, add_memory only for useful durable facts or preferences, and edit_memory with the exact memory id to change an existing entry. Never claim a memory was changed without a completed tool call.",
@@ -867,11 +914,12 @@ export async function runQueuedJob(job: AgentJob) {
               isFinishedToolStatus(toolStatus),
             )
           : {};
+      const resolvedName = resolveMcpToolName(toolName, toolArgs, existingTool?.input);
       const nextTool: ToolPart = {
         id: toolId,
-        name: toolName,
+        name: resolvedName,
         status: toolStatus,
-        kind: classifyTool(toolName),
+        kind: classifyTool(resolvedName, toolArgs),
         ...(detail ? { detail } : {}),
         ...(editMetadata.path ? { path: editMetadata.path } : {}),
         ...(editMetadata.diff ? { diff: editMetadata.diff } : {}),
@@ -932,9 +980,38 @@ export async function runQueuedJob(job: AgentJob) {
           });
         }
       }
+      const parsedAutomation = extractAutomation(toolResultText)
+        || (toolArgs !== undefined ? extractAutomation(JSON.stringify(toolArgs)) : null);
+      if (
+        isFinishedToolStatus(toolStatus)
+        && nextTool.kind === "automation"
+        && /create_automation/i.test(resolvedName)
+        && parsedAutomation?.id
+      ) {
+        if (!createdAutomations.some((item) => item.id === parsedAutomation.id)) {
+          createdAutomations.push(parsedAutomation);
+        }
+        try {
+          const parsedResult = toolResultText ? JSON.parse(toolResultText) as Record<string, unknown> : {};
+          nextTool.result = JSON.stringify({
+            ...(parsedResult && typeof parsedResult === "object" && !Array.isArray(parsedResult) ? parsedResult : { automation: parsedAutomation }),
+            id: parsedAutomation.id,
+            automationLink: `automation://${parsedAutomation.id}`,
+          });
+        } catch {
+          nextTool.result = JSON.stringify({
+            automation: parsedAutomation,
+            automationLink: `automation://${parsedAutomation.id}`,
+          });
+        }
+        const storedTool = tools.find((tool) => tool.id === toolId);
+        if (storedTool) storedTool.result = nextTool.result;
+        const storedPart = parts.find((part) => part.type === "tool" && part.id === toolId);
+        if (storedPart?.type === "tool") storedPart.result = nextTool.result;
+      }
       emit("tool", {
         callId: toolId,
-        name: toolName,
+        name: resolvedName,
         status: toolStatus,
         kind: nextTool.kind,
         ...(nextTool.detail ? { detail: nextTool.detail } : {}),
@@ -1192,15 +1269,23 @@ export async function runQueuedJob(job: AgentJob) {
       if (allLinks.length && !/(workspace:\/\/(plan|canvas)\/|\/\?c=)/i.test(text)) {
         text = `${text.trim()}\n\n${allLinks.join(" · ")}`;
       }
+      if (createdAutomations.length && !/automation:\/\//i.test(text)) {
+        text = `${text.trim()}\n\n${createdAutomations
+          .map((item) => `[${item.name}](automation://${item.id})`)
+          .join(" · ")}`;
+      }
     }
-    if (!text && (createdWorkspaces.length || createdChats.length)) {
+    if (!text && (createdWorkspaces.length || createdChats.length || createdAutomations.length)) {
       const workspaceLinks = createdWorkspaces
         .map((item) => `${item.type === "plan" ? "Plan" : "Canvas"} created: [${item.name}](workspace://${item.type}/${item.id})`)
         .join("\n");
       const chatLinks = createdChats
         .map((chat) => `Chat created: [${chat.title}](/?c=${encodeURIComponent(chat.id)})`)
         .join("\n");
-      text = [workspaceLinks, chatLinks].filter(Boolean).join("\n");
+      const automationLinks = createdAutomations
+        .map((item) => `Automation created: [${item.name}](automation://${item.id})`)
+        .join("\n");
+      text = [workspaceLinks, chatLinks, automationLinks].filter(Boolean).join("\n");
     }
     const extractedSuggestions = extractSuggestions(ensureRecommendationSuggestions(text));
     text = extractedSuggestions.text;

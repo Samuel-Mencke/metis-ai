@@ -25,6 +25,11 @@ function scheduleFromBody(body: Record<string, unknown>): AutomationSchedule | u
   throw new Error("Unsupported schedule.");
 }
 
+function withAutomationLink(automation: { id: string } | null) {
+  if (!automation) return { automation: null };
+  return { automation, automationLink: `automation://${automation.id}` };
+}
+
 export async function POST(req: Request) {
   if (!bearerTokenMatches(req, process.env.MCP_BEARER_TOKEN)) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
@@ -36,36 +41,38 @@ export async function POST(req: Request) {
     const action = typeof body.action === "string" ? body.action : "list";
     if (action === "list") return Response.json({ automations: listAutomations(ownerId) });
     const id = typeof body.id === "string" ? body.id : "";
-    if (action === "get") return Response.json({ automation: getAutomation(id, ownerId) });
+    if (action === "get") return Response.json(withAutomationLink(getAutomation(id, ownerId)));
     if (action === "create") {
       const schedule = scheduleFromBody(body);
       if (!schedule) throw new Error("A schedule is required.");
-      return Response.json({
-        automation: createAutomation({
-          ownerId,
-          chatId: typeof body.chatId === "string" ? body.chatId : req.headers.get("x-ai-chat-id") || undefined,
-          name: typeof body.name === "string" ? body.name : "",
-          prompt: typeof body.prompt === "string" ? body.prompt : "",
-          schedule,
-          timezone: typeof body.timezone === "string" ? body.timezone : undefined,
-        }),
-      });
+      return Response.json(withAutomationLink(createAutomation({
+        ownerId,
+        chatId: typeof body.chatId === "string" ? body.chatId : req.headers.get("x-ai-chat-id") || undefined,
+        name: typeof body.name === "string" ? body.name : "",
+        prompt: typeof body.prompt === "string" ? body.prompt : "",
+        schedule,
+        timezone: typeof body.timezone === "string" ? body.timezone : undefined,
+        modeId: typeof body.modeId === "string" ? body.modeId : undefined,
+        modelId: typeof body.modelId === "string" ? body.modelId : undefined,
+        extendedModelId: typeof body.extendedModelId === "string" ? body.extendedModelId : undefined,
+      })));
     }
     if (action === "pause" || action === "resume") {
-      return Response.json({ automation: setAutomationStatus(id, ownerId, action === "resume" ? "active" : "paused") });
+      return Response.json(withAutomationLink(setAutomationStatus(id, ownerId, action === "resume" ? "active" : "paused")));
     }
-    if (action === "delete") return Response.json({ ok: deleteAutomation(id, ownerId) });
+    if (action === "delete") return Response.json({ ok: deleteAutomation(id, ownerId), id });
     if (action === "update") {
       const schedule = scheduleFromBody(body);
-      return Response.json({
-        automation: updateAutomation(id, ownerId, {
-          ...(typeof body.name === "string" ? { name: body.name } : {}),
-          ...(typeof body.prompt === "string" ? { prompt: body.prompt } : {}),
-          ...(typeof body.chatId === "string" ? { chatId: body.chatId } : {}),
-          ...(typeof body.timezone === "string" ? { timezone: body.timezone } : {}),
-          ...(schedule ? { schedule } : {}),
-        }),
-      });
+      return Response.json(withAutomationLink(updateAutomation(id, ownerId, {
+        ...(typeof body.name === "string" ? { name: body.name } : {}),
+        ...(typeof body.prompt === "string" ? { prompt: body.prompt } : {}),
+        ...(typeof body.chatId === "string" ? { chatId: body.chatId } : {}),
+        ...(typeof body.timezone === "string" ? { timezone: body.timezone } : {}),
+        ...(typeof body.modeId === "string" ? { modeId: body.modeId } : {}),
+        ...(typeof body.modelId === "string" ? { modelId: body.modelId } : {}),
+        ...(typeof body.extendedModelId === "string" ? { extendedModelId: body.extendedModelId } : {}),
+        ...(schedule ? { schedule } : {}),
+      })));
     }
     return Response.json({ error: "Unsupported automation action" }, { status: 400 });
   } catch (error) {

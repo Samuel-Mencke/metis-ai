@@ -6,13 +6,18 @@ export { getUserExecutionIdentity } from "@/lib/user-access";
 
 export type McpServerMap = Record<
   string,
-  {
-    type: "stdio";
-    command: string;
-    args: string[];
-    cwd: string;
-    env: Record<string, string>;
-  }
+  | {
+      type: "stdio";
+      command: string;
+      args: string[];
+      cwd: string;
+      env: Record<string, string>;
+    }
+  | {
+      type: "http";
+      url: string;
+      headers?: Record<string, string>;
+    }
 >;
 
 export type McpContext = {
@@ -69,6 +74,21 @@ export function getMcpServers(context: McpContext = {}): McpServerMap {
       cwd: appRoot,
       env,
     },
+    ...(config.mcpPublicUrl
+      ? {
+          "ai-chat-universal": {
+            type: "http" as const,
+            url: `${config.mcpPublicUrl.replace(/\/$/, "")}/all`,
+            headers: {
+              Authorization: `Bearer ${process.env.MCP_BEARER_TOKEN || ""}`,
+              "X-AI-Chat-User-Id": context.userId || "",
+              "X-AI-Chat-Id": context.chatId || "",
+              "X-AI-Chat-Job-Id": context.jobId || "",
+              "X-AI-Chat-Incognito": context.incognito ? "1" : "0",
+            },
+          },
+        }
+      : {}),
   };
 }
 

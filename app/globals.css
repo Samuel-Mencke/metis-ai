@@ -159,6 +159,13 @@
   @apply text-sm leading-relaxed text-foreground;
 }
 
+[data-editor-control="mermaid"] .mermaid-diagram svg,
+[data-editor-control="mermaid"] svg {
+  display: block;
+  max-width: 100%;
+  height: auto !important;
+}
+
 .markdown-body p {
   @apply my-3;
 }

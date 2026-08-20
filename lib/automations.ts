@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getDatabase, parseData, transaction } from "@/lib/sqlite";
-import { appendMessage, createChat, getChat } from "@/lib/db-store";
+import { appendMessage, createChat, getChat, updateChat } from "@/lib/db-store";
 import { enqueueJob, getJob } from "@/lib/db-jobs";
 
 export const MAX_ACTIVE_AUTOMATIONS = 20;
@@ -45,6 +45,7 @@ export type AutomationRun = {
   resultPreview?: string;
   error?: string;
   createdAt: string;
+  manual?: boolean;
 };
 
 type AutomationRow = {
@@ -113,18 +114,23 @@ function listRuns(automationId: string, ownerId: string, limit = 20): Automation
   const rows = getDatabase().prepare(
     `SELECT r.id, r.automation_id as automationId, r.job_id as jobId, r.chat_id as chatId,
             r.status, r.started_at as startedAt, r.completed_at as completedAt,
-            r.result_preview as resultPreview, r.error, r.created_at as createdAt
+            r.result_preview as resultPreview, r.error, r.created_at as createdAt,
+            r.manual as manual
      FROM automation_runs r
      JOIN automations a ON a.id = r.automation_id
      WHERE r.automation_id = ? AND a.owner_id = ?
      ORDER BY r.created_at DESC LIMIT ?`,
-  ).all(automationId, ownerId, Math.max(1, Math.min(limit, 100))) as AutomationRun[];
-  return rows.map((run) => ({
-    ...run,
-    ...(run.jobId ? { jobId: String(run.jobId) } : {}),
-    ...(run.resultPreview ? { resultPreview: String(run.resultPreview) } : {}),
-    ...(run.error ? { error: String(run.error) } : {}),
-  }));
+  ).all(automationId, ownerId, Math.max(1, Math.min(limit, 100))) as unknown as Array<AutomationRun & { manual?: number | boolean }>;
+  return rows.map((run) => {
+    const { manual: manualFlag, ...rest } = run;
+    return {
+      ...rest,
+      ...(rest.jobId ? { jobId: String(rest.jobId) } : {}),
+      ...(rest.resultPreview ? { resultPreview: String(rest.resultPreview) } : {}),
+      ...(rest.error ? { error: String(rest.error) } : {}),
+      ...(Number(manualFlag) === 1 ? { manual: true } : {}),
+    };
+  });
 }
 
 function validateSchedule(schedule: AutomationSchedule): AutomationSchedule {
@@ -324,7 +330,7 @@ export function claimDueAutomations(limit = 10) {
   });
 }
 
-export function startAutomationRun(automation: Automation) {
+export function startAutomationRun(automation: Automation, options?: { manual?: boolean }) {
   const id = randomUUID();
   const now = iso();
   // Automation runs intentionally share the configured target chat. This keeps
@@ -338,9 +344,46 @@ export function startAutomationRun(automation: Automation) {
     content: automation.prompt,
   });
   getDatabase().prepare(
-    "INSERT INTO automation_runs (id, automation_id, chat_id, status, created_at) VALUES (?, ?, ?, 'queued', ?)",
-  ).run(id, automation.id, runChat.id, now);
+    "INSERT INTO automation_runs (id, automation_id, chat_id, status, created_at, manual) VALUES (?, ?, ?, 'queued', ?, ?)",
+  ).run(id, automation.id, runChat.id, now, options?.manual ? 1 : 0);
   return { id, chatId: runChat.id, messageId };
+}
+
+export function runAutomationNow(id: string, ownerId: string) {
+  const automation = getAutomation(id, ownerId);
+  if (!automation) return null;
+  if ((automation.runs || []).some((run) => run.status === "queued" || run.status === "running")) {
+    const error = new Error("This automation is already running.");
+    error.name = "ActiveAutomationRun";
+    throw error;
+  }
+  const run = startAutomationRun(automation, { manual: true });
+  try {
+    const job = enqueueJob({
+      chatId: run.chatId,
+      userId: automation.ownerId,
+      message: automation.prompt,
+      messageId: run.messageId,
+      ...(automation.modeId ? { modeId: automation.modeId } : {}),
+      ...(automation.modelId ? { modelId: automation.modelId } : {}),
+      ...(automation.extendedModelId ? { extendedModelId: automation.extendedModelId } : {}),
+      automationId: automation.id,
+      automationRunId: run.id,
+    });
+    linkAutomationRunJob(run.id, job.id);
+    updateChat(run.chatId, {
+      runStatus: "running",
+      runUpdatedAt: iso(),
+      badge: null,
+      ...(job.queueMessage ? { queueMessage: job.queueMessage } : { queueMessage: null }),
+    }, ownerId);
+    return { automation: getAutomation(id, ownerId), jobId: job.id, chatId: run.chatId };
+  } catch (error) {
+    getDatabase().prepare(
+      "UPDATE automation_runs SET status = 'error', error = ?, completed_at = ? WHERE id = ?",
+    ).run(error instanceof Error ? error.message.slice(0, 2_000) : "Could not start run.", iso(), run.id);
+    throw error;
+  }
 }
 
 export function linkAutomationRunJob(runId: string, jobId: string) {
@@ -359,12 +402,12 @@ export function finalizeAutomationRunForJob(jobId: string) {
   if (!job?.automationId || !job.automationRunId) return;
   const row = getDatabase().prepare(
     `SELECT r.id, r.automation_id as automationId, a.owner_id as ownerId, a.schedule_kind as scheduleKind,
-            a.schedule_value as scheduleValue, a.next_run_at as nextRunAt
+            a.schedule_value as scheduleValue, a.next_run_at as nextRunAt, r.manual as manual
      FROM automation_runs r JOIN automations a ON a.id = r.automation_id
      WHERE r.id = ? AND r.job_id = ?`,
   ).get(job.automationRunId, jobId) as {
     id: string; automationId: string; ownerId: string; scheduleKind: "once" | "interval";
-    scheduleValue: string; nextRunAt: string | null;
+    scheduleValue: string; nextRunAt: string | null; manual?: number;
   } | undefined;
   if (!row) return;
   const completed = job.status === "completed";
@@ -374,6 +417,13 @@ export function finalizeAutomationRunForJob(jobId: string) {
   getDatabase().prepare(
     "UPDATE automation_runs SET status = ?, completed_at = ?, error = ?, result_preview = ? WHERE id = ?",
   ).run(status, now, error || null, completed ? "Automation run completed." : null, row.id);
+  if (Number(row.manual) === 1) {
+    getDatabase().prepare(
+      `UPDATE automations SET last_run_at = ?, last_error = ?, claimed_at = NULL, updated_at = ?
+       WHERE id = ? AND owner_id = ?`,
+    ).run(now, completed ? null : error || null, now, row.automationId, row.ownerId);
+    return;
+  }
   const storedSchedule = scheduleFromStorage(row.scheduleKind, row.scheduleValue);
   const next = completed && storedSchedule.kind !== "once"
     ? nextRunFor(storedSchedule, Math.max(Date.now(), row.nextRunAt ? new Date(row.nextRunAt).getTime() : Date.now()))

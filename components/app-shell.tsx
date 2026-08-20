@@ -130,6 +130,7 @@ import { modelAttrSummary } from "@/lib/model-label";
 import { clientConfig } from "@/lib/client-config";
 import { modelKey, parseModelKey } from "@/lib/providers/types";
 import type { AgentMode } from "@/lib/store";
+import { classifyTool, resolveMcpToolName } from "@/lib/tool-kind";
 
 type Role = "user" | "assistant" | "system";
 
@@ -210,7 +211,7 @@ type ToolPart = {
   name: string;
   status: string;
   detail?: string;
-  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "other";
+  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "automation" | "other";
   path?: string;
   diff?: { before?: string; after?: string; additions?: number; deletions?: number };
   todos?: Array<{ id?: string; content: string; status?: string }>;
@@ -1748,6 +1749,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [notesOpen, setNotesOpen] = useState(false);
   const [automationsOpen, setAutomationsOpen] = useState(false);
   const [focusedNoteId, setFocusedNoteId] = useState<string | null>(null);
+  const [focusedAutomationId, setFocusedAutomationId] = useState<string | null>(null);
   const [workspaceFullscreen, setWorkspaceFullscreen] = useState(false);
   const [remoteTerminalCwd, setRemoteTerminalCwd] = useState(workspaceDefaultCwd);
   const [remoteFileCwd, setRemoteFileCwd] = useState(workspaceDefaultCwd);
@@ -4221,17 +4223,28 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         } satisfies ReferenceItem,
       }));
     };
+    const openLinkedAutomation = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string }>).detail;
+      if (detail?.id) setFocusedAutomationId(detail.id);
+      setAutomationsOpen(true);
+      setNotesOpen(false);
+      setWorkspaceOpen(false);
+      setMobileNavOpen(false);
+      router.push("/?c=automations", { scroll: false });
+    };
     window.addEventListener("ai-chat:open-browser", openLinkedUrl);
     window.addEventListener("ai-chat:open-reference", openLinkedReference);
     window.addEventListener("ai-chat:open-workspace", openLinkedWorkspace);
     window.addEventListener("ai-chat:open-note", openLinkedNote);
+    window.addEventListener("ai-chat:open-automations", openLinkedAutomation);
     return () => {
       window.removeEventListener("ai-chat:open-browser", openLinkedUrl);
       window.removeEventListener("ai-chat:open-reference", openLinkedReference);
       window.removeEventListener("ai-chat:open-workspace", openLinkedWorkspace);
       window.removeEventListener("ai-chat:open-note", openLinkedNote);
+      window.removeEventListener("ai-chat:open-automations", openLinkedAutomation);
     };
-  }, [activeChatId, loadChat, messageOffset, navigateBrowser, terminalTabs, workspaces]);
+  }, [activeChatId, loadChat, messageOffset, navigateBrowser, router, terminalTabs, workspaces]);
 
   useEffect(() => {
     if (!authed) return;
@@ -5710,7 +5723,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           ) {
             const callId =
               typeof payload.callId === "string" ? payload.callId : String(payload.call_id);
-            const name =
+            const rawName =
               typeof payload.name === "string" ? payload.name : "tool";
             const status =
               typeof payload.status === "string"
@@ -5718,8 +5731,6 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                 : "running";
             const detail =
               typeof payload.detail === "string" ? payload.detail : undefined;
-            const kind =
-              typeof payload.kind === "string" ? payload.kind as ToolPart["kind"] : undefined;
             const path =
               typeof payload.path === "string" ? payload.path : undefined;
             const diff =
@@ -5728,6 +5739,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                 : undefined;
             const input = typeof payload.input === "string" ? payload.input : undefined;
             const result = typeof payload.result === "string" ? payload.result : undefined;
+            const name = resolveMcpToolName(rawName, input, result, detail);
+            const kind = classifyTool(name, input);
             const subagent =
               payload.subagent && typeof payload.subagent === "object"
                 ? payload.subagent as ToolPart["subagent"]
@@ -7705,12 +7718,13 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         >
         {!notesOpen && !automationsOpen && activeChatId ? <NotesVoid chatId={activeChatId} pinnedOnly compact /> : null}
         {automationsOpen ? (
-          <div className="h-full min-h-0 flex-1 p-3 sm:p-5">
+          <div className="flex h-full min-h-0 flex-1 flex-col p-3 sm:p-5">
             <AutomationsPanel
               activeChatId={activeChatId}
               models={models}
               modes={modes}
               selectedModelId={modelId}
+              highlightId={focusedAutomationId}
               onOpenChat={(chatId) => void loadChat(chatId)}
             />
           </div>

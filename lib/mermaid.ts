@@ -7,6 +7,58 @@ export function isMermaidSource(language: string | undefined, code: string) {
   return DIAGRAM_START.test(code.trim());
 }
 
+function quoteLabel(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed;
+  }
+  if (!/[\s()\/\\:,.#?=+*&<>!@%]|--/.test(trimmed)) return trimmed;
+  return `"${trimmed.replace(/"/g, "#quot;")}"`;
+}
+
+export function prepareMermaidSource(code: string) {
+  return code
+    .replace(/\r\n/g, "\n")
+    .replace(/(\b[\w.-]+)\[\(([^)\n]+)\)\]/g, (_, id, label) => `${id}[(${quoteLabel(label)})]`)
+    .replace(/(\b[\w.-]+)\[\[([^\]\n]+)\]\]/g, (_, id, label) => `${id}[[${quoteLabel(label)}]]`)
+    .replace(/(\b[\w.-]+)\[\/([^\]\n]+)\/\]/g, (_, id, label) => `${id}[/${quoteLabel(label)}/]`)
+    .replace(/(\b[\w.-]+)\[\\([^\]\n]+)\\\]/g, (_, id, label) => `${id}[\\${quoteLabel(label)}\\]`)
+    .replace(/(\b[\w.-]+)\[([^\]\n]+)\]/g, (_, id, label) => {
+      const trimmed = label.trim();
+      if ("([\"'/\\".includes(trimmed[0] || "")) return `${id}[${label}]`;
+      return `${id}[${quoteLabel(label)}]`;
+    })
+    .replace(/(\b[\w.-]+)\{([^{}\n]+)\}/g, (_, id, label) => `${id}{${quoteLabel(label)}}`)
+    .replace(/(\b[\w.-]+)\(\[([^\]\n]+)\]\)/g, (_, id, label) => `${id}([${quoteLabel(label)}])`)
+    .replace(/\|([^|\n]+)\|/g, (_, label) => `|${quoteLabel(label)}|`)
+    .trim();
+}
+
+export function isMermaidErrorSvg(svg: string) {
+  return /syntax error in text|Parse error/i.test(svg)
+    || /<text[^>]*>\s*mermaid version/i.test(svg)
+    || /class="[^"]*error-icon/.test(svg);
+}
+
+export function fitMermaidSvg(svg: string) {
+  return svg
+    .replace(/\s(height|width)="[^"]*"/gi, "")
+    .replace(/style="([^"]*)"/i, (_, style: string) => {
+      const cleaned = style
+        .replace(/max-width\s*:[^;]+;?/gi, "")
+        .replace(/height\s*:[^;]+;?/gi, "")
+        .replace(/width\s*:[^;]+;?/gi, "")
+        .trim()
+        .replace(/;+$/, "");
+      const next = [cleaned, "max-width:100%;height:auto"].filter(Boolean).join(";");
+      return `style="${next}"`;
+    });
+}
+
 export function wrapBareMermaid(content: string) {
   const parts = content.split(/(```[\s\S]*?```)/g);
   return parts
