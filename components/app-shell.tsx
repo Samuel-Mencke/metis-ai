@@ -637,6 +637,7 @@ type StatusPayload = {
   authenticated: boolean;
   agentCwd?: string;
   cursorSdkConfigured: boolean;
+  isHostAdmin?: boolean;
   mcp: { ok: boolean; url: string; detail: string };
   providers?: Array<{
     id: string;
@@ -9240,6 +9241,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         onModelsChanged={() => void loadModels()}
         onModesChanged={() => void loadModes()}
         onLogout={() => void logout()}
+        isHostAdmin={Boolean(status?.isHostAdmin)}
       />
 
       <Dialog open={Boolean(activeDiff)} onOpenChange={(open) => !open && setActiveDiff(null)}>

@@ -1,0 +1,60 @@
+services:
+  app:
+    build: .
+    image: metis-ai:local
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      METIS_DOCKER: "1"
+      AGENT_CWD: /workspace
+      CHAT_DATA_DIR: /data
+      AI_CHAT_ROOT: /app
+      AI_CHAT_MCP_STATE_DIR: /data/mcp-state
+      AI_CHAT_HOST: "0.0.0.0"
+      PORT: "3100"
+      AI_CHAT_INTERNAL_URL: http://app:3100/api/internal/mcp-question
+    volumes:
+      - ${METIS_DATA_DIR:-./data}:/data
+      - ${METIS_WORKSPACE}:/workspace
+    ports:
+      - "${AI_CHAT_BIND:-127.0.0.1}:${PORT:-3100}:3100"
+    depends_on:
+      - worker
+      - mcp
+
+  worker:
+    image: metis-ai:local
+    restart: unless-stopped
+    command: ["pnpm", "exec", "tsx", "worker.ts"]
+    env_file: .env
+    environment:
+      METIS_DOCKER: "1"
+      AGENT_CWD: /workspace
+      CHAT_DATA_DIR: /data
+      AI_CHAT_ROOT: /app
+      AI_CHAT_MCP_STATE_DIR: /data/mcp-state
+      AI_CHAT_INTERNAL_URL: http://app:3100/api/internal/mcp-question
+    volumes:
+      - ${METIS_DATA_DIR:-./data}:/data
+      - ${METIS_WORKSPACE}:/workspace
+    depends_on:
+      - mcp
+
+  mcp:
+    image: metis-ai:local
+    restart: unless-stopped
+    command: ["node", "lib/mcp-core/gateway-core.mjs"]
+    env_file: .env
+    environment:
+      METIS_DOCKER: "1"
+      AGENT_CWD: /workspace
+      CHAT_DATA_DIR: /data
+      AI_CHAT_ROOT: /app
+      AI_CHAT_MCP_STATE_DIR: /data/mcp-state
+      MCP_PORT: ${MCP_PORT:-8787}
+      AI_CHAT_INTERNAL_URL: http://app:3100/api/internal/mcp-question
+    volumes:
+      - ${METIS_DATA_DIR:-./data}:/data
+      - ${METIS_WORKSPACE}:/workspace
+    ports:
+      - "127.0.0.1:${MCP_PORT:-8787}:${MCP_PORT:-8787}"

@@ -1,0 +1,14 @@
+node_modules
+.next
+.git
+data
+*.sqlite
+*.sqlite-*
+.env
+.env.*
+!.env.example
+*.log
+coverage
+tmp
+.metis-ai-install.json
+public/prompts.json

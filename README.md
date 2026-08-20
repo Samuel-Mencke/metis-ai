@@ -69,10 +69,12 @@ remote clients and memories:
 
 ### One-line installer
 
-For a guided installation with runtime detection, first-user creation, encrypted
-provider storage, native background services and an uninstall manifest, run the
-bootstrap one-liner. It downloads the platform installer to a temp file and
-executes that file — it does not run the installer from a pipe.
+Docker is the recommended install path when `docker` and Compose are available.
+The installer mounts a workspace folder you choose (default: your home directory)
+and does not build Node on the host. Use `--native` / `-Native` to keep the
+previous Node.js + systemd/launchd/Task Scheduler flow. The one-liner downloads
+the platform installer to a temp file and executes that file — it does not run
+the installer from a pipe.
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install.sh)"
@@ -133,6 +135,8 @@ macOS use Bash options; Windows uses PowerShell named parameters.
 | Service/task name | `--service-name NAME` | `--service-name NAME` | `-ServiceName NAME` | `metis-ai` / `MetisAI` |
 | Public URL | `--public-url URL` | `--public-url URL` | `-PublicUrl URL` | `http://127.0.0.1:PORT` |
 | No prompts | `--non-interactive` | `--non-interactive` | `-NonInteractive` | off |
+| No prompts | `--non-interactive` | `--non-interactive` | `-NonInteractive` | off |
+| Native (no Docker) | `--native` | `--native` | `-Native` | off when Docker is available |
 | Dry run | `--dry-run` | `--dry-run` | `-DryRun` | off |
 | Skip runtime installation | — | — | `-SkipRuntimeInstall` | off |
 | Show help | `--help` or `-h` | `--help` or `-h` | `-Help` | — |

@@ -1,4 +1,5 @@
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
+import { isHostAdmin } from "@/lib/user-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -6,10 +7,11 @@ export const dynamic = "force-dynamic";
 type Params = { params: Promise<{ id: string }> };
 
 async function gatewayTool(req: Request, name: string, args: Record<string, unknown>) {
+  const userId = (await getAuthenticatedUserId(req)) ?? undefined;
   // @ts-expect-error The shared gateway core is an ESM runtime module.
   const { dispatchGatewayTool } = await import("@/packages/mcp-gateway/index.mjs");
   const result = (await dispatchGatewayTool(name, args, {
-    context: { userId: (await getAuthenticatedUserId(req)) ?? undefined },
+    context: { userId, isHostAdmin: isHostAdmin(userId) },
   })) as {
     content?: Array<{ text?: string }>;
     isError?: boolean;
@@ -25,6 +27,9 @@ async function gatewayTool(req: Request, name: string, args: Record<string, unkn
 
 export async function PATCH(req: Request, { params }: Params) {
   if (!(await isAuthenticated(req))) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  if (!isHostAdmin(await getAuthenticatedUserId(req))) {
+    return Response.json({ error: "Only host administrators can change MCP servers." }, { status: 403 });
+  }
   const { id } = await params;
   try {
     const body = (await req.json().catch(() => ({}))) as { enabled?: unknown };
@@ -40,6 +45,9 @@ export async function PATCH(req: Request, { params }: Params) {
 
 export async function DELETE(req: Request, { params }: Params) {
   if (!(await isAuthenticated(req))) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  if (!isHostAdmin(await getAuthenticatedUserId(req))) {
+    return Response.json({ error: "Only host administrators can change MCP servers." }, { status: 403 });
+  }
   const { id } = await params;
   try {
     // removeMcpServer changes only the local registry and closes a cached child.

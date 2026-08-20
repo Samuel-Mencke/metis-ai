@@ -18,6 +18,8 @@ import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
 import { normalizeMath, splitStreamingMath } from "@/lib/math";
 import { LinkPreview } from "@/components/link-preview";
+import { MermaidDiagram } from "@/components/mermaid-diagram";
+import { isMermaidSource, wrapBareMermaid } from "@/lib/mermaid";
 import { ExternalLink, Link2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -154,6 +156,9 @@ function CodeBlock({
     );
   }
   const declaredLanguage = className?.match(/language-([\w-]+)/)?.[1];
+  if (isMermaidSource(declaredLanguage, code)) {
+    return <MermaidDiagram code={code} language={declaredLanguage} />;
+  }
   const detectedLanguage =
     declaredLanguage && hljs.getLanguage(declaredLanguage)
       ? declaredLanguage
@@ -249,7 +254,7 @@ export const Markdown = memo(function Markdown({
             urlTransform={transformMarkdownUrl}
             components={markdownComponentsWithCode}
           >
-            {ready}
+            {wrapBareMermaid(ready)}
           </ReactMarkdown>
         ) : null}
         {pending ? (
@@ -271,7 +276,7 @@ export const Markdown = memo(function Markdown({
         urlTransform={transformMarkdownUrl}
         components={markdownComponentsWithCode}
       >
-        {normalizeMath(content)}
+        {wrapBareMermaid(normalizeMath(content))}
       </ReactMarkdown>
     </div>
   );

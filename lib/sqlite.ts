@@ -170,7 +170,8 @@ export function getDatabase(): DatabaseSync {
       id TEXT PRIMARY KEY,
       username TEXT NOT NULL UNIQUE COLLATE NOCASE,
       password_hash TEXT NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      is_admin INTEGER NOT NULL DEFAULT 0 CHECK (is_admin IN (0, 1))
     );
     CREATE TABLE IF NOT EXISTS user_workspace_access (
       user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -449,6 +450,7 @@ export function getDatabase(): DatabaseSync {
     "ALTER TABLE automations ADD COLUMN mode_id TEXT",
     "ALTER TABLE automations ADD COLUMN model_id TEXT",
     "ALTER TABLE automations ADD COLUMN extended_model_id TEXT",
+    "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0",
   ]) {
     try {
       database.exec(statement);
@@ -476,6 +478,15 @@ export function getDatabase(): DatabaseSync {
        (user_id, workspace_root, created_at, updated_at)
      SELECT id, ?, ?, ? FROM users`,
   ).run(config.agentCwd, accessTimestamp, accessTimestamp);
+  const adminCount = Number(
+    (database.prepare("SELECT COUNT(*) as count FROM users WHERE is_admin = 1").get() as { count: number }).count,
+  );
+  if (adminCount === 0) {
+    database.prepare(
+      `UPDATE users SET is_admin = 1
+       WHERE id = (SELECT id FROM users ORDER BY created_at ASC LIMIT 1)`,
+    ).run();
+  }
   return database;
 }
 

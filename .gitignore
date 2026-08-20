@@ -13,6 +13,9 @@ public/prompts.json
 *.sqlite-*
 *.log
 .metis-ai-install.json
+.runtime/
+.ai-chat-uploads/
+workspaces/
 .DS_Store
 __pycache__/
 *.py[cod]

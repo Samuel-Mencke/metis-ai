@@ -100,6 +100,31 @@ wait_for_health() {
   return 1
 }
 
+port_in_use() {
+  local p="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | grep -qE ":${p}[[:space:]]"
+  else
+    (echo >/dev/tcp/127.0.0.1/"$p") >/dev/null 2>&1
+  fi
+}
+
+pick_free_port() {
+  local p="$1"
+  if ! port_in_use "$p"; then printf '%s' "$p"; return; fi
+  local candidate
+  for candidate in 8798 8799 8800 8801 8802 8788 8789; do
+    if ! port_in_use "$candidate"; then printf '%s' "$candidate"; return; fi
+  done
+  printf '%s' "$p"
+}
+
+compose() {
+  if docker compose version >/dev/null 2>&1; then docker compose "$@"
+  else docker-compose "$@"
+  fi
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -118,6 +143,7 @@ Options:
   --password-file FILE    Read the initial password from a file
   --service-name NAME     systemd service prefix (default: metis-ai)
   --public-url URL        URL shown to users
+  --native                Force Node.js + systemd instead of Docker
   --non-interactive       Never read prompts; all values come from arguments/defaults
   --dry-run               Collect configuration and print the plan, then exit
   -h, --help              Show this help
@@ -137,6 +163,7 @@ password=""
 password_file=""
 service_name="metis-ai"
 public_url=""
+force_native=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --install-dir) [[ $# -ge 2 ]] || die "--install-dir requires a value"; install_dir="$2"; shift 2 ;;
@@ -150,6 +177,7 @@ while [[ $# -gt 0 ]]; do
     --password-file) [[ $# -ge 2 ]] || die "--password-file requires a value"; password_file="$2"; shift 2 ;;
     --service-name) [[ $# -ge 2 ]] || die "--service-name requires a value"; service_name="$2"; shift 2 ;;
     --public-url) [[ $# -ge 2 ]] || die "--public-url requires a value"; public_url="$2"; shift 2 ;;
+    --native) force_native=1; shift ;;
     --non-interactive) non_interactive=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -192,7 +220,7 @@ else
     ai_chat_host="127.0.0.1"
     public_host="127.0.0.1"
   fi
-  mcp_port="$(ask "MCP gateway port" "$mcp_port")"
+  mcp_port="$(ask "MCP gateway port" "$(pick_free_port "$mcp_port")")"
   username="$(ask "Initial username" "$username")"
   password="$(ask_secret "Initial password: ")"
   [[ ${#password} -ge 8 ]] || die "Password must contain at least 8 characters."
@@ -212,6 +240,7 @@ public_url="${public_url:-http://${public_host}:${port}}"
 
 [[ ${#password} -ge 8 ]] || die "Password must contain at least 8 characters."
 [[ "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]] || die "Web port must be a number between 1 and 65535."
+mcp_port="$(pick_free_port "$mcp_port")"
 [[ "$mcp_port" =~ ^[0-9]+$ && "$mcp_port" -ge 1 && "$mcp_port" -le 65535 ]] || die "MCP port must be a number between 1 and 65535."
 [[ "$service_name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || die "Service name may contain letters, numbers, underscores and hyphens."
 [[ "$username" =~ ^[A-Za-z0-9_.-]{3,64}$ ]] || die "Username must be 3-64 characters: letters, numbers, underscore, dot or hyphen."
@@ -228,6 +257,7 @@ Dry run; no files or services will be changed.
   service name:  $service_name
   public url:    $public_url
   username:      $username
+  native:        $force_native
 EOF
   exit 0
 fi
@@ -278,15 +308,35 @@ else
   git clone "$REPO_URL" "$install_dir"
 fi
 
-node_bin="$(install_node "$install_dir")"
-node_home="$(dirname "$(dirname "$node_bin")")"
-export PATH="$node_home/bin:$install_dir/node_modules/.bin:$PATH"
-command -v corepack >/dev/null 2>&1 && corepack enable >/dev/null 2>&1 || true
-command -v pnpm >/dev/null 2>&1 || "$node_home/bin/npm" install --global pnpm@9
+use_docker=0
+if (( force_native == 0 )) && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  if docker compose version >/dev/null 2>&1 || command -v docker-compose >/dev/null 2>&1; then
+    use_docker=1
+  fi
+fi
 
-chat_password="$(openssl rand -hex 32 2>/dev/null || "$node_home/bin/node" -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))')"
-secrets_key="$(openssl rand -hex 32 2>/dev/null || "$node_home/bin/node" -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))')"
-mcp_token="$(openssl rand -hex 32 2>/dev/null || "$node_home/bin/node" -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))')"
+node_bin=""
+node_home=""
+if (( use_docker == 0 )); then
+  node_bin="$(install_node "$install_dir")"
+  node_home="$(dirname "$(dirname "$node_bin")")"
+  export PATH="$node_home/bin:$install_dir/node_modules/.bin:$PATH"
+  command -v corepack >/dev/null 2>&1 && corepack enable >/dev/null 2>&1 || true
+  command -v pnpm >/dev/null 2>&1 || "$node_home/bin/npm" install --global pnpm@9
+fi
+
+rand_hex() {
+  openssl rand -hex 32 2>/dev/null || {
+    if [[ -n "$node_home" ]]; then
+      "$node_home/bin/node" -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))'
+    else
+      die "openssl is required to generate secrets when installing with Docker."
+    fi
+  }
+}
+chat_password="$(rand_hex)"
+secrets_key="$(rand_hex)"
+mcp_token="$(rand_hex)"
 
 mkdir -p "$data_dir" "$agent_cwd"
 {
@@ -311,11 +361,29 @@ mkdir -p "$data_dir" "$agent_cwd"
   printf 'MCP_ALLOW_REMOTE_ADMIN=false\n'
   printf 'MCP_ENABLE_REMOTE_SERVERS=false\n'
   printf 'MCP_ENABLE_OPTIONAL_SERVERS=false\n'
-  write_env_line METIS_NODE_BIN "$node_bin"
-  write_env_line METIS_NODE_HOME "$node_home"
+  write_env_line METIS_WORKSPACE "$agent_cwd"
+  write_env_line METIS_DATA_DIR "$data_dir"
+  write_env_line AI_CHAT_BIND "$ai_chat_host"
+  if (( use_docker )); then
+    printf 'METIS_DOCKER=1\n'
+    write_env_line AGENT_CWD "/workspace"
+    write_env_line CHAT_DATA_DIR "/data"
+    write_env_line METIS_AI_BOOTSTRAP_USERNAME "$username"
+    write_env_line METIS_AI_BOOTSTRAP_PASSWORD "$password"
+    printf 'METIS_AI_BOOTSTRAP_OPTIONAL=1\n'
+  else
+    write_env_line METIS_NODE_BIN "$node_bin"
+    write_env_line METIS_NODE_HOME "$node_home"
+  fi
 } > "$install_dir/.env"
 chmod 600 "$install_dir/.env"
 
+if (( use_docker )); then
+  (
+    cd "$install_dir"
+    compose up -d --build
+  )
+else
 cat > "$install_dir/run-service.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -343,7 +411,7 @@ chmod 700 "$install_dir/run-service.sh"
   pnpm build
 )
 
-if command -v systemctl >/dev/null 2>&1; then
+if (( use_docker == 0 )) && command -v systemctl >/dev/null 2>&1; then
   command -v sudo >/dev/null 2>&1 || die "sudo is required to install system services."
   service_dir="/etc/systemd/system"
   write_unit() {
@@ -380,11 +448,16 @@ EOF
   sudo systemctl daemon-reload
   sudo systemctl enable --now "${service_name}.service" "${service_name}-worker.service" "${service_name}-mcp.service"
 fi
+fi
 if command -v curl >/dev/null 2>&1; then
   wait_for_health "http://127.0.0.1:$port/api/status" ||
-    die "The application did not become healthy. Check systemctl status ${service_name}.service."
+    die "The application did not become healthy. Check systemctl status ${service_name}.service or docker compose logs."
+  wait_for_health "http://127.0.0.1:$mcp_port/health" ||
+    die "The MCP gateway did not become healthy on port $mcp_port."
 fi
 
+install_method="native"
+if (( use_docker )); then install_method="docker"; fi
 {
   printf '{'
   printf '"installDir":%s,' "$(json_str "$install_dir")"
@@ -393,6 +466,7 @@ fi
   printf '"serviceName":%s,' "$(json_str "$service_name")"
   printf '"host":%s,' "$(json_str "$ai_chat_host")"
   printf '"os":"linux",'
+  printf '"installMethod":%s,' "$(json_str "$install_method")"
   printf '"createdAt":%s' "$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)")"
   printf '}\n'
 } > "$install_dir/.metis-ai-install.json"

@@ -13,6 +13,7 @@ param(
   [string]$PublicUrl = "",
   [switch]$NonInteractive,
   [switch]$SkipRuntimeInstall,
+  [switch]$Native,
   [switch]$DryRun,
   [switch]$Help
 )
@@ -29,7 +30,7 @@ use install.ps1 for the one-line installer.
 
 Options: -InstallDir, -DataDir, -AgentCwd, -Port, -Host, -McpPort,
          -Username, -Password, -PasswordFile, -ServiceName, -PublicUrl
-         -NonInteractive, -SkipRuntimeInstall, -DryRun
+         -NonInteractive, -SkipRuntimeInstall, -Native, -DryRun
 "@ | Write-Host
   exit 0
 }
@@ -131,7 +132,20 @@ if ($DryRun) {
   Write-Host "  service name:  $serviceName"
   Write-Host "  public url:    $publicUrl"
   Write-Host "  username:      $username"
+  Write-Host "  native:        $Native"
   exit 0
+}
+
+$useDocker = $false
+if (-not $Native) {
+  $docker = Get-Command docker -ErrorAction SilentlyContinue
+  if ($docker) {
+    try {
+      & docker info | Out-Null
+      & docker compose version | Out-Null
+      if ($LASTEXITCODE -eq 0) { $useDocker = $true }
+    } catch { $useDocker = $false }
+  }
 }
 
 if (-not $SkipRuntimeInstall) {
@@ -142,14 +156,14 @@ if (-not $SkipRuntimeInstall) {
     if (-not (Confirm-Install "Git")) { throw "git is required." }
     winget install --id Git.Git --accept-source-agreements --accept-package-agreements
   }
-  if ((Get-NodeMajor) -lt 22) {
+  if (-not $useDocker -and (Get-NodeMajor) -lt 22) {
     if (-not (Confirm-Install "Node.js 22 or newer")) { throw "Node.js 22 or newer is required." }
     winget install --id OpenJS.NodeJS.LTS --source winget --accept-source-agreements --accept-package-agreements
   }
   Refresh-Path
 }
 Require-Command git
-if ((Get-NodeMajor) -lt 22) { throw "Node.js 22 or newer is required." }
+if (-not $useDocker -and (Get-NodeMajor) -lt 22) { throw "Node.js 22 or newer is required." }
 
 if (Test-Path (Join-Path $InstallDir ".git")) {
   git -C $InstallDir pull --ff-only
@@ -183,15 +197,35 @@ function Get-PnpmCommand {
   if ($refreshed) { return [string]$refreshed }
   throw "pnpm is required."
 }
-$pnpmCommand = [string](Get-PnpmCommand)
+$pnpmCommand = $null
+$nodeBin = $null
+if (-not $useDocker) {
+  $pnpmCommand = [string](Get-PnpmCommand)
+  $nodeBin = (Get-Command node).Source
+}
 
 $randomHex = { -join (1..32 | ForEach-Object { "{0:x2}" -f (Get-Random -Maximum 256) }) }
 $chatPassword = & $randomHex
 $secretsKey = & $randomHex
 $mcpToken = & $randomHex
 
-$nodeBin = (Get-Command node).Source
 New-Item -ItemType Directory -Force -Path $dataDir, $agentCwd | Out-Null
+$dockerEnv = ""
+if ($useDocker) {
+  $dockerEnv = @"
+METIS_WORKSPACE=$agentCwd
+METIS_DATA_DIR=$dataDir
+AI_CHAT_BIND=$aiChatHost
+METIS_DOCKER=1
+AGENT_CWD=/workspace
+CHAT_DATA_DIR=/data
+METIS_AI_BOOTSTRAP_USERNAME=$username
+METIS_AI_BOOTSTRAP_PASSWORD=$passwordPlain
+METIS_AI_BOOTSTRAP_OPTIONAL=1
+"@
+} else {
+  $dockerEnv = "METIS_NODE_BIN=$nodeBin"
+}
 $envLines = @"
 APP_NAME=Metis AI
 PORT=$port
@@ -213,11 +247,19 @@ MCP_BEARER_TOKEN=$mcpToken
 MCP_ALLOW_REMOTE_ADMIN=false
 MCP_ENABLE_REMOTE_SERVERS=false
 MCP_ENABLE_OPTIONAL_SERVERS=false
-METIS_NODE_BIN=$nodeBin
+$dockerEnv
 "@
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllText((Join-Path $InstallDir ".env"), $envLines.Trim() + [Environment]::NewLine, $utf8NoBom)
 
+if ($useDocker) {
+  Push-Location $InstallDir
+  try {
+    docker compose up -d --build
+  } finally {
+    Pop-Location
+  }
+} else {
 Push-Location $InstallDir
 try {
   $previousNodeEnv = $env:NODE_ENV
@@ -269,12 +311,23 @@ foreach ($suffix in @("app", "worker", "mcp")) {
   Set-ItemProperty -Path $runKey -Name $taskName -Value "`"$cmdPath`""
   Start-Process -FilePath $powershellExe -WorkingDirectory $InstallDir -WindowStyle Hidden -ArgumentList (@("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runner) + $targetArgs)
 }
+}
+
 for ($attempt = 0; $attempt -lt 45; $attempt++) {
   try {
     Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/api/status" -TimeoutSec 2 | Out-Null
     break
   } catch {
     if ($attempt -eq 44) { throw "The application did not become healthy." }
+    Start-Sleep -Seconds 1
+  }
+}
+for ($attempt = 0; $attempt -lt 20; $attempt++) {
+  try {
+    Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$mcpPort/health" -TimeoutSec 2 | Out-Null
+    break
+  } catch {
+    if ($attempt -eq 19) { throw "The MCP gateway did not become healthy on port $mcpPort." }
     Start-Sleep -Seconds 1
   }
 }
@@ -286,6 +339,7 @@ $manifest = @{
   serviceName = $serviceName
   host = $aiChatHost
   os = "windows"
+  installMethod = $(if ($useDocker) { "docker" } else { "native" })
   createdAt = [DateTime]::UtcNow.ToString("o")
 } | ConvertTo-Json -Compress
 Set-Content -LiteralPath (Join-Path $InstallDir ".metis-ai-install.json") -Value $manifest -Encoding utf8

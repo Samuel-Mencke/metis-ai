@@ -18,7 +18,7 @@
     "build": "next build",
     "start": "tsx server.mjs",
     "lint": "eslint .",
-    "test": "pnpm run test:providers && pnpm run test:shared && tsx --test scripts/security.test.ts tests/installers.test.ts tests/tool-kind.test.ts tests/browser.test.ts tests/live-agent-events.test.ts tests/agent-identity.test.ts tests/worker-concurrency.test.ts tests/uncensored-flag.test.ts",
+    "test": "pnpm run test:providers && pnpm run test:shared && tsx --test scripts/security.test.ts tests/installers.test.ts tests/tool-kind.test.ts tests/browser.test.ts tests/live-agent-events.test.ts tests/agent-identity.test.ts tests/worker-concurrency.test.ts tests/uncensored-flag.test.ts tests/admin-users.test.ts tests/mermaid.test.ts tests/user-isolation.test.ts",
     "test:providers": "tsx --test tests/providers.test.ts tests/uploads.test.ts tests/modes.test.ts",
     "test:shared": "tsx --test tests/shared-context.test.ts",
     "typecheck": "tsc --noEmit"
@@ -47,6 +47,7 @@
     "highlight.js": "^11.11.1",
     "katex": "^0.18.1",
     "lucide-react": "^1.28.0",
+    "mermaid": "^11.17.0",
     "next": "^15.5.0",
     "next-themes": "^0.4.6",
     "node-pty": "^1.1.0",

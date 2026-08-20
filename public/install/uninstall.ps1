@@ -22,6 +22,9 @@ function Invoke-Step([scriptblock]$Action, [string]$Description) {
 }
 $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $rootNorm = [IO.Path]::GetFullPath($InstallDir).TrimEnd("\")
+if ($manifest.installMethod -eq "docker") {
+  Invoke-Step { Push-Location $InstallDir; docker compose down; Pop-Location } "docker compose down"
+} else {
 foreach ($suffix in @("app", "worker", "mcp")) {
   $task = "$($manifest.serviceName)-$suffix"
   Invoke-Step { Remove-ItemProperty -LiteralPath $runKey -Name $task -ErrorAction SilentlyContinue } "Remove startup entry $task"
@@ -32,6 +35,7 @@ Invoke-Step {
     Where-Object { $_.Name -eq "node.exe" -and $_.CommandLine -and $_.CommandLine.IndexOf($rootNorm, [StringComparison]::OrdinalIgnoreCase) -ge 0 } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 } "Stop running Metis node processes"
+}
 function Remove-Tree([string]$Path) {
   if (-not (Test-Path -LiteralPath $Path)) { return }
   $target = $Path

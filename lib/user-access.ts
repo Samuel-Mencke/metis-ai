@@ -2,6 +2,14 @@ import path from "node:path";
 import { readFileSync } from "node:fs";
 import { getDatabase } from "@/lib/sqlite";
 import { config } from "@/lib/config";
+import {
+  assertExecutionUid,
+  isHostAdminUsername,
+  isInsideWorkspace,
+  isRootWorkspace,
+  parsePasswdLine,
+  type PosixIdentity,
+} from "@/lib/user-isolation";
 
 export type UserAccess = {
   userId: string;
@@ -9,6 +17,15 @@ export type UserAccess = {
   osUsername?: string;
   uid?: number;
   gid?: number;
+  home?: string;
+};
+
+export type UserExecutionIdentity = {
+  username: string;
+  uid: number;
+  gid: number;
+  home?: string;
+  workspaceRoot: string;
 };
 
 type AccessRow = {
@@ -19,20 +36,20 @@ type AccessRow = {
   gid?: number;
 };
 
-function lookupPosixUser(username: string) {
+type UserRow = {
+  id: string;
+  username: string;
+  isAdmin?: number;
+};
+
+export function lookupPosixUser(username: string): PosixIdentity | undefined {
   try {
     const line = readFileSync("/etc/passwd", "utf8").split("\n").find((entry) =>
       entry.split(":")[0]?.toLowerCase() === username.toLowerCase());
-    const fields = line?.split(":");
-    const uid = Number(fields?.[2]);
-    const gid = Number(fields?.[3]);
-    if (Number.isInteger(uid) && Number.isInteger(gid)) {
-      return { uid, gid };
-    }
+    return line ? parsePasswdLine(line) : undefined;
   } catch {
-    // The requested account may not exist on this host.
+    return undefined;
   }
-  return undefined;
 }
 
 export function getUserAccess(userId?: string): UserAccess {
@@ -43,24 +60,95 @@ export function getUserAccess(userId?: string): UserAccess {
      FROM user_workspace_access WHERE user_id = ?`,
   ).get(userId.trim()) as AccessRow | undefined;
   if (row?.workspaceRoot) {
+    const posix = row.osUsername ? lookupPosixUser(row.osUsername) : undefined;
     return {
       ...row,
       workspaceRoot: path.resolve(row.workspaceRoot),
-      ...(typeof row.uid === "number" ? { uid: row.uid } : {}),
-      ...(typeof row.gid === "number" ? { gid: row.gid } : {}),
+      ...(typeof row.uid === "number" ? { uid: row.uid } : posix ? { uid: posix.uid } : {}),
+      ...(typeof row.gid === "number" ? { gid: row.gid } : posix ? { gid: posix.gid } : {}),
+      ...(posix?.home ? { home: posix.home } : {}),
     };
   }
   return { userId: userId.trim(), workspaceRoot: path.resolve(config.agentCwd) };
 }
 
-export function getUserExecutionIdentity(userId?: string) {
+export function getUserExecutionIdentity(userId?: string): UserExecutionIdentity | undefined {
   const access = getUserAccess(userId);
+  if (!access.osUsername && config.allowRootAgents && isRootWorkspace(access.workspaceRoot)) {
+    return {
+      username: "root",
+      uid: 0,
+      gid: 0,
+      home: "/root",
+      workspaceRoot: access.workspaceRoot,
+    };
+  }
   if (!access.osUsername) return undefined;
   const posix = lookupPosixUser(access.osUsername);
   const uid = access.uid ?? posix?.uid;
   const gid = access.gid ?? posix?.gid;
-  if (uid === undefined || gid === undefined || uid === process.getuid?.()) return undefined;
-  return { username: access.osUsername, uid, gid };
+  if (uid === undefined || gid === undefined || uid <= 0) return undefined;
+  return {
+    username: access.osUsername,
+    uid,
+    gid,
+    home: posix?.home || access.home,
+    workspaceRoot: access.workspaceRoot,
+  };
+}
+
+export function requireUserExecutionIdentity(userId?: string): UserExecutionIdentity {
+  if (config.docker) {
+    const access = getUserAccess(userId);
+    return {
+      username: process.env.USER?.trim() || "metis",
+      uid: process.getuid?.() ?? 1000,
+      gid: process.getgid?.() ?? 1000,
+      home: process.env.HOME || config.dockerWorkspace,
+      workspaceRoot: access.workspaceRoot,
+    };
+  }
+  const identity = getUserExecutionIdentity(userId);
+  if (!identity) {
+    throw new Error("This account has no valid OS user mapping. Provision a workspace with scripts/provision-user.ts.");
+  }
+  assertExecutionUid(identity.uid, {
+    allowRoot: config.allowRootAgents,
+    workspaceRoot: identity.workspaceRoot,
+    home: identity.home,
+  });
+  return identity;
+}
+
+export function adminUserCount() {
+  return Number(
+    (getDatabase().prepare("SELECT COUNT(*) as count FROM users WHERE is_admin = 1").get() as { count: number }).count,
+  );
+}
+
+export function isHostAdmin(userId?: string | null) {
+  if (!userId?.trim()) return false;
+  const user = getDatabase().prepare(
+    "SELECT id, username, is_admin AS isAdmin FROM users WHERE id = ?",
+  ).get(userId.trim()) as UserRow | undefined;
+  if (!user?.username) return false;
+  if (Number(user.isAdmin) === 1) return true;
+  if (isHostAdminUsername(user.username, process.env)) return true;
+  const first = getDatabase().prepare(
+    "SELECT username FROM users ORDER BY created_at ASC LIMIT 1",
+  ).get() as { username?: string } | undefined;
+  return isHostAdminUsername(user.username, {}, first?.username);
+}
+
+export function resolveManagedWorkspaceRoot(workspaceRoot?: string | null) {
+  const resolved = path.resolve((workspaceRoot || "").trim() || config.agentCwd);
+  if (!path.isAbsolute(resolved) || resolved === path.sep) {
+    throw new Error("Workspace path must be an absolute directory.");
+  }
+  if (config.docker && !isInsideWorkspace(config.dockerWorkspace, resolved)) {
+    throw new Error(`Docker workspaces must be inside ${config.dockerWorkspace}.`);
+  }
+  return resolved;
 }
 
 export function ensureUserAccess(
@@ -69,6 +157,16 @@ export function ensureUserAccess(
   osUsername?: string,
 ) {
   const identity = osUsername ? lookupPosixUser(osUsername) : undefined;
+  if (osUsername && !identity) {
+    throw new Error(`OS user ${osUsername} does not exist on this host.`);
+  }
+  if (identity) {
+    assertExecutionUid(identity.uid, {
+      allowRoot: config.allowRootAgents,
+      workspaceRoot,
+      home: identity.home,
+    });
+  }
   getDatabase().prepare(
     `INSERT INTO user_workspace_access
        (user_id, workspace_root, os_username, uid, gid, created_at, updated_at)
@@ -88,4 +186,14 @@ export function ensureUserAccess(
     new Date().toISOString(),
     new Date().toISOString(),
   );
+}
+
+export function provisionAccountAccess(userId: string, username: string) {
+  const posix = lookupPosixUser(username);
+  if (!posix || posix.uid <= 0) return false;
+  const workspace = posix.home && posix.home !== "/" && posix.home !== "/root"
+    ? posix.home
+    : path.join("/home", username);
+  ensureUserAccess(userId, workspace, username);
+  return true;
 }

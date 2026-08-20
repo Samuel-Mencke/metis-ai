@@ -21,10 +21,10 @@ INSTALL_DIR="${INSTALL_DIR/#\~/$HOME}"
 MANIFEST="$INSTALL_DIR/.metis-ai-install.json"
 [[ -f "$MANIFEST" ]] || { echo "Install manifest not found: $MANIFEST" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required to read the install manifest." >&2; exit 1; }
-IFS=$'\t' read -r SERVICE DATA_DIR < <(python3 - "$MANIFEST" <<'PY'
+IFS=$'\t' read -r SERVICE DATA_DIR INSTALL_METHOD < <(python3 - "$MANIFEST" <<'PY'
 import json, sys
 data=json.load(open(sys.argv[1]))
-print(data.get("serviceName", "metis-ai"), data.get("dataDir", ""), sep="\t")
+print(data.get("serviceName", "metis-ai"), data.get("dataDir", ""), data.get("installMethod", "native"), sep="\t")
 PY
 )
 [[ "$INSTALL_DIR" != "/" && "$INSTALL_DIR" != "$HOME" ]] || { echo "Refusing to remove unsafe install directory." >&2; exit 1; }
@@ -34,7 +34,11 @@ if [[ "$YES" != true ]]; then
   [[ "$answer" == "yes" ]] || { echo "Aborted."; exit 0; }
 fi
 run() { if [[ "$DRY_RUN" == true ]]; then printf '+ %s\n' "$*"; else "$@"; fi; }
-if command -v systemctl >/dev/null 2>&1; then
+if [[ "$INSTALL_METHOD" == "docker" ]]; then
+  if command -v docker >/dev/null 2>&1; then
+    (cd "$INSTALL_DIR" && { docker compose down >/dev/null 2>&1 || docker-compose down >/dev/null 2>&1 || true; })
+  fi
+elif command -v systemctl >/dev/null 2>&1; then
   for unit in "$SERVICE.service" "$SERVICE-worker.service" "$SERVICE-mcp.service"; do
     run sudo systemctl disable --now "$unit" >/dev/null 2>&1 || true
     run sudo rm -f "/etc/systemd/system/$unit"

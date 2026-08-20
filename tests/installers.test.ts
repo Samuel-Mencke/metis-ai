@@ -55,6 +55,23 @@ test("installer sources do not contain this deployment's machine path", () => {
   }
 });
 
+test("installers default to Docker and keep a native fallback", () => {
+  for (const file of ["linux.sh", "macos.sh"]) {
+    const content = readFileSync(path.join(root, "install", file), "utf8");
+    const publicContent = readFileSync(path.join(installerDir, file), "utf8");
+    for (const source of [content, publicContent]) {
+      assert.match(source, /--native/);
+      assert.match(source, /docker compose/);
+    }
+  }
+  const windows = readFileSync(path.join(root, "install", "windows.ps1"), "utf8");
+  assert.match(windows, /-Native/);
+  assert.match(windows, /docker compose/);
+  assert.equal(existsSync(path.join(root, "Dockerfile")), true);
+  assert.equal(existsSync(path.join(root, "docker-compose.yml")), true);
+  assert.equal(existsSync(path.join(root, "docker", "entrypoint.sh")), true);
+});
+
 test("all platform installers expose an explicit network-host option", () => {
   for (const file of ["linux.sh", "macos.sh", "windows.ps1"]) {
     const content = readFileSync(path.join(root, "install", file), "utf8");

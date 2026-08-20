@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { config } from "@/lib/config";
-import { getUserAccess, getUserExecutionIdentity } from "@/lib/user-access";
+import { getUserAccess, getUserExecutionIdentity, isHostAdmin, requireUserExecutionIdentity } from "@/lib/user-access";
 export { getUserExecutionIdentity } from "@/lib/user-access";
 
 export type McpServerMap = Record<
@@ -30,11 +30,15 @@ export type McpContext = {
 
 export function getMcpServers(context: McpContext = {}): McpServerMap {
   const appRoot = config.root;
+  if (!context.userId?.trim()) {
+    throw new Error("Agent tools require an authenticated account with an OS user mapping.");
+  }
+  const identity = requireUserExecutionIdentity(context.userId);
   const agentCwd = getUserAgentCwd(context.userId);
-  const identity = getUserExecutionIdentity(context.userId);
   const env = Object.fromEntries(
     Object.entries({
       ...process.env,
+      HOME: identity.home || process.env.HOME,
       MCP_CHAT_ID: context.chatId,
       MCP_USER_ID: context.userId,
       MCP_JOB_ID: context.jobId,
@@ -46,9 +50,11 @@ export function getMcpServers(context: McpContext = {}): McpServerMap {
       MCP_COMPRESSION_MODE: context.compressionMode,
       MCP_COMPRESSION_TOOL_RESULTS: context.compressionToolResults === false ? "0" : "1",
       MCP_AGENT_CWD: agentCwd,
-      MCP_OS_USERNAME: identity?.username,
-      MCP_OS_UID: identity ? String(identity.uid) : undefined,
-      MCP_OS_GID: identity ? String(identity.gid) : undefined,
+      MCP_OS_USERNAME: identity.username,
+      MCP_OS_UID: String(identity.uid),
+      MCP_OS_GID: String(identity.gid),
+      MCP_ALLOW_ROOT_AGENTS: config.allowRootAgents ? "1" : "0",
+      MCP_IS_HOST_ADMIN: isHostAdmin(context.userId) ? "1" : "0",
     }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
   );
   return {
@@ -73,6 +79,14 @@ export function getAgentCwd(userId?: string): string {
 export function getUserAgentCwd(userId?: string): string {
   const workspace = getUserAccess(userId).workspaceRoot;
   fs.mkdirSync(workspace, { recursive: true });
+  const identity = getUserExecutionIdentity(userId);
+  if (identity) {
+    try {
+      fs.chownSync(workspace, identity.uid, identity.gid);
+    } catch {
+      // The service may lack permission to chown an already-owned home directory.
+    }
+  }
   return workspace;
 }
 
@@ -81,9 +95,19 @@ export async function checkGatewayHealth(): Promise<{
   url: string;
   detail: string;
 }> {
-  return {
-    ok: true,
-    url: "stdio://ai-chat-internal-mcp",
-    detail: "internal MCP configured",
-  };
+  const url = `${config.mcpPublicUrl.replace(/\/$/, "")}/health`;
+  try {
+    const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(2500) });
+    const body = await response.json().catch(() => ({})) as { ok?: boolean; name?: string };
+    if (!response.ok || body.ok === false) {
+      return { ok: false, url, detail: `MCP gateway health returned HTTP ${response.status}` };
+    }
+    return { ok: true, url, detail: body.name || "MCP gateway healthy" };
+  } catch (error) {
+    return {
+      ok: false,
+      url,
+      detail: error instanceof Error ? error.message : "MCP gateway unreachable",
+    };
+  }
 }

@@ -5,7 +5,9 @@ import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { callRemoteGatewayTool } from "@/lib/remote-gateway";
 import { collectRemoteClientEvents, requestRemoteClient } from "@/lib/remote-client-gateway";
 import { config } from "@/lib/config";
-import { getUserAgentCwd, getUserExecutionIdentity } from "@/lib/mcp";
+import { getUserAgentCwd } from "@/lib/mcp";
+import { isInsideWorkspace } from "@/lib/user-isolation";
+import { isHostAdmin, requireUserExecutionIdentity } from "@/lib/user-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,8 +28,7 @@ function resolveRemotePath(value: unknown, cwd = DEFAULT_CWD) {
 }
 
 function isInside(root: string, candidate: string) {
-  const relative = path.relative(path.resolve(root), path.resolve(candidate));
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  return isInsideWorkspace(root, candidate);
 }
 
 function shellQuote(value: string) {
@@ -71,6 +72,20 @@ function cleanupTerminalSessions() {
   }
 }
 
+function gatewayContext(ownerId?: string) {
+  const identity = requireUserExecutionIdentity(ownerId);
+  return {
+    userId: ownerId,
+    uid: identity.uid,
+    gid: identity.gid,
+    osUsername: identity.username,
+    workspaceRoot: identity.workspaceRoot,
+    home: identity.home,
+    allowRoot: config.allowRootAgents,
+    isHostAdmin: isHostAdmin(ownerId),
+  };
+}
+
 export async function GET(req: Request) {
   if (!(await isAuthenticated(req))) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
@@ -102,6 +117,16 @@ export async function POST(req: Request) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
   const ownerId = await getAuthenticatedUserId(req) ?? undefined;
+  if (!ownerId) return Response.json({ error: "Account context is required" }, { status: 401 });
+  let isolation: ReturnType<typeof gatewayContext>;
+  try {
+    isolation = gatewayContext(ownerId);
+  } catch (error) {
+    return Response.json(
+      { error: error instanceof Error ? error.message : "Workspace isolation is required" },
+      { status: 403 },
+    );
+  }
 
   let body: {
     action?: string;
@@ -188,15 +213,12 @@ export async function POST(req: Request) {
         cwd,
         env: {
           ...process.env,
+          HOME: isolation.home || process.env.HOME,
           TERM: "xterm-256color",
           COLORTERM: "truecolor",
         } as Record<string, string>,
-        ...(getUserExecutionIdentity(ownerId)
-          ? (() => {
-              const identity = getUserExecutionIdentity(ownerId)!;
-              return { uid: identity.uid, gid: identity.gid };
-            })()
-          : {}),
+        uid: isolation.uid,
+        gid: isolation.gid,
       });
       const session = {
         ownerId,
@@ -242,7 +264,7 @@ export async function POST(req: Request) {
       return Response.json({ ok: true });
     }
     if (body.action === "list") {
-      const output = await callRemoteGatewayTool("list_directory", { target: "server", path: targetPath });
+      const output = await callRemoteGatewayTool("list_directory", { target: "server", path: targetPath }, isolation);
       return Response.json({ path: targetPath, output });
     }
     if (body.action === "read") {
@@ -251,7 +273,7 @@ export async function POST(req: Request) {
         path: targetPath,
         offset: 1,
         limit: 5000,
-      });
+      }, isolation);
       return Response.json({ path: targetPath, content: readContent(output) });
     }
     if (body.action === "write") {
@@ -262,7 +284,7 @@ export async function POST(req: Request) {
         target: "server",
         path: targetPath,
         content: body.content,
-      });
+      }, isolation);
       return Response.json({ path: targetPath, output });
     }
     if (body.action === "exec") {
@@ -275,7 +297,7 @@ export async function POST(req: Request) {
         cwd,
         timeout: Math.max(1, Math.min(body.timeout || 60, 3600)),
         sudo: false,
-      });
+      }, isolation);
       return Response.json({ cwd, output });
     }
     if (body.action === "mkdir") {
@@ -285,18 +307,21 @@ export async function POST(req: Request) {
         cwd,
         timeout: 60,
         sudo: false,
-      });
+      }, isolation);
       return Response.json({ path: targetPath, output });
     }
     if (body.action === "rename") {
       const newPath = resolveRemotePath(body.newPath, cwd);
+      if (!isInside(defaultCwd, newPath)) {
+        return Response.json({ error: "Path must be inside the agent workspace." }, { status: 400 });
+      }
       const output = await callRemoteGatewayTool("execute_command", {
         target: "server",
         command: `mv -- ${shellQuote(targetPath)} ${shellQuote(newPath)}`,
         cwd,
         timeout: 60,
         sudo: false,
-      });
+      }, isolation);
       return Response.json({ path: targetPath, newPath, output });
     }
     if (body.action === "delete") {
@@ -306,7 +331,7 @@ export async function POST(req: Request) {
         cwd,
         timeout: 60,
         sudo: false,
-      });
+      }, isolation);
       return Response.json({ path: targetPath, output });
     }
     return Response.json({ error: "Unknown remote action" }, { status: 400 });
