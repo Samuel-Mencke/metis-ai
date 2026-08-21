@@ -129,6 +129,7 @@ function asContextWindow(entry: unknown): number | undefined {
   }
   if (typeof entry !== "string") return undefined;
   const trimmed = entry.trim().replace(/_/g, "").replace(/,/g, "");
+ if (!trimmed || /^(?:max|unlimited)$/i.test(trimmed)) return undefined;
   const suffix = trimmed.match(/^([\d.]+)\s*([km])$/i);
   if (suffix) {
     const amount = Number(suffix[1]);
@@ -171,11 +172,6 @@ export function contextWindowOf(value: unknown, depth = 0): number | undefined {
   return undefined;
 }
 
-const MARKET_WINDOWS = [
-  32_000, 64_000, 128_000, 131_072, 200_000, 256_000, 272_000, 400_000,
-  1_000_000, 1_048_576, 1_050_000, 2_000_000,
-];
-
 function leafModelId(modelId?: string | null): string {
   const raw = (modelId || "").trim();
   if (!raw) return "";
@@ -214,7 +210,7 @@ export function contextWindowForModel(
   const raw = typeof catalog === "number" && Number.isFinite(catalog) && catalog > 8_000
     ? Math.round(catalog)
     : inferContextWindow(model?.id, model?.displayName);
-  return typeof raw === "number" ? snapMarketWindow(raw) : undefined;
+  return typeof raw === "number" ? raw : undefined;
 }
 
 /** Resolve the effective window for the exact selected model variant.
@@ -234,11 +230,13 @@ export function contextWindowForSelection(
   const contextValue =
     params?.find((param) => param.id === "context")?.value ||
     model?.defaultParams?.find((param) => param.id === "context")?.value;
-  if (contextValue === "max") {
+  const normalizedContextValue = contextValue?.trim().toLowerCase();
+ if (normalizedContextValue === "max" || normalizedContextValue === "unlimited") {
     return contextWindowForModel(model);
   }
   const selectedWindow = asContextWindow(contextValue);
-  if (selectedWindow) return snapMarketWindow(selectedWindow);
+  if (selectedWindow) return selectedWindow;
+ if (contextValue?.trim()) return undefined;
 
   const provider = (model?.providerId || "").toLowerCase();
   const haystack = `${leafModelId(model?.id)} ${model?.displayName || ""}`.trim();
@@ -276,23 +274,10 @@ export function stripContextTierSuffix(modelId: string): string {
   return modelId.replace(TIER_SUFFIX_PATTERN, "");
 }
 
-function snapMarketWindow(tokens: number): number {
-  let best = tokens;
-  let bestDistance = Infinity;
-  for (const window of MARKET_WINDOWS) {
-    const distance = Math.abs(window - tokens) / window;
-    if (distance <= 0.05 && distance < bestDistance) {
-      best = window;
-      bestDistance = distance;
-    }
-  }
-  return best;
-}
-
 /** Format a token count the way the pickers display it: 200K / 1M / 128K. */
 export function formatContextWindow(tokens: number | undefined | null): string {
   if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens <= 0) return "";
-  const snapped = snapMarketWindow(tokens);
+  const snapped = tokens;
   if (snapped >= 1_000_000) {
     if (snapped === 1_000_000 || snapped === 1_048_576) return "1M";
     const millions = Math.round((snapped / 1_000_000) * 100) / 100;

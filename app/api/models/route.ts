@@ -21,11 +21,7 @@ import {
   scheduleProviderModelRefresh,
 } from "@/lib/providers/discovery";
 import { modelKey } from "@/lib/providers/types";
-import {
-  contextWindowForModel,
-  contextWindowForSelection,
-  contextWindowOf as providerContextWindow,
-} from "@/lib/context-window";
+import { contextWindowOf as providerContextWindow } from "@/lib/context-window";
 import { getVerifiedProviderCapabilities } from "@/lib/providers/registry";
 
 export const runtime = "nodejs";
@@ -71,12 +67,14 @@ function withUncensoredParameter(parameters: ModelParameter[] = []) {
 }
 
 function modelContextWindow(value: unknown, id?: string, displayName?: string) {
-  const record = value && typeof value === "object" ? value as { id?: unknown; displayName?: unknown } : null;
-  return contextWindowForModel({
-    id: id || (typeof record?.id === "string" ? record.id : ""),
-    displayName: displayName || (typeof record?.displayName === "string" ? record.displayName : ""),
-    contextWindow: providerContextWindow(value),
-  });
+ const record = value && typeof value === "object"
+ ? value as { id?: unknown; displayName?: unknown; contextWindow?: unknown }
+ : null;
+ return providerContextWindow({
+ id: id || (typeof record?.id === "string" ? record.id : ""),
+ displayName: displayName || (typeof record?.displayName === "string" ? record.displayName : ""),
+ contextWindow: record?.contextWindow,
+ }) ?? providerContextWindow(value);
 }
 
 export async function GET(req: Request) {
@@ -121,22 +119,14 @@ export async function GET(req: Request) {
           .map((p) => ({ id: p.id, value: p.value }));
         const discoveredWindow = providerContextWindow(m);
         const storedWindow = storedById.get(m.id)?.contextWindow;
-        const contextWindow = contextWindowForSelection(
-          {
-            id: m.id,
-            displayName: m.displayName || m.id,
-            providerId: "cursor",
-            ...(discoveredWindow || storedWindow ? { contextWindow: discoveredWindow || storedWindow } : {}),
-            defaultParams: variantParams,
-          },
-          variantParams,
-        );
-        const normalizedModel = {
+        const contextWindow = discoveredWindow || storedWindow;
+ const normalizedModel = {
           id: m.id,
           displayName: m.displayName || m.id,
           contextWindow,
           parameters: cursorParams,
           defaultParams: variantParams,
+ variants: (m.variants ?? []).map((variant) => variant.params.map((param) => ({ id: param.id, value: param.value }))),
         };
         const parameters = modelParametersForModel(normalizedModel);
         const defaultParams = defaultParamsForModel({
@@ -164,17 +154,8 @@ export async function GET(req: Request) {
             const discoveredWindow = providerContextWindow(m);
             const defaultVariant = m.variants?.find((variant) => variant.isDefault) ?? m.variants?.[0];
             const variantParams = (defaultVariant?.params ?? []).map((param) => ({ id: param.id, value: param.value }));
-            const effectiveWindow = contextWindowForSelection(
-              {
-                id: m.id,
-                displayName: m.displayName || m.id,
-                providerId: "cursor",
-                ...(discoveredWindow ? { contextWindow: discoveredWindow } : {}),
-                defaultParams: variantParams,
-              },
-              variantParams,
-            );
-            return {
+            const effectiveWindow = discoveredWindow;
+ return {
               id: m.id,
               displayName: m.displayName || m.id,
               description: m.description,

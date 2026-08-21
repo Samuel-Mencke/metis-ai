@@ -20,6 +20,7 @@ import {
   PlugZap,
   Plus,
   RefreshCw,
+  RotateCcw,
   Server,
   Settings2,
   Trash2,
@@ -347,6 +348,8 @@ type Props = {
   onModelsChanged?: () => void;
   onModesChanged?: () => void;
   onLogout: () => void;
+  onResetMetis?: () => Promise<void>;
+  onUpdateMetis?: () => Promise<void>;
   isHostAdmin?: boolean;
 };
 
@@ -403,6 +406,8 @@ export function SettingsPanel({
   onModelsChanged,
   onModesChanged,
   onLogout,
+  onResetMetis,
+  onUpdateMetis,
   isHostAdmin = false,
 }: Props) {
   const [draft, setDraft] = useState("");
@@ -476,6 +481,8 @@ export function SettingsPanel({
   const [archivedChatsLoaded, setArchivedChatsLoaded] = useState(false);
   const [browserNotificationsAvailable, setBrowserNotificationsAvailable] =
     useState(false);
+  const [resetMetisOpen, setResetMetisOpen] = useState(false);
+  const [updateMetisOpen, setUpdateMetisOpen] = useState(false);
   const loadRemoteClients = useCallback(async () => {
     try {
       const response = await fetch("/api/remote-clients", { cache: "no-store" });
@@ -2465,6 +2472,24 @@ export function SettingsPanel({
                   <Lock className="size-4" />
                   Lock screen
                 </Button>
+                {isHostAdmin ? (
+                  <div className="mt-3 border-t border-destructive/30 pt-4">
+                    <h3 className="text-sm font-medium">Metis maintenance</h3>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Prepare a production update or reset Metis to its clean initial state.
+                    </p>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                      <Button type="button" variant="outline" onClick={() => setUpdateMetisOpen(true)}>
+                        <RefreshCw data-icon="inline-start" />
+                        Update Metis
+                      </Button>
+                      <Button type="button" variant="destructive" onClick={() => setResetMetisOpen(true)}>
+                        <RotateCcw data-icon="inline-start" />
+                        Reset account
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
               </section>
             </TabsContent>
           </div>
@@ -2578,6 +2603,27 @@ export function SettingsPanel({
         onConfirm={async () => {
           await clearBrowserStorage();
           setBrowserStorageClearAll(false);
+        }}
+      />
+      <ConfirmDialog
+        open={updateMetisOpen}
+        onOpenChange={setUpdateMetisOpen}
+        title="Update Metis?"
+        description="Metis will install the locked dependencies and build the inactive production slot. The active service will not be restarted automatically."
+        confirmLabel="Prepare update"
+        destructive={false}
+        onConfirm={async () => {
+          if (onUpdateMetis) await onUpdateMetis();
+        }}
+      />
+      <ConfirmDialog
+        open={resetMetisOpen}
+        onOpenChange={setResetMetisOpen}
+        title="Reset all Metis data?"
+        description="This permanently removes chats, notes, memories, provider credentials, MCP servers, workflows, browser data, automations, remote clients, jobs and usage history. User accounts and the base installation remain. You will be signed out and must set up Metis again."
+        confirmLabel="Reset everything"
+        onConfirm={async () => {
+          if (onResetMetis) await onResetMetis();
         }}
       />
     </>

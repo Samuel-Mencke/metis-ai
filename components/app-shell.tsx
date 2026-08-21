@@ -684,6 +684,7 @@ type ReferenceItem = {
 
 type StatusPayload = {
   authenticated: boolean;
+  isHostAdmin?: boolean;
   agentCwd?: string;
   cursorSdkConfigured: boolean;
   mcp: { ok: boolean; url: string; detail: string };
@@ -1035,36 +1036,36 @@ function BrowserAgentCursor({ kind }: { kind: string }) {
       <svg viewBox="0 0 52 48" role="presentation" focusable="false">
         <defs>
           <linearGradient id="metis-browser-cursor-glass" x1="7" y1="4" x2="39" y2="42" gradientUnits="userSpaceOnUse">
-            <stop offset="0" stopColor="rgba(255,255,255,0.76)" />
-            <stop offset="0.35" stopColor="rgba(226,234,239,0.44)" />
-            <stop offset="0.72" stopColor="rgba(151,164,173,0.27)" />
-            <stop offset="1" stopColor="rgba(89,100,108,0.20)" />
+            <stop offset="0" stopColor="rgba(42,55,63,0.72)" />
+            <stop offset="0.44" stopColor="rgba(18,28,34,0.54)" />
+            <stop offset="1" stopColor="rgba(6,11,15,0.34)" />
           </linearGradient>
           <linearGradient id="metis-browser-cursor-edge" x1="5" y1="3" x2="45" y2="40" gradientUnits="userSpaceOnUse">
-            <stop offset="0" stopColor="rgba(255,255,255,0.94)" />
-            <stop offset="0.5" stopColor="rgba(218,228,234,0.48)" />
-            <stop offset="1" stopColor="rgba(101,113,122,0.62)" />
+            <stop offset="0" stopColor="rgba(255,255,255,0.96)" />
+            <stop offset="0.34" stopColor="rgba(191,232,241,0.78)" />
+            <stop offset="0.7" stopColor="rgba(117,166,180,0.58)" />
+            <stop offset="1" stopColor="rgba(238,247,250,0.84)" />
           </linearGradient>
           <radialGradient id="metis-browser-cursor-glow" cx="0" cy="0" r="1" gradientTransform="translate(15 11) rotate(44) scale(27 18)" gradientUnits="userSpaceOnUse">
-            <stop stopColor="rgba(255,255,255,0.44)" />
+            <stop stopColor="rgba(224,248,255,0.3)" />
             <stop offset="1" stopColor="rgba(255,255,255,0)" />
           </radialGradient>
         </defs>
         <path
-          d="M6.2 4.1C3.55 3.48 1.58 6.12 2.63 8.64L15.1 42.18c.93 2.5 4.35 2.73 5.6.37l6.42-12.13c2.53-4.78 6.8-8.4 11.91-10.09l10.12-3.34c2.92-.96 3.02-5.06.16-6.16L6.2 4.1Z"
+          d="M7.1 4.15C4.05 3.4 1.72 6.15 2.8 9.08l13.35 33.55c1.04 2.78 4.82 3.08 6.28.48l7.35-17.38c1.1-2.57 3.2-4.55 5.83-5.51l12.78-4.7c3.46-1.27 3.46-6.17-.03-7.39L7.1 4.15Z"
           fill="url(#metis-browser-cursor-glass)"
           stroke="url(#metis-browser-cursor-edge)"
-          strokeWidth="1.15"
+          strokeWidth="1.3"
           strokeLinejoin="round"
         />
         <path
-          d="M6.8 5.6 18.2 39.4c.45 1.32 2.22 1.46 2.9.24l5.1-9.2c2.75-4.98 7.33-8.72 12.76-10.42l8.57-2.69"
+          d="M7.35 5.8 18.02 40.9c.43 1.46 2.43 1.61 3.08.24l6.98-15.08c1.28-2.76 3.59-4.91 6.43-5.99l12.18-4.6"
           fill="none"
-          stroke="rgba(255,255,255,0.32)"
-          strokeWidth="1"
+          stroke="rgba(238,252,255,0.42)"
+          strokeWidth="0.9"
           strokeLinecap="round"
         />
-        <path d="M5.2 4.8 48.1 12.4 38.7 16.1 9.6 8.5Z" fill="url(#metis-browser-cursor-glow)" opacity=".72" />
+        <path d="M6.1 5.05 48.1 12.95 35.25 17.7 9.3 9.2Z" fill="url(#metis-browser-cursor-glow)" opacity=".82" />
       </svg>
       {kind === "click" ? <span className="metis-browser-agent-cursor-click" /> : null}
       {kind === "scroll" ? <span className="metis-browser-agent-cursor-scroll"><span /></span> : null}
@@ -1488,8 +1489,14 @@ function mergeMessages(current: Msg[], incoming: Msg[]): Msg[] {
   const byId = new Map(current.map((message) => [message.id, message]));
   const order = new Map(current.map((message, index) => [message.id, index]));
   incoming.forEach((message) => {
+    const existing = byId.get(message.id);
     if (!order.has(message.id)) order.set(message.id, order.size);
-    byId.set(message.id, message);
+    // Background refreshes can race the foreground SSE stream. Preserve the
+    // live message parts/content until the stream marks the message terminal.
+    byId.set(
+      message.id,
+      existing?.streaming ? { ...message, ...existing, streaming: true } : message,
+    );
   });
   return [...byId.values()].sort((a, b) => {
     const sequenceOrder = (a.serverSequence || 0) - (b.serverSequence || 0);
@@ -3989,8 +3996,14 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               data.chat.modelId ||
               localStorage.getItem(MODEL_STORAGE_KEY) ||
               "";
+            const serverMessages = mapApiMessages(data.chat.messages, data.chat.runStatus);
+            const messages = runtimeRef.current.has(id)
+              ? mergeMessages(stateRef.current.messages, serverMessages)
+              : serverMessages;
             const next: ChatSnapshot = {
-              messages: mergeMessages(cached.messages, mapApiMessages(data.chat.messages, data.chat.runStatus)),
+              messages: runtimeRef.current.has(id)
+                ? mergeMessages(stateRef.current.messages, serverMessages)
+                : mergeMessages(cached.messages, serverMessages),
               chatTitle: data.chat.title,
               incognito: Boolean(data.chat.incognito),
               updatedAt: data.chat.updatedAt,
@@ -4027,7 +4040,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                 ? modelParamsByModel[next.modelId] || []
                 : next.modelParams,
             );
-            setMessages(next.messages);
+            // A soft revalidation can finish while the foreground SSE stream
+            // is still applying deltas. Keep that live state instead of
+            // replacing it with the older durable snapshot.
+            setMessages(() => messages);
             setQueuedMessages(next.queuedMessages.map((message) => ({ ...message, files: [] })));
             setWorkspaces(next.workspaces);
             setBrowserTabs(next.browserContext.tabs);
@@ -5011,6 +5027,26 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     setUnreadChatIds([]);
     saveUnreadChatIds([]);
     navigateChat(null, true);
+  }
+
+  async function resetMetis() {
+    const response = await fetch("/api/admin/reset", { method: "POST" });
+    const data = (await response.json().catch(() => ({}))) as { error?: string };
+    if (!response.ok) throw new Error(data.error || "Metis reset failed.");
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    toast.success("Metis was reset. Showing the initial setup.");
+    window.location.assign("/");
+  }
+
+  async function updateMetis() {
+    const response = await fetch("/api/admin/system/update", { method: "POST" });
+    const data = (await response.json().catch(() => ({}))) as {
+      error?: string;
+      message?: string;
+    };
+    if (!response.ok) throw new Error(data.error || "Metis update failed.");
+    toast.success(data.message || "Metis update prepared.");
   }
 
   async function toggleIncognito() {
@@ -9598,7 +9634,6 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                     />
                     {agentPointer ? (
                       <span
-                        key={agentPointer.ts}
                         className="metis-browser-agent-cursor"
                         style={{ left: `${agentPointer.x * 100}%`, top: `${agentPointer.y * 100}%` }}
                       >
@@ -10236,6 +10271,9 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         onModelsChanged={() => void loadModels()}
         onModesChanged={() => void loadModes()}
         onLogout={() => void logout()}
+        onResetMetis={resetMetis}
+        onUpdateMetis={updateMetis}
+        isHostAdmin={Boolean(status?.isHostAdmin)}
       />
 
       <Dialog open={Boolean(activeDiff)} onOpenChange={(open) => !open && setActiveDiff(null)}>

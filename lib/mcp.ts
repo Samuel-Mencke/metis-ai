@@ -1,5 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
+import {
+  capabilityManifestHash,
+  createCapabilityManifest,
+  persistCapabilityManifest,
+  type CapabilityCategory,
+} from "@/lib/capabilities";
 import { config } from "@/lib/config";
 import { getUserAccess, getUserExecutionIdentity, isHostAdmin, requireUserExecutionIdentity } from "@/lib/user-access";
 export { getUserExecutionIdentity } from "@/lib/user-access";
@@ -31,6 +37,8 @@ export type McpContext = {
   compressionEnabled?: boolean;
   compressionMode?: string;
   compressionToolResults?: boolean;
+  capabilityManifest?: string;
+  capabilityHash?: string;
 };
 
 export function buildMcpContext(input: {
@@ -44,6 +52,12 @@ export function buildMcpContext(input: {
   compressionEnabled?: boolean;
   compressionMode?: string;
   compressionToolResults?: boolean;
+  workspaceId?: string;
+  attemptId?: string;
+  policyVersion?: string;
+  allowedCategories?: readonly CapabilityCategory[];
+  toolOverrides?: Record<string, boolean>;
+  childMcpGrants?: Record<string, readonly string[]>;
 }): McpContext {
   const modePolicy = typeof input.modePolicy === "string"
     ? input.modePolicy
@@ -53,6 +67,21 @@ export function buildMcpContext(input: {
           toolOverrides: input.modePolicy.toolOverrides || {},
         })
       : undefined;
+  const capabilityManifest = input.userId && input.jobId
+    ? createCapabilityManifest({
+        ownerId: input.userId,
+        workspaceId: input.workspaceId || input.chatId || "default",
+        runId: input.jobId,
+        attemptId: input.attemptId,
+        policyVersion: input.policyVersion,
+        allowedCategories: input.allowedCategories || [],
+        toolOverrides: input.toolOverrides,
+        childMcpGrants: input.childMcpGrants,
+      })
+    : undefined;
+  const durableManifest = capabilityManifest
+    ? persistCapabilityManifest(capabilityManifest)
+    : undefined;
   return {
     chatId: input.chatId,
     userId: input.userId,
@@ -64,6 +93,12 @@ export function buildMcpContext(input: {
     compressionEnabled: input.compressionEnabled,
     compressionMode: input.compressionMode,
     compressionToolResults: input.compressionToolResults,
+    ...(durableManifest
+      ? {
+          capabilityManifest: JSON.stringify(durableManifest),
+          capabilityHash: capabilityManifestHash(durableManifest),
+        }
+      : {}),
   };
 }
 
@@ -88,6 +123,8 @@ export function getMcpServers(context: McpContext = {}): McpServerMap {
       MCP_COMPRESSION_ENABLED: context.compressionEnabled ? "1" : undefined,
       MCP_COMPRESSION_MODE: context.compressionMode,
       MCP_COMPRESSION_TOOL_RESULTS: context.compressionToolResults === false ? "0" : "1",
+      MCP_CAPABILITY_MANIFEST: context.capabilityManifest,
+      MCP_CAPABILITY_HASH: context.capabilityHash,
       MCP_AGENT_CWD: agentCwd,
       AI_CHAT_INTERNAL_ORIGIN: config.internalOrigin,
       AI_CHAT_PUBLIC_URL: config.publicUrl,
@@ -120,21 +157,6 @@ export function getMcpServers(context: McpContext = {}): McpServerMap {
       cwd: appRoot,
       env,
     },
-    ...(config.mcpPublicUrl
-      ? {
-          "ai-chat-universal": {
-            type: "http" as const,
-            url: `${config.mcpPublicUrl.replace(/\/$/, "")}/all`,
-            headers: {
-              Authorization: `Bearer ${process.env.MCP_BEARER_TOKEN || ""}`,
-              "X-AI-Chat-User-Id": context.userId || "",
-              "X-AI-Chat-Id": context.chatId || "",
-              "X-AI-Chat-Job-Id": context.jobId || "",
-              "X-AI-Chat-Incognito": context.incognito ? "1" : "0",
-            },
-          },
-        }
-      : {}),
   };
 }
 

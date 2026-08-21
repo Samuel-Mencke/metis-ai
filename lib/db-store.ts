@@ -22,6 +22,24 @@ import type {
 import { chatUploadDir, resolveUploadPath } from "@/lib/uploads";
 
 const now = () => new Date().toISOString();
+
+function workerProjectionLeaseValid(chatId?: string) {
+  const jobId = process.env.AI_CHAT_JOB_ID?.trim();
+  const workerId = process.env.AI_CHAT_WORKER_ID?.trim();
+  const leaseToken = process.env.AI_CHAT_JOB_LEASE_TOKEN?.trim();
+  if (!jobId || !workerId || !leaseToken) return true;
+  const conditions = chatId ? "AND j.chat_id = ?" : "";
+  const params = chatId
+    ? [jobId, chatId, workerId, leaseToken, now()]
+    : [jobId, workerId, leaseToken, now()];
+  return Boolean(getDatabase().prepare(
+    `SELECT 1
+     FROM job_leases l
+     JOIN jobs j ON j.id = l.job_id
+     WHERE l.job_id = ? ${conditions}
+       AND l.worker_id = ? AND l.lease_token = ? AND l.expires_at > ?`,
+  ).get(...params));
+}
 const chatCache = new Map<string, { updatedAt: string; chat: Chat }>();
 const MAX_CHAT_KEYWORDS = 24;
 const MAX_CHAT_KEYWORD_LENGTH = 80;
@@ -32,6 +50,11 @@ type ChatPageResult = {
   totalMessages: number;
 };
 const chatPageCache = new Map<string, { updatedAt: string; page: ChatPageResult }>();
+
+export function clearStoreCaches() {
+  chatCache.clear();
+  chatPageCache.clear();
+}
 const CHAT_PAGE_CACHE_MAX = 128;
 let chatIndexCache: { key: string; expiresAt: number; chats: ChatIndexEntry[] } | null = null;
 
@@ -435,6 +458,9 @@ export function createChat(
   options?: { incognito?: boolean },
 ): Chat {
   return transaction(() => {
+    if (!workerProjectionLeaseValid()) {
+      throw new Error("Stale worker lease cannot create a chat projection.");
+    }
     const timestamp = now();
     const chat: Chat = {
       id: randomUUID(),
@@ -505,6 +531,7 @@ export function updateChat(
   ownerId?: string,
 ) {
   return transaction(() => {
+    if (!workerProjectionLeaseValid(id)) return null;
     const chat = getChat(id, ownerId);
     if (!chat) return null;
     const next = { ...chat };
@@ -771,6 +798,7 @@ export function appendMessageInTransaction(
   message: Omit<ChatMessage, "id" | "createdAt"> & { id?: string; createdAt?: string },
   ownerId?: string,
 ) {
+  if (!workerProjectionLeaseValid(chatId)) return null;
   const chat = getChat(chatId, ownerId);
   if (!chat) return null;
   const id = message.id || randomUUID();
@@ -796,6 +824,7 @@ export function appendMessage(
 
 export function upsertMessage(chatId: string, message: Omit<ChatMessage, "createdAt"> & { createdAt?: string }) {
   return transaction(() => {
+    if (!workerProjectionLeaseValid(chatId)) return null;
     const chat = getChat(chatId);
     if (!chat) return null;
     const index = chat.messages.findIndex((item) => item.id === message.id);

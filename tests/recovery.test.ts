@@ -209,3 +209,116 @@ test("interactive jobs outrank background jobs and reserved slots skip backgroun
   assert.equal(claimNextJob()?.id, background.id);
   updateJob(background.id, { status: "completed" });
 });
+
+test("job transitions are explicit and revisions advance monotonically", () => {
+  const { createChat } = modules[0];
+  const { enqueueJob, claimNextJob, getJob, updateJob, canTransitionJobStatus } = modules[1];
+  const job = enqueueJob({ chatId: createChat("State machine").id, message: "run" });
+  assert.equal(job.revision, 0);
+  assert.equal(canTransitionJobStatus("queued", "running"), true);
+  assert.equal(canTransitionJobStatus("completed", "running"), false);
+  let claimed = claimNextJob();
+  while (claimed && claimed.id !== job.id) {
+    updateJob(claimed.id, { status: "completed" });
+    claimed = claimNextJob();
+  }
+  assert.equal(claimed?.id, job.id);
+  assert.equal(claimed?.revision, 1);
+  const completed = updateJob(job.id, { status: "completed" });
+  assert.equal(completed?.revision, 2);
+  assert.throws(
+    () => updateJob(job.id, { status: "running" }),
+    /Invalid job state transition: completed -> running/,
+  );
+  assert.equal(getJob(job.id)?.status, "completed");
+});
+
+test("stale job writers are rejected by the durable revision check", () => {
+  const { createChat } = modules[0];
+  const { enqueueJob, claimNextJob, getJob, updateJob } = modules[1];
+  const job = enqueueJob({ chatId: createChat("Stale writer").id, message: "run" });
+  let claimed = claimNextJob();
+  while (claimed && claimed.id !== job.id) {
+    updateJob(claimed.id, { status: "completed" });
+    claimed = claimNextJob();
+  }
+  assert.equal(claimed?.id, job.id);
+  const expectedRevision = claimed?.revision;
+  const heartbeat = updateJob(job.id, { error: "newer state" });
+  assert.ok(heartbeat);
+  assert.equal(
+    updateJob(job.id, { error: "stale overwrite" }, { expectedRevision }),
+    null,
+  );
+  assert.equal(getJob(job.id)?.error, "newer state");
+});
+
+test("worker leases fence stale processes, events, and expired claims", async () => {
+  const { createChat } = modules[0];
+  const { appendRunEvent, enqueueJob, claimNextJob, getJob, reapExpiredJobLeases, touchJob, updateJob } = modules[1];
+  const { appendMessage, createChat: createProjectionChat, updateChat, upsertMessage } = modules[0];
+  const { getDatabase } = await import("../lib/sqlite");
+  const job = enqueueJob({ chatId: createChat("Lease fencing").id, message: "run" });
+  let claimed = claimNextJob({ workerId: "worker-a", leaseMs: 60_000 });
+  while (claimed && claimed.id !== job.id) {
+    updateJob(claimed.id, { status: "completed" });
+    claimed = claimNextJob({ workerId: "worker-a", leaseMs: 60_000 });
+  }
+  assert.equal(claimed?.id, job.id);
+  assert.equal(typeof claimed?.leaseToken, "string");
+  assert.equal(getJob(job.id)?.leaseToken, undefined, "lease tokens must not be persisted in job JSON");
+
+  const previousWorker = process.env.AI_CHAT_WORKER_ID;
+  const previousToken = process.env.AI_CHAT_JOB_LEASE_TOKEN;
+  const previousJob = process.env.AI_CHAT_JOB_ID;
+  const { internalRunLeaseAuthorized } = await import("../lib/internal-run-lease");
+  try {
+    process.env.AI_CHAT_WORKER_ID = "worker-a";
+    process.env.AI_CHAT_JOB_LEASE_TOKEN = claimed?.leaseToken;
+    process.env.AI_CHAT_JOB_ID = job.id;
+    assert.equal(internalRunLeaseAuthorized(new Request("http://localhost", {
+      headers: {
+        "x-ai-chat-worker-id": "worker-a",
+        "x-ai-chat-lease-token": claimed?.leaseToken || "",
+      },
+    }), job.id), true);
+    assert.ok(touchJob(job.id));
+    assert.equal(appendRunEvent(job.id, job.chatId, undefined, "status", { status: "running" }).persisted, true);
+    assert.ok(updateChat(job.chatId, { badge: "blue" }));
+    assert.ok(appendMessage(job.chatId, { role: "assistant", content: "owned" }));
+    assert.ok(upsertMessage(job.chatId, { id: "owned-message", role: "assistant", content: "owned" }));
+    process.env.AI_CHAT_JOB_LEASE_TOKEN = "stale-token";
+    assert.equal(internalRunLeaseAuthorized(new Request("http://localhost", {
+      headers: {
+        "x-ai-chat-worker-id": "worker-a",
+        "x-ai-chat-lease-token": "stale-token",
+      },
+    }), job.id), false);
+    assert.equal(updateJob(job.id, { error: "stale worker write" }), null);
+    assert.equal(
+      appendRunEvent(job.id, job.chatId, undefined, "text", { text: "stale" }).dropped,
+      "stale_lease",
+    );
+    assert.equal(updateChat(job.chatId, { badge: "red" }), null);
+    assert.equal(appendMessage(job.chatId, { role: "assistant", content: "stale" }), null);
+    assert.equal(upsertMessage(job.chatId, { id: "stale-message", role: "assistant", content: "stale" }), null);
+    assert.throws(
+      () => createProjectionChat("stale projection"),
+      /Stale worker lease/i,
+    );
+
+    process.env.AI_CHAT_JOB_LEASE_TOKEN = claimed?.leaseToken;
+    getDatabase().prepare("UPDATE job_leases SET expires_at = ? WHERE job_id = ?")
+      .run(new Date(Date.now() - 1_000).toISOString(), job.id);
+    const requeued = reapExpiredJobLeases();
+    assert.equal(requeued.some((item) => item.id === job.id), true);
+    assert.equal(getJob(job.id)?.status, "queued");
+  } finally {
+    if (previousWorker === undefined) delete process.env.AI_CHAT_WORKER_ID;
+    else process.env.AI_CHAT_WORKER_ID = previousWorker;
+    if (previousToken === undefined) delete process.env.AI_CHAT_JOB_LEASE_TOKEN;
+    else process.env.AI_CHAT_JOB_LEASE_TOKEN = previousToken;
+    if (previousJob === undefined) delete process.env.AI_CHAT_JOB_ID;
+    else process.env.AI_CHAT_JOB_ID = previousJob;
+  }
+});

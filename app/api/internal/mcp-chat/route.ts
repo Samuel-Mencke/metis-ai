@@ -6,6 +6,7 @@ import {
   updateChat,
 } from "@/lib/db-store";
 import { bearerTokenMatches } from "@/lib/security";
+import { internalRunLeaseAuthorized } from "@/lib/internal-run-lease";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,6 +28,9 @@ export async function POST(req: Request) {
   const jobId = req.headers.get("x-ai-chat-job-id")?.trim() || "";
   const chat = chatId ? getChat(chatId, userId) : null;
   if (!chat || !jobId) return Response.json({ error: "Invalid chat context" }, { status: 400 });
+  if (!internalRunLeaseAuthorized(req, jobId)) {
+    return Response.json({ error: "Worker run lease is expired or invalid" }, { status: 409 });
+  }
 
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
   const action = body.action === "search" ? "search" : body.action === "title" ? "title" : "update";

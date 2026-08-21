@@ -66,9 +66,28 @@ test("invalid and Metis-only parameters do not reach native providers", () => {
     { id: "effort", value: "high" },
     { id: "uncensored", value: "true" },
   ]);
-  assert.deepEqual(providerNativeParams([
-    { id: "effort", value: "high" },
-    { id: "context", value: "max" },
-    { id: "uncensored", value: "true" },
-  ]), [{ id: "effort", value: "high" }]);
+ assert.deepEqual(providerNativeParams(model, [
+ { id: "effort", value: "high" },
+ { id: "context", value: "max" },
+ { id: "uncensored", value: "true" },
+ { id: "unknown", value: "value" },
+ ]), [{ id: "effort", value: "high" }]);
+});
+
+
+test("concrete variants are the only source for explicit context values", () => {
+ const context = modelParametersForModel({
+ contextWindow: 1_000_000,
+ parameters: [{ id: "context", values: [{ value: "unlimited" }, { value: "invalid" }] }],
+ variants: [[{ id: "context", value: "272k" }]],
+ }).find((parameter) => parameter.id === "context");
+ assert.deepEqual(context?.values, [
+ { value: "272k" },
+ { value: "max", displayName: "1M" },
+ ]);
+ assert.deepEqual(sanitizeModelParams({ parameters: [{ id: "effort", values: [{ value: "low" }] }] }, [
+ { id: "effort", value: "low" },
+ { id: "effort", value: "invalid" },
+ null as never,
+ ]), [{ id: "effort", value: "low" }]);
 });

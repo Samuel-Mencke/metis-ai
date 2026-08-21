@@ -8,6 +8,30 @@ const iso = () => new Date().toISOString();
 const RUN_EVENT_RETENTION = 10_000;
 const RUN_EVENT_MAX_BYTES = 128 * 1024;
 let lastRunEventCleanupAt = 0;
+const DEFAULT_JOB_LEASE_MS = 120_000;
+const DEFAULT_WORKER_ID =
+  process.env.AI_CHAT_WORKER_ID?.trim() ||
+  `metis-worker-${process.pid}-${randomUUID()}`;
+
+const JOB_STATUS_TRANSITIONS: Record<JobStatus, readonly JobStatus[]> = {
+  queued: ["queued", "running", "completed", "cancelled", "error", "interrupted"],
+  running: ["running", "queued", "switching", "waiting_input", "waiting_for_user", "completed", "cancelled", "interrupted", "error"],
+  switching: ["switching", "queued", "cancelled", "interrupted", "error"],
+  waiting_input: ["waiting_input", "queued", "running", "cancelled", "interrupted", "error"],
+  waiting_for_user: ["waiting_for_user", "queued", "running", "cancelled", "interrupted", "error"],
+  completed: ["completed"],
+  cancelled: ["cancelled"],
+  interrupted: ["interrupted", "queued", "cancelled"],
+  error: ["error", "queued", "cancelled"],
+};
+
+export function canTransitionJobStatus(from: JobStatus, to: JobStatus) {
+  return JOB_STATUS_TRANSITIONS[from]?.includes(to) ?? false;
+}
+
+function jobRevision(job: AgentJob) {
+  return Number.isInteger(job.revision) && (job.revision as number) >= 0 ? job.revision as number : 0;
+}
 
 function truncateRunEventString(value: string, maxChars: number) {
   if (value.length <= maxChars) return value;
@@ -114,6 +138,7 @@ export function enqueueJob(
       id: randomUUID(),
       status: "queued",
       attempts: 0,
+      revision: 0,
       createdAt: now,
       updatedAt: now,
     };
@@ -130,7 +155,7 @@ export function getActiveJob(chatId: string, userId?: string) {
       `SELECT data FROM jobs
        WHERE chat_id = ?
          AND status IN ('queued', 'running', 'switching', 'waiting_input', 'waiting_for_user')
-         AND (? IS NULL OR user_id = ? OR user_id IS NULL)
+         AND (? IS NULL OR user_id = ?)
        ORDER BY updated_at DESC LIMIT 1`,
     )
     .get(chatId, userId ?? null, userId ?? null);
@@ -145,7 +170,7 @@ export function listChildJobs(parentJobId: string, userId?: string) {
   const rows = getDatabase().prepare(
     `SELECT data FROM jobs
      WHERE json_extract(data, '$.parentJobId') = ?
-       AND (? IS NULL OR user_id = ? OR user_id IS NULL)
+       AND (? IS NULL OR user_id = ?)
      ORDER BY updated_at ASC`,
   ).all(parentJobId, userId ?? null, userId ?? null);
   return rows.map((row) => parseData<AgentJob>(row)).filter((job): job is AgentJob => Boolean(job));
@@ -176,15 +201,23 @@ export function cancelChildJobs(parentJobId: string, userId: string | undefined,
 export function listJobs(chatId?: string, userId?: string) {
   const rows = getDatabase().prepare(
     `SELECT data FROM jobs
-     WHERE (? IS NULL OR chat_id = ?) AND (? IS NULL OR user_id = ? OR user_id IS NULL)
+     WHERE (? IS NULL OR chat_id = ?) AND (? IS NULL OR user_id = ?)
      ORDER BY updated_at DESC`,
   ).all(chatId ?? null, chatId ?? null, userId ?? null, userId ?? null);
   return rows.map((row) => parseData<AgentJob>(row)).filter((job): job is AgentJob => Boolean(job));
 }
 
-export function claimNextJob(options: { interactiveOnly?: boolean } = {}) {
+export function claimNextJob(options: {
+  interactiveOnly?: boolean;
+  workerId?: string;
+  leaseMs?: number;
+} = {}) {
   return transaction(() => {
     const db = getDatabase();
+    const workerId = options.workerId?.trim() || DEFAULT_WORKER_ID;
+    const leaseMs = Number.isFinite(options.leaseMs)
+      ? Math.max(5_000, Math.min(Number(options.leaseMs), 24 * 60 * 60_000))
+      : DEFAULT_JOB_LEASE_MS;
     const selectQueued = db.prepare(
       `SELECT id, chat_id as chatId, user_id as userId, data
        FROM jobs
@@ -224,12 +257,65 @@ export function claimNextJob(options: { interactiveOnly?: boolean } = {}) {
           .run(JSON.stringify(failed), failed.status, now, row.id);
         continue;
       }
-      const claimed = { ...job, status: "running" as const, claimedAt: iso(), attempts: job.attempts + 1, updatedAt: iso() };
-      db.prepare("UPDATE jobs SET data = ?, status = ?, updated_at = ? WHERE id = ? AND status = 'queued'")
-        .run(JSON.stringify(claimed), claimed.status, claimed.updatedAt, claimed.id);
-      return claimed;
+      const claimed = {
+        ...job,
+        status: "running" as const,
+        claimedAt: iso(),
+        attempts: job.attempts + 1,
+        revision: jobRevision(job) + 1,
+        updatedAt: iso(),
+      };
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + leaseMs).toISOString();
+      const leaseToken = randomUUID();
+      db.prepare("DELETE FROM job_leases WHERE job_id = ? AND expires_at <= ?")
+        .run(claimed.id, now.toISOString());
+      const lease = db.prepare(
+        `INSERT OR IGNORE INTO job_leases
+         (job_id, worker_id, lease_token, expires_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(claimed.id, workerId, leaseToken, expiresAt, now.toISOString());
+      if (!lease.changes) continue;
+      const result = db.prepare(
+        `UPDATE jobs SET data = ?, status = ?, updated_at = ?
+         WHERE id = ? AND status = 'queued'
+           AND COALESCE(CAST(json_extract(data, '$.revision') AS INTEGER), 0) = ?`,
+      ).run(JSON.stringify(claimed), claimed.status, claimed.updatedAt, claimed.id, jobRevision(job));
+      if (result.changes) {
+        return {
+          ...claimed,
+          leaseOwner: workerId,
+          leaseToken,
+          leaseExpiresAt: expiresAt,
+        };
+      }
+      db.prepare("DELETE FROM job_leases WHERE job_id = ? AND lease_token = ?")
+        .run(claimed.id, leaseToken);
     }
   });
+}
+
+export function isJobLeaseActive(
+  jobId: string,
+  workerId: string,
+  leaseToken: string,
+  at = iso(),
+) {
+  if (!jobId.trim() || !workerId.trim() || !leaseToken.trim()) return false;
+  return Boolean(getDatabase().prepare(
+    `SELECT 1 FROM job_leases
+     WHERE job_id = ? AND worker_id = ? AND lease_token = ? AND expires_at > ?`,
+  ).get(jobId, workerId, leaseToken, at));
+}
+
+function hasActiveWorkerLease(db: ReturnType<typeof getDatabase>, jobId: string, now: string) {
+  const workerId = process.env.AI_CHAT_WORKER_ID?.trim();
+  const leaseToken = process.env.AI_CHAT_JOB_LEASE_TOKEN?.trim();
+  if (!workerId || !leaseToken) return true;
+  return Boolean(db.prepare(
+    `SELECT 1 FROM job_leases
+     WHERE job_id = ? AND worker_id = ? AND lease_token = ? AND expires_at > ?`,
+  ).get(jobId, workerId, leaseToken, now));
 }
 
 export function updateJob(id: string, patch: Partial<Pick<AgentJob,
@@ -245,13 +331,37 @@ export function updateJob(id: string, patch: Partial<Pick<AgentJob,
   | "pendingModelId"
   | "pendingModelParams"
   | "modelSwitchRequestedAt"
->>) {
+>>, options: { expectedRevision?: number } = {}) {
   return transaction(() => {
+    const db = getDatabase();
     const current = getJob(id);
     if (!current) return null;
-    const updated = { ...current, ...patch, updatedAt: iso() };
-    getDatabase().prepare("UPDATE jobs SET data = ?, status = ?, updated_at = ? WHERE id = ?")
-      .run(JSON.stringify(updated), updated.status, updated.updatedAt, id);
+    if (!hasActiveWorkerLease(db, id, iso())) return null;
+    if (patch.status && !canTransitionJobStatus(current.status, patch.status)) {
+      throw new Error(`Invalid job state transition: ${current.status} -> ${patch.status}`);
+    }
+    const expectedRevision = options.expectedRevision ?? jobRevision(current);
+    if (expectedRevision !== jobRevision(current)) return null;
+    const updated = {
+      ...current,
+      ...patch,
+      revision: expectedRevision + 1,
+      updatedAt: iso(),
+    };
+    const releasesLease = ["queued", "switching", "completed", "cancelled", "interrupted", "error"]
+      .includes(updated.status);
+    if (releasesLease) {
+      delete updated.leaseOwner;
+      delete updated.leaseToken;
+      delete updated.leaseExpiresAt;
+    }
+    const result = getDatabase().prepare(
+      `UPDATE jobs SET data = ?, status = ?, updated_at = ?
+       WHERE id = ? AND status = ?
+         AND COALESCE(CAST(json_extract(data, '$.revision') AS INTEGER), 0) = ?`,
+    ).run(JSON.stringify(updated), updated.status, updated.updatedAt, id, current.status, expectedRevision);
+    if (!result.changes) return null;
+    if (releasesLease) db.prepare("DELETE FROM job_leases WHERE job_id = ?").run(id);
     return updated;
   });
 }
@@ -261,13 +371,34 @@ export function touchJob(id: string) {
   if (!current || current.status !== "running") return current;
   const updatedAt = iso();
   try {
-    // Update only the heartbeat timestamp in JSON. Rewriting the entire row from
-    // a stale in-memory snapshot can erase a model-switch request written by
-    // the API process between getJob() and this heartbeat.
-    getDatabase().prepare(
-      "UPDATE jobs SET data = json_set(data, '$.updatedAt', ?), updated_at = ? WHERE id = ? AND status = 'running'",
-    ).run(updatedAt, updatedAt, id);
-    return getJob(id) || { ...current, updatedAt };
+    return transaction(() => {
+      const db = getDatabase();
+      const workerId = process.env.AI_CHAT_WORKER_ID?.trim();
+      const leaseToken = process.env.AI_CHAT_JOB_LEASE_TOKEN?.trim();
+      const expiresAt = new Date(Date.now() + DEFAULT_JOB_LEASE_MS).toISOString();
+      if (workerId && leaseToken) {
+        const renewed = db.prepare(
+          `UPDATE job_leases
+           SET expires_at = ?, updated_at = ?
+           WHERE job_id = ? AND worker_id = ? AND lease_token = ? AND expires_at > ?`,
+        ).run(expiresAt, updatedAt, id, workerId, leaseToken, updatedAt);
+        if (!renewed.changes) return null;
+      }
+      // Update only the heartbeat timestamp in JSON. Rewriting the entire row from
+      // a stale in-memory snapshot can erase a model-switch request written by
+      // the API process between getJob() and this heartbeat.
+      const updated = db.prepare(
+        `UPDATE jobs
+         SET data = json_set(
+           data,
+           '$.updatedAt', ?,
+           '$.revision', COALESCE(CAST(json_extract(data, '$.revision') AS INTEGER), 0) + 1
+         ),
+         updated_at = ?
+         WHERE id = ? AND status = 'running'`,
+      ).run(updatedAt, updatedAt, id);
+      return updated.changes ? getJob(id) || { ...current, updatedAt } : null;
+    });
   } catch (error) {
     // This runs from a timer. Missing one liveness heartbeat is harmless;
     // throwing from setInterval would be an uncaught worker exception.
@@ -277,6 +408,44 @@ export function touchJob(id: string) {
     }
     throw error;
   }
+}
+
+export function reapExpiredJobLeases(now = iso()) {
+  return transaction(() => {
+    const db = getDatabase();
+    const rows = db.prepare(
+      `SELECT j.data
+       FROM job_leases l
+       JOIN jobs j ON j.id = l.job_id
+       WHERE l.expires_at <= ? AND j.status = 'running'`,
+    ).all(now);
+    const requeued: AgentJob[] = [];
+    for (const row of rows) {
+      const job = parseData<AgentJob>(row);
+      if (!job) continue;
+      const updated = {
+        ...job,
+        status: "queued" as const,
+        error: undefined,
+        resumePrompt: "The worker lease expired. Resume from the last saved agent state without repeating completed tool calls.",
+        resumeRequestedAt: now,
+        revision: jobRevision(job) + 1,
+        updatedAt: now,
+      };
+      delete updated.leaseOwner;
+      delete updated.leaseToken;
+      delete updated.leaseExpiresAt;
+      const result = db.prepare(
+        `UPDATE jobs SET data = ?, status = 'queued', updated_at = ?
+         WHERE id = ? AND status = 'running'
+           AND COALESCE(CAST(json_extract(data, '$.revision') AS INTEGER), 0) = ?`,
+      ).run(JSON.stringify(updated), now, updated.id, jobRevision(job));
+      if (!result.changes) continue;
+      db.prepare("DELETE FROM job_leases WHERE job_id = ?").run(updated.id);
+      requeued.push(updated);
+    }
+    return requeued;
+  });
 }
 
 export function recoverStaleJobs(maxAgeMs = 15 * 60 * 1000) {
@@ -336,6 +505,19 @@ export function recoverStaleJobs(maxAgeMs = 15 * 60 * 1000) {
 export function appendRunEvent(jobId: string, chatId: string, userId: string | undefined, event: string, data: unknown) {
   const createdAt = iso();
   const db = getDatabase();
+  if (!hasActiveWorkerLease(db, jobId, createdAt)) {
+    return {
+      id: 0,
+      sequence: 0,
+      jobId,
+      chatId,
+      event,
+      data,
+      createdAt,
+      persisted: false as const,
+      dropped: "stale_lease" as const,
+    };
+  }
   const encoded = serializeRunEventData(data);
   let result: { lastInsertRowid: number | bigint };
   try {
@@ -382,7 +564,7 @@ export function listRunEvents(
      FROM run_events
      WHERE chat_id = ? AND id > ?
        AND (? IS NULL OR job_id = ?)
-       AND (? IS NULL OR user_id = ? OR user_id IS NULL)
+       AND (? IS NULL OR user_id = ?)
      ORDER BY id ASC
      LIMIT 500`,
   ).all(
@@ -400,7 +582,12 @@ export function requeueSwitchingJob(id: string) {
   const updatedAt = iso();
   const result = getDatabase().prepare(
     `UPDATE jobs
-     SET data = json_set(data, '$.status', 'queued', '$.updatedAt', ?),
+     SET data = json_set(
+           data,
+           '$.status', 'queued',
+           '$.updatedAt', ?,
+           '$.revision', COALESCE(CAST(json_extract(data, '$.revision') AS INTEGER), 0) + 1
+         ),
          status = 'queued',
          updated_at = ?
      WHERE id = ? AND status = 'switching'`,

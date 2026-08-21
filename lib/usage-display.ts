@@ -30,10 +30,6 @@ export type UsageSelection = {
   modelId?: string | null;
 };
 
-const WEEKLY = /week/i;
-const SHORT_WINDOW = /^(\d+h|5h|hours?)$/i;
-const MONTHLY = /month|cycle|included|total|plan/i;
-
 export function usageKeyForProvider(providerId?: string | null): string | null {
   const key = (providerId || "").trim().toLowerCase();
   if (!key) return null;
@@ -86,12 +82,12 @@ export function windowsWithData(windows: UsageWindow[]): Array<UsageWindow & { u
 export function selectPrimaryUsageWindow(windows: UsageWindow[]): (UsageWindow & { usedPercent: number }) | null {
   const usable = windowsWithData(windows);
   if (!usable.length) return null;
-  return (
-    usable.find((window) => WEEKLY.test(window.label)) ||
-    usable.find((window) => SHORT_WINDOW.test(window.label)) ||
-    usable.find((window) => MONTHLY.test(window.label)) ||
-    usable[0]
-  );
+  // The compact gauge must surface the most constrained bucket. A weekly
+ // window can be healthier than the rolling 5h window (and vice versa), so
+ // choosing by label makes the displayed percentage misleading.
+ return usable.reduce((primary, window) =>
+  window.usedPercent > primary.usedPercent ? window : primary,
+ );
 }
 
 export function percentLeft(usedPercent: number): number {

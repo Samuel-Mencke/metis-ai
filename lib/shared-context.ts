@@ -30,6 +30,10 @@ export const ALLOWED_AUDIO_MIME_TYPES = new Set([
 
 const iso = () => new Date().toISOString();
 
+function idempotencyScope(scope: string, ownerId?: string) {
+  return ownerId ? `${scope}:owner:${ownerId}` : scope;
+}
+
 function boundedText(value: unknown, max: number) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
@@ -64,9 +68,9 @@ export function getIdempotentResponse<T>(scope: string, key: string, ownerId?: s
   const row = getDatabase().prepare(
     `SELECT response FROM idempotency_keys
      WHERE scope = ? AND key = ?
-       AND (? IS NULL OR owner_id = ? OR owner_id IS NULL)
-       AND (? IS NULL OR chat_id = ? OR chat_id IS NULL)`,
-  ).get(scope, key, ownerId ?? null, ownerId ?? null, chatId ?? null, chatId ?? null) as { response?: string } | undefined;
+       AND (? IS NULL OR owner_id = ?)
+       AND (? IS NULL OR chat_id = ?)`,
+  ).get(idempotencyScope(scope, ownerId), key, ownerId ?? null, ownerId ?? null, chatId ?? null, chatId ?? null) as { response?: string } | undefined;
   if (!row?.response) return null;
   try {
     return JSON.parse(row.response) as T;
@@ -87,7 +91,7 @@ export function saveIdempotentResponse<T>(
     `INSERT INTO idempotency_keys (scope, key, owner_id, chat_id, response, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(scope, key) DO UPDATE SET response = excluded.response, updated_at = excluded.updated_at`,
-  ).run(scope, key, ownerId ?? null, chatId ?? null, JSON.stringify(response), timestamp, timestamp);
+  ).run(idempotencyScope(scope, ownerId), key, ownerId ?? null, chatId ?? null, JSON.stringify(response), timestamp, timestamp);
   return response;
 }
 
@@ -146,7 +150,7 @@ export function listNotes(input: {
 }) {
   const rows = getDatabase().prepare(
     `SELECT data FROM notes
-     WHERE (? IS NULL OR owner_id = ? OR owner_id IS NULL)
+     WHERE (? IS NULL OR owner_id = ?)
        AND (? IS NULL OR scope = 'global' OR (scope = 'chat' AND chat_id = ?) OR (scope = 'workspace' AND workspace_id = ?))
        AND (? IS NULL OR scope = ?)
        AND (? = 1 OR archived = 0)
@@ -171,7 +175,7 @@ export function listNotes(input: {
 export function getNote(id: string, ownerId?: string) {
   if (!id.trim()) return null;
   const row = getDatabase().prepare(
-    "SELECT data FROM notes WHERE id = ? AND (? IS NULL OR owner_id = ? OR owner_id IS NULL)",
+    "SELECT data FROM notes WHERE id = ? AND (? IS NULL OR owner_id = ?)",
   ).get(id, ownerId ?? null, ownerId ?? null);
   return rowToNote(row);
 }
@@ -201,7 +205,7 @@ function noteActivity(
 export function listNoteActivities(noteId: string, ownerId?: string) {
   const rows = getDatabase().prepare(
     `SELECT data FROM note_activities
-     WHERE note_id = ? AND (? IS NULL OR owner_id = ? OR owner_id IS NULL)
+     WHERE note_id = ? AND (? IS NULL OR owner_id = ?)
      ORDER BY created_at DESC LIMIT 100`,
   ).all(noteId, ownerId ?? null, ownerId ?? null);
   return rows.map((row) => parseData<NoteActivity>(row)).filter((item): item is NoteActivity => Boolean(item));
@@ -321,7 +325,7 @@ export function revertChatNotes(chatId: string, ownerId: string | undefined, cut
        FROM note_activities a
        JOIN notes n ON n.id = a.note_id
        WHERE n.chat_id = ? AND n.scope = 'chat'
-         AND (? IS NULL OR n.owner_id = ? OR n.owner_id IS NULL)
+         AND (? IS NULL OR n.owner_id = ?)
          AND a.created_at > ?
        ORDER BY a.created_at DESC`,
     ).all(chatId, ownerId ?? null, ownerId ?? null, cutoff) as Array<{
@@ -414,7 +418,7 @@ export function saveSnapshot(snapshot: SessionSnapshot) {
 export function getLatestSnapshot(chatId: string, ownerId?: string) {
   const rows = getDatabase().prepare(
     `SELECT data FROM session_snapshots
-     WHERE chat_id = ? AND (? IS NULL OR owner_id = ? OR owner_id IS NULL)
+     WHERE chat_id = ? AND (? IS NULL OR owner_id = ?)
      ORDER BY updated_at DESC LIMIT 5`,
   ).all(chatId, ownerId ?? null, ownerId ?? null);
   for (const row of rows) {
@@ -506,7 +510,7 @@ export function createVoiceJob(input: {
 
 export function getVoiceJob(id: string, ownerId?: string) {
   const row = getDatabase().prepare(
-    "SELECT data FROM voice_jobs WHERE id = ? AND (? IS NULL OR owner_id = ? OR owner_id IS NULL)",
+    "SELECT data FROM voice_jobs WHERE id = ? AND (? IS NULL OR owner_id = ?)",
   ).get(id, ownerId ?? null, ownerId ?? null);
   return parseData<VoiceTranscriptionJob>(row);
 }
@@ -522,7 +526,7 @@ export function updateVoiceJob(id: string, patch: Partial<Pick<VoiceTranscriptio
 export function listVoiceJobs(ownerId?: string, chatId?: string) {
   const rows = getDatabase().prepare(
     `SELECT data FROM voice_jobs
-     WHERE (? IS NULL OR owner_id = ? OR owner_id IS NULL)
+     WHERE (? IS NULL OR owner_id = ?)
        AND (? IS NULL OR chat_id = ?)
      ORDER BY updated_at DESC LIMIT 50`,
   ).all(ownerId ?? null, ownerId ?? null, chatId ?? null, chatId ?? null);

@@ -53,6 +53,7 @@ test("Codex exposes the supported credential paths and official model IDs", () =
   const provider = listProviderDefinitions().find((item) => item.key === "codex");
   assert.deepEqual(provider?.authTypes, ["oauth", "account", "api_key"]);
   assert.deepEqual(provider?.models.map((model) => model.id), [
+    "gpt-5.4",
     "gpt-5.6",
     "gpt-5.3-codex",
     "gpt-5.2",

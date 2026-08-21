@@ -10,7 +10,9 @@ export {
   ListToolsRequestSchema,
   Server,
   StdioServerTransport,
+  childCacheKey,
   dispatchGatewayTool,
   removeMcpServer,
   tools,
+  visibleToolsForContext,
 } from "../../lib/mcp-core/gateway-core.mjs";

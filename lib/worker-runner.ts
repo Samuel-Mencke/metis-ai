@@ -307,6 +307,28 @@ function normalizeToolId(value: string) {
   return value.trim().replace(/\s+/g, "");
 }
 
+function toolEventValue(update: Record<string, unknown>, ...keys: string[]) {
+  for (const key of keys) {
+    const value = update[key];
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return undefined;
+}
+
+function normalizedToolDelta(update: Record<string, unknown>) {
+  const nested = asRecord(update.toolCall) || asRecord(update.tool_call) || {};
+  return {
+    callId: toolEventValue(update, "callId", "call_id", "toolCallId", "tool_call_id") ??
+      toolEventValue(nested, "callId", "call_id", "toolCallId", "tool_call_id"),
+    name: toolEventValue(update, "name", "toolName", "tool_name", "tool") ??
+      toolEventValue(nested, "name", "toolName", "tool_name", "tool"),
+    args: toolEventValue(update, "args", "input", "arguments", "toolInput", "tool_input") ??
+      toolEventValue(nested, "args", "input", "arguments", "toolInput", "tool_input"),
+    result: toolEventValue(update, "result", "output", "content", "toolResult", "tool_result") ??
+      toolEventValue(nested, "result", "output", "content", "toolResult", "tool_result"),
+  };
+}
+
 function isFinishedToolStatus(value: string) {
   return ["completed", "success", "succeeded", "done"].includes(value.trim().toLowerCase());
 }
@@ -674,6 +696,11 @@ export async function runQueuedJob(job: AgentJob) {
       allowedCategories: modeCategories,
       toolOverrides: activeMode.toolOverrides || {},
     }),
+    workspaceId: job.chatId,
+    attemptId: job.runId || job.id,
+    policyVersion: `mode:${activeMode.id}:v1`,
+    allowedCategories: modeCategories,
+    toolOverrides: activeMode.toolOverrides || {},
     compressionEnabled,
     compressionMode,
     compressionToolResults: Boolean(compressionSettings?.compressToolResults ?? true),
@@ -1022,24 +1049,20 @@ export async function runQueuedJob(job: AgentJob) {
       emit("thinking", payload);
     };
     const ingestTool = (rawToolEvent: Record<string, unknown>, eventType: string) => {
-      const rawCallId =
-        rawToolEvent.call_id ||
-        rawToolEvent.callId ||
-        rawToolEvent.tool_call_id;
+      const normalized = normalizedToolDelta(rawToolEvent);
+      const rawCallId = normalized.callId;
       const toolId = normalizeToolId(typeof rawCallId === "string" ? rawCallId : crypto.randomUUID());
       const existingTool = tools.find((tool) => tool.id === toolId)
         || tools.find((tool) => tool.id === `todo-${job.id}`);
       const toolName =
-        (typeof rawToolEvent.name === "string" && rawToolEvent.name) ||
-        (typeof rawToolEvent.tool_name === "string" && rawToolEvent.tool_name) ||
-        (typeof rawToolEvent.toolName === "string" && rawToolEvent.toolName) ||
+        (typeof normalized.name === "string" && normalized.name) ||
         existingTool?.name ||
         "tool";
       const toolStatus =
         (typeof rawToolEvent.status === "string" && rawToolEvent.status) ||
         (eventType === "tool_result" || eventType === "tool-call-completed" ? "completed" : "running");
-      const toolArgs = rawToolEvent.args ?? rawToolEvent.input ?? rawToolEvent.arguments;
-      const toolResult = rawToolEvent.result ?? rawToolEvent.output ?? rawToolEvent.content;
+      const toolArgs = normalized.args;
+      const toolResult = normalized.result;
       const detail = toolDetailFromArgs(toolArgs) || existingTool?.detail;
       const subagent = extractSubagent(toolName, toolArgs, toolResult);
       let editArgs = toolArgs;
@@ -1185,6 +1208,7 @@ export async function runQueuedJob(job: AgentJob) {
       status?: string;
       message?: string;
       toolCall?: { type?: string; args?: unknown; result?: unknown };
+      [key: string]: unknown;
     }) => {
       if (cancellationRequested) return;
       markSendProgress();
@@ -1221,11 +1245,12 @@ export async function runQueuedJob(job: AgentJob) {
         update.type === "partial-tool-call" ||
         update.type === "tool-call-completed"
       ) {
-        const toolCall = update.toolCall || {};
+        const toolCall = normalizedToolDelta(update);
         ingestTool({
-          callId: update.callId,
-          name: toolNameFromDelta(update),
-          status: update.type === "tool-call-completed" ? "completed" : "running",
+          ...update,
+          callId: toolCall.callId ?? update.callId,
+          name: toolCall.name ?? toolNameFromDelta(update),
+          status: update.type === "tool-call-completed" ? "completed" : update.status || "running",
           args: toolCall.args,
           result: toolCall.result,
         }, update.type);

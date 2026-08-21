@@ -203,6 +203,15 @@ export const PROVIDERS: ProviderDefinition[] = [
     capabilities: agentCapabilities,
     models: models(
       {
+        id: "gpt-5.4",
+        displayName: "GPT-5.4",
+        tags: ["reasoning", "coding", "agent"],
+        contextWindow: 1_050_000,
+        capabilities: { fast: true },
+        parameters: [CODEX_EFFORT_PARAMETER],
+        defaultParams: [{ id: "effort", value: "medium" }],
+      },
+      {
         id: "gpt-5.6",
         displayName: "GPT-5.6",
         tags: ["coding", "agent"],

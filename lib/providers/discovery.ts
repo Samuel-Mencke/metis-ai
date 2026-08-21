@@ -168,7 +168,11 @@ export function mergeDiscoveredContextWindow(options: {
   stored?: number;
   catalog?: number;
 }): number | undefined {
-  return options.discovered || options.catalog || options.stored;
+  const valid = (value: unknown) =>
+ typeof value === "number" && Number.isFinite(value) && value >= 1_024
+ ? Math.round(value)
+ : undefined;
+ return valid(options.discovered) ?? valid(options.catalog) ?? valid(options.stored);
 }
 
 async function fetchJson(url: string, headers: Record<string, string>) {

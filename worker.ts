@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { writeWorkerHeartbeat } from "@/lib/worker-health";
-import { appendRunEvent, cancelChildJobs, claimNextJob, enqueueJob, getActiveJob, getJob, listChildJobs, recoverStaleJobs, requeueSwitchingJob, updateJob } from "@/lib/db-jobs";
+import { appendRunEvent, cancelChildJobs, claimNextJob, enqueueJob, getActiveJob, getJob, listChildJobs, reapExpiredJobLeases, recoverStaleJobs, requeueSwitchingJob, updateJob } from "@/lib/db-jobs";
 import { snapshotInterruptedJob } from "@/lib/recovery";
 import { appendMessage, appendMessageInTransaction, getChat, listChatsWithQueuedMessages, removeQueuedMessage, updateChat, upsertMessage } from "@/lib/db-store";
 import { expirePendingQuestions } from "@/lib/db-questions";
@@ -31,7 +31,9 @@ function stop() {
   stopping = true;
 }
 
-function runJobInIsolatedProcess(jobId: string) {
+function runJobInIsolatedProcess(claimedJob: Awaited<ReturnType<typeof claimNextJob>>) {
+  if (!claimedJob) return Promise.resolve();
+  const jobId = claimedJob.id;
   return new Promise<void>((resolveProcess, reject) => {
     const markFailed = (message: string) => {
       const beforeFailure = getJob(jobId);
@@ -141,7 +143,12 @@ function runJobInIsolatedProcess(jobId: string) {
       [resolve("node_modules/tsx/dist/cli.mjs"), "worker-job.ts", jobId],
       {
         cwd: process.cwd(),
-        env: process.env,
+        env: {
+          ...process.env,
+          ...(claimedJob.leaseOwner ? { AI_CHAT_WORKER_ID: claimedJob.leaseOwner } : {}),
+          ...(claimedJob.leaseToken ? { AI_CHAT_JOB_LEASE_TOKEN: claimedJob.leaseToken } : {}),
+          AI_CHAT_JOB_ID: claimedJob.id,
+        },
         stdio: ["ignore", "inherit", "pipe"],
       },
     );
@@ -368,6 +375,18 @@ async function main() {
   writeWorkerHeartbeat();
   const heartbeat = setInterval(() => writeWorkerHeartbeat(), 5_000);
   heartbeat.unref();
+  for (const expired of reapExpiredJobLeases()) {
+    updateChat(expired.chatId, {
+      runStatus: "running",
+      runUpdatedAt: expired.updatedAt,
+      queueMessage: null,
+      badge: null,
+    }, expired.userId);
+    appendRunEvent(expired.id, expired.chatId, expired.userId, "status", {
+      status: "recovering",
+      message: "Worker lease expired; the run was requeued from its durable checkpoint.",
+    });
+  }
   const recovered = recoverStaleJobs();
   for (const job of recovered.interrupted) snapshotInterruptedJob(job);
   if (recovered.resumed.length) {
@@ -413,7 +432,7 @@ async function main() {
       });
       if (!job) break;
       console.log(`[ai-chat-worker] claimed ${job.id} (${job.chatId})`);
-      const task = runJobInIsolatedProcess(job.id)
+      const task = runJobInIsolatedProcess(job)
         .catch((error) => {
           console.error(`[ai-chat-worker] job ${job.id} failed`, error);
         })

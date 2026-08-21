@@ -449,7 +449,8 @@ async function fetchAntigravityUsage(ownerId?: string): Promise<UsageProvider> {
         /* try the next account-scoped connection */
       }
     }
-  } else {
+
+ } else {
     try {
       addCredential(readFileSync(`${HOME}/.gemini/antigravity-cli/antigravity-oauth-token`, "utf8"));
     } catch {
@@ -457,7 +458,15 @@ async function fetchAntigravityUsage(ownerId?: string): Promise<UsageProvider> {
     }
   }
 
-  if (!credentials.length) return { ...base, status: "no_auth", error: "no authenticated Antigravity connection" };
+  // The CLI may have refreshed its host-scoped token after the account
+ // connection was stored. Use it as a fallback for the local Metis user.
+ try {
+ addCredential(readFileSync(`${HOME}/.gemini/antigravity-cli/antigravity-oauth-token`, "utf8"));
+ } catch {
+ /* no local CLI token */
+ }
+
+ if (!credentials.length) return { ...base, status: "no_auth", error: "no authenticated Antigravity connection" };
 
   const readQuota = async (token: string) => {
     const controller = new AbortController();

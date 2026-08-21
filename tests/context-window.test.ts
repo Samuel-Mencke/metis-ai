@@ -42,12 +42,12 @@ test("contextWindowForModel prefers catalog then inference", () => {
   assert.equal(contextWindowForModel({ id: "grok-4", contextWindow: 256_000 }), 256_000);
   assert.equal(contextWindowForModel({ id: "grok-4" }), 2_000_000);
   assert.equal(contextWindowForModel({ id: "grok-4", contextWindow: 128_000 }), 128_000);
-  assert.equal(contextWindowForModel({ id: "zai:x:glm-4.6", contextWindow: 202_752 }), 200_000);
-  assert.equal(contextWindowForModel({ id: "gpt-5", contextWindow: 1_047_576 }), 1_048_576);
+  assert.equal(contextWindowForModel({ id: "zai:x:glm-4.6", contextWindow: 202_752 }), 202_752);
+  assert.equal(contextWindowForModel({ id: "gpt-5", contextWindow: 1_047_576 }), 1_047_576);
 });
 
-test("formatContextWindow snaps odd GLM windows to 200K", () => {
-  assert.equal(formatContextWindow(202_752), "200K");
+test("formatContextWindow preserves non-market context sizes", () => {
+  assert.equal(formatContextWindow(202_752), "203K");
   assert.equal(formatContextWindow(1_048_576), "1M");
   assert.equal(formatContextWindow(400_000), "400K");
   assert.equal(formatContextWindow(131_072), "131K");
@@ -87,7 +87,10 @@ test("contextWindowForSelection follows the selected provider context parameter"
   };
   assert.equal(contextWindowForSelection(cursorModel, []), 1_000_000);
   assert.equal(contextWindowForSelection(cursorModel, [{ id: "context", value: "272k" }]), 272_000);
-  assert.equal(contextWindowForSelection({ id: "grok-4.6", providerId: "cursor" }), 256_000);
+  assert.equal(contextWindowForSelection(cursorModel, [{ id: "context", value: "1.047576M" }]), 1_047_576);
+ assert.equal(contextWindowForSelection(cursorModel, [{ id: "context", value: "unlimited" }]), 1_050_000);
+ assert.equal(contextWindowForSelection({ id: "unknown-model" }, [{ id: "context", value: "max" }]), undefined);
+ assert.equal(contextWindowForSelection({ id: "grok-4.6", providerId: "cursor" }), 256_000);
 });
 
 test("current GPT-5 family fallbacks keep long-context and mini variants distinct", () => {

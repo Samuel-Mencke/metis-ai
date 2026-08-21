@@ -5,6 +5,9 @@ import {
   getRemoteClient,
   markRemoteClientOffline,
   markRemoteClientSeen,
+  consumeRemoteApproval,
+  createRemoteApproval,
+  RemoteApprovalRequiredError,
   type RemoteAction,
 } from "@/lib/remote-clients";
 
@@ -96,7 +99,9 @@ export function requestRemoteClient(input: {
   action: RemoteAction;
   params?: Record<string, unknown>;
   source?: "user" | "agent";
-  approved?: boolean;
+  approvalId?: string;
+  runId?: string;
+  toolCallId?: string;
   timeoutMs?: number;
 }) {
   const client = getRemoteClient(input.clientId, input.ownerId);
@@ -114,16 +119,25 @@ export function requestRemoteClient(input: {
     });
     throw new Error(authorization.reason || "Remote action denied");
   }
-  if (authorization.requiresApproval && !input.approved) {
-    appendRemoteAudit({
+  if (authorization.requiresApproval) {
+    if (!input.approvalId || !consumeRemoteApproval({
+      id: input.approvalId,
       ownerId: input.ownerId,
       clientId: input.clientId,
-      source: input.source || "user",
       action: input.action,
-      requestData: redact(input.params),
-      status: "requested",
-    });
-    throw new Error("Remote action requires approval");
+      params: input.params,
+    })) {
+      const approval = createRemoteApproval({
+        ownerId: input.ownerId,
+        clientId: input.clientId,
+        action: input.action,
+        params: input.params,
+        source: input.source,
+        runId: input.runId,
+        toolCallId: input.toolCallId,
+      });
+      throw new RemoteApprovalRequiredError(approval.id);
+    }
   }
   const connection = connections.get(input.clientId);
   if (!connection || connection.socket.readyState !== OPEN) throw new Error("Remote client is offline");
@@ -176,7 +190,7 @@ export function requestRemoteClient(input: {
       source: input.source || "user",
       action: input.action,
       requestData: redact(input.params),
-      status: input.approved ? "approved" : "completed",
+      status: "completed",
     });
     return result;
   }).catch((error) => {
@@ -227,4 +241,3 @@ function legacyFileCommand(client: { os?: string }, action: string, params: Reco
     ? command
     : command;
 }
-

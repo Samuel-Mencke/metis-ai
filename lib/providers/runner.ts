@@ -983,6 +983,12 @@ function providerMcpContext(context: ProviderContext) {
       allowedCategories: mode.allowedCategories,
       toolOverrides: mode.toolOverrides || {},
     },
+    workspaceId: context.job.chatId,
+    attemptId: context.job.runId || context.job.id,
+    policyVersion: `mode:${mode.id}:v1`,
+    allowedCategories: mode.allowedCategories,
+    toolOverrides: mode.toolOverrides || {},
+    childMcpGrants: { "*": ["*"] },
   });
 }
 
@@ -1521,7 +1527,7 @@ function claudeSecretIsJsonOAuth(secret?: string) {
 
 async function runProvider(context: ProviderContext): Promise<ProviderResult> {
   const providerKey = parseModelKey(context.job.modelId).providerKey;
-  if (providerKey === "antigravity") return runOAuthAiSdk(context, "antigravity");
+  if (providerKey === "antigravity") return runAntigravity(context);
   if (providerKey === "codex") {
     return context.connection.authType === "api_key"
       ? runAiSdk(context)

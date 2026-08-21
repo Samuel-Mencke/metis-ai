@@ -2,11 +2,11 @@ import dns from "node:dns/promises";
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
-import net from "node:net";
 import path from "node:path";
 import { chromium, type BrowserContext, type Frame, type Locator, type Page } from "playwright";
 import { config } from "@/lib/config";
 import { getUserAgentCwd } from "@/lib/mcp";
+import { isPrivateAddress } from "@/lib/url-security";
 
 const MAX_SNAPSHOT_LENGTH = 120_000;
 const SESSION_IDLE_MS = 30 * 60 * 1000;
@@ -237,19 +237,6 @@ function envList(name: string) {
 
 function sessionKey(ownerId: string, chatId: string) {
   return `${ownerId}:${chatId}`;
-}
-
-function isPrivateAddress(address: string) {
-  if (!net.isIP(address)) return false;
-  if (address === "::1" || address.startsWith("fc") || address.startsWith("fd") || address.startsWith("fe80:")) return true;
-  const octets = address.split(".").map(Number);
-  return octets.length === 4 && (
-    octets[0] === 10 ||
-    octets[0] === 127 ||
-    (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
-    (octets[0] === 192 && octets[1] === 168) ||
-    (octets[0] === 169 && octets[1] === 254)
-  );
 }
 
 function isLocalhost(hostname: string) {

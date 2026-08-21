@@ -19,6 +19,15 @@ test("cursor worker forwards live tool and thinking updates from onDelta", () =>
   );
 });
 
+test("cursor tool updates accept flat and nested SDK payload shapes", () => {
+  const source = readFileSync(path.join(root, "lib", "worker-runner.ts"), "utf8");
+  assert.match(source, /normalizedToolDelta/);
+  assert.match(source, /toolCallId/);
+  assert.match(source, /tool_input/);
+  assert.match(source, /tool_result/);
+  assert.match(source, /toolCall \\|\\| update\\.tool_call/);
+});
+
 test("xAI provider path exposes live web search tools", () => {
   const source = readFileSync(path.join(root, "lib", "providers", "runner.ts"), "utf8");
   assert.match(source, /tools\.web_search/);

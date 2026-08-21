@@ -51,6 +51,22 @@ export type RemoteAuditEntry = {
   createdAt: string;
 };
 
+export type RemoteApproval = {
+  id: string;
+  ownerId: string;
+  clientId: string;
+  action: RemoteAction;
+  argsHash: string;
+  requestData: Record<string, unknown>;
+  source: "user" | "agent";
+  runId?: string;
+  toolCallId?: string;
+  expiresAt: string;
+  approvedAt?: string;
+  consumedAt?: string;
+  createdAt: string;
+};
+
 const iso = () => new Date().toISOString();
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const REMOTE_SEEN_WRITE_INTERVAL_MS = 60_000;
@@ -67,6 +83,32 @@ const safeJson = <T>(value: unknown, fallback: T): T => {
     return fallback;
   }
 };
+
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, stableValue(item)]),
+    );
+  }
+  return value;
+}
+
+export function remoteArgsHash(params?: Record<string, unknown>) {
+  return hash(JSON.stringify(stableValue(params || {})));
+}
+
+export class RemoteApprovalRequiredError extends Error {
+  readonly approvalId: string;
+
+  constructor(approvalId: string) {
+    super("Remote action requires explicit user approval");
+    this.name = "RemoteApprovalRequiredError";
+    this.approvalId = approvalId;
+  }
+}
 
 function mapClient(row: Record<string, unknown>): RemoteClient {
   return {
@@ -265,6 +307,9 @@ export function authorizeRemoteAction(client: RemoteClient, action: RemoteAction
       ? { allowed: true, requiresApproval: true }
       : { allowed: false, requiresApproval: false, reason: "File changes are disabled by the client restricted policy" };
   }
+  if (action === "get_info" || action === "list_directory" || action === "read_file") {
+    return { allowed: true, requiresApproval: false };
+  }
   if (action !== "execute_command") return { allowed: true, requiresApproval: client.policy.mode === "approval_required" };
   const normalized = command?.trim() || "";
   const allowed = client.policy.allowlist.some((entry) => normalized === entry || normalized.startsWith(`${entry} `));
@@ -272,6 +317,93 @@ export function authorizeRemoteAction(client: RemoteClient, action: RemoteAction
     return { allowed, requiresApproval: false, reason: allowed ? undefined : "Command is not in the client allowlist" };
   }
   return { allowed: true, requiresApproval: true };
+}
+
+export function createRemoteApproval(input: {
+  ownerId: string;
+  clientId: string;
+  action: RemoteAction;
+  params?: Record<string, unknown>;
+  source?: "user" | "agent";
+  runId?: string;
+  toolCallId?: string;
+  ttlMs?: number;
+}) {
+  const client = getRemoteClient(input.clientId, input.ownerId);
+  if (!client) throw new Error("Remote client not found");
+  const authorization = authorizeRemoteAction(
+    client,
+    input.action,
+    typeof input.params?.command === "string" ? input.params.command : undefined,
+  );
+  if (!authorization.allowed) throw new Error(authorization.reason || "Remote action denied");
+  if (!authorization.requiresApproval) throw new Error("Remote action does not require approval");
+  const id = randomUUID();
+  const createdAt = iso();
+  const expiresAt = new Date(Date.now() + Math.max(5_000, Math.min(input.ttlMs || 5 * 60_000, 15 * 60_000))).toISOString();
+  getDatabase().prepare(
+    `INSERT INTO remote_approval_requests
+      (id, owner_id, client_id, action, args_hash, request_data, source, run_id, tool_call_id, expires_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    input.ownerId,
+    input.clientId,
+    input.action,
+    remoteArgsHash(input.params),
+    JSON.stringify(input.params || {}),
+    input.source || "user",
+    input.runId ?? null,
+    input.toolCallId ?? null,
+    expiresAt,
+    createdAt,
+  );
+  appendRemoteAudit({
+    ownerId: input.ownerId,
+    clientId: input.clientId,
+    source: input.source || "user",
+    action: input.action,
+    requestData: redactRemoteData(input.params),
+    status: "requested",
+  });
+  return { id, expiresAt };
+}
+
+export function approveRemoteApproval(id: string, ownerId: string) {
+  const approvedAt = iso();
+  const result = getDatabase().prepare(
+    `UPDATE remote_approval_requests
+     SET approved_at = ?
+     WHERE id = ? AND owner_id = ? AND approved_at IS NULL AND consumed_at IS NULL
+       AND expires_at > ?`,
+  ).run(approvedAt, id, ownerId, approvedAt);
+  return result.changes > 0;
+}
+
+export function consumeRemoteApproval(input: {
+  id: string;
+  ownerId: string;
+  clientId: string;
+  action: RemoteAction;
+  params?: Record<string, unknown>;
+}) {
+  const consumedAt = iso();
+  const result = getDatabase().prepare(
+    `UPDATE remote_approval_requests
+     SET consumed_at = ?
+     WHERE id = ? AND owner_id = ? AND client_id = ? AND action = ?
+       AND args_hash = ? AND approved_at IS NOT NULL AND consumed_at IS NULL
+       AND expires_at > ?`,
+  ).run(
+    consumedAt,
+    input.id,
+    input.ownerId,
+    input.clientId,
+    input.action,
+    remoteArgsHash(input.params),
+    consumedAt,
+  );
+  return result.changes > 0;
 }
 
 export function appendRemoteAudit(input: Omit<RemoteAuditEntry, "id" | "createdAt">) {
@@ -292,6 +424,16 @@ export function appendRemoteAudit(input: Omit<RemoteAuditEntry, "id" | "createdA
   return entry;
 }
 
+function redactRemoteData(params?: Record<string, unknown>) {
+  if (!params) return {};
+  return Object.fromEntries(Object.entries(params).map(([key, value]) => [
+    key,
+    /secret|token|password|credential/i.test(key)
+      ? "[redacted]"
+      : typeof value === "string" ? value.slice(0, 2_000) : value,
+  ]));
+}
+
 export function listRemoteAudit(ownerId: string, clientId?: string) {
   return (getDatabase().prepare(
     `SELECT id, owner_id as ownerId, client_id as clientId, source, action, request_data as requestData,
@@ -309,4 +451,3 @@ export function listRemoteAudit(ownerId: string, clientId?: string) {
     createdAt: String(row.createdAt),
   }));
 }
-

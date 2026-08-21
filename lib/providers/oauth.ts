@@ -264,9 +264,10 @@ export async function ensureAntigravityProjectId(authFile: string, configuredPro
       await writeFile(authFile, serialized, { encoding: "utf8", mode: 0o600 });
       return serialized;
     }
-    throw new Error(
-      "This Google account requires a Google Cloud project for Cloud Code Assist. Add the project ID to the Antigravity OAuth connection and reconnect.",
-    );
+    // Project discovery is optional for the free Antigravity/Gemini CLI path.
+    // Leave the OAuth token usable when Cloud Code Assist does not return a
+    // managed project; the provider can still operate without one.
+    return content;
   }
   const next = {
     ...data,

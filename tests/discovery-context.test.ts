@@ -38,7 +38,12 @@ test("mergeDiscoveredContextWindow prefers live API, then catalog, then stored",
     stored: 202_752,
   }), 202_752);
   assert.equal(mergeDiscoveredContextWindow({
-    catalog: 400_000,
+    discovered: 0,
+ catalog: 202_752,
+ stored: 128_000,
+ }), 202_752);
+ assert.equal(mergeDiscoveredContextWindow({
+ catalog: 400_000,
   }), 400_000);
   assert.equal(mergeDiscoveredContextWindow({}), undefined);
 });

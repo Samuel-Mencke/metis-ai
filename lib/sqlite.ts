@@ -285,6 +285,26 @@ export function getDatabase(): DatabaseSync {
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS jobs_status_created ON jobs(status, updated_at);
+    CREATE TABLE IF NOT EXISTS job_leases (
+      job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+      worker_id TEXT NOT NULL,
+      lease_token TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS job_leases_expiry
+      ON job_leases(expires_at);
+    CREATE TABLE IF NOT EXISTS capability_manifests (
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      run_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      manifest_json TEXT NOT NULL,
+      manifest_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (owner_id, run_id, attempt_id)
+    );
+    CREATE INDEX IF NOT EXISTS capability_manifests_run
+      ON capability_manifests(owner_id, run_id, created_at DESC);
     CREATE TABLE IF NOT EXISTS automations (
       id TEXT PRIMARY KEY,
       owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -455,6 +475,25 @@ export function getDatabase(): DatabaseSync {
     );
     CREATE INDEX IF NOT EXISTS remote_audit_owner
       ON remote_audit(owner_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS remote_approval_requests (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      client_id TEXT NOT NULL REFERENCES remote_clients(id) ON DELETE CASCADE,
+      action TEXT NOT NULL,
+      args_hash TEXT NOT NULL,
+      request_data TEXT NOT NULL DEFAULT '{}',
+      source TEXT NOT NULL,
+      run_id TEXT,
+      tool_call_id TEXT,
+      expires_at TEXT NOT NULL,
+      approved_at TEXT,
+      consumed_at TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS remote_approval_requests_owner
+      ON remote_approval_requests(owner_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS remote_approval_requests_lookup
+      ON remote_approval_requests(owner_id, client_id, action, args_hash, expires_at);
     CREATE TABLE IF NOT EXISTS browser_history (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       owner_id TEXT NOT NULL,

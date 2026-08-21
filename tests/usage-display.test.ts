@@ -3,7 +3,8 @@ import test from "node:test";
 import {
   matchUsageProvider,
   parseCursorUsageBody,
-  usageKeyForSelection,
+  selectPrimaryUsageWindow,
+ usageKeyForSelection,
   type UsageProvider,
 } from "../lib/usage-display";
 
@@ -31,6 +32,13 @@ test("usage selection keeps unavailable providers visible instead of inventing q
   assert.equal(codex?.windows.length, 0);
 });
 
+
+test("compact quota selects the most constrained window instead of preferring weekly", () => {
+ assert.equal(selectPrimaryUsageWindow([
+  { label: "weekly", usedPercent: 42, resetsAt: null },
+  { label: "5h", usedPercent: 88, resetsAt: null },
+ ])?.label, "5h");
+});
 
 test("usage selection maps Samuel gateway plan aliases to their real quota owner", () => {
   const providers = [

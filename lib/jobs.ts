@@ -67,6 +67,12 @@ export type AgentJob = {
   runId?: string;
   queueMessage?: string;
   status: JobStatus;
+  /** Monotonic optimistic-concurrency revision for durable job updates. */
+  revision?: number;
+  /** Process-local lease metadata, never persisted in the jobs JSON payload. */
+  leaseOwner?: string;
+  leaseToken?: string;
+  leaseExpiresAt?: string;
   attempts: number;
   createdAt: string;
   updatedAt: string;

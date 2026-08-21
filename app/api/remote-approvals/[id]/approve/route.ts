@@ -1,5 +1,5 @@
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
-import { requestRemoteClient } from "@/lib/remote-client-gateway";
+import { approveRemoteApproval } from "@/lib/remote-clients";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,16 +11,8 @@ export async function POST(req: Request, { params }: Params) {
   const ownerId = await getAuthenticatedUserId(req);
   const { id } = await params;
   if (!ownerId) return Response.json({ error: "Unauthorized" }, { status: 401 });
-  try {
-    const info = await requestRemoteClient({
-      clientId: id,
-      ownerId,
-      action: "get_info",
-      source: "user",
-      timeoutMs: 15_000,
-    });
-    return Response.json({ info });
-  } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : "Connection test failed" }, { status: 400 });
+  if (!id || !approveRemoteApproval(id, ownerId)) {
+    return Response.json({ error: "Approval request is missing, expired, already used, or belongs to another account" }, { status: 409 });
   }
+  return Response.json({ ok: true });
 }

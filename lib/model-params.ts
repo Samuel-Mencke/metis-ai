@@ -27,6 +27,7 @@ export type ModelParameterModel = {
   capabilities?: Record<string, boolean>;
   parameters?: ModelParameter[];
   defaultParams?: ModelParamSelection[];
+  variants?: ReadonlyArray<ReadonlyArray<ModelParamSelection>>;
 };
 
 export const FAST_PARAMETER: ModelParameter = {
@@ -56,26 +57,58 @@ function finiteContextWindow(value: unknown): number | undefined {
     : undefined;
 }
 
+function contextValueTokens(value: string): number | undefined {
+ const normalized = value.trim().toLowerCase().replace(/,/g, "");
+ if (normalized === "max" || normalized === "unlimited") return undefined;
+ const match = normalized.match(/^(\d+(?:\.\d+)?)\s*([km])?$/);
+ if (!match) return undefined;
+ const amount = Number(match[1]);
+ const multiplier = match[2] === "m" ? 1_000_000 : match[2] === "k" ? 1_000 : 1;
+ const tokens = Math.round(amount * multiplier);
+ return Number.isFinite(tokens) && tokens > 0 ? tokens : undefined;
+}
+
 function contextLabel(value: number) {
   if (value >= 1_000_000) return `${Math.round(value / 1_000_000 * 100) / 100}M`;
   return `${Math.round(value / 1_000)}K`;
 }
 
-export function contextParameterForModel(contextWindow?: number): ModelParameter | null {
-  const max = finiteContextWindow(contextWindow);
-  if (!max) return null;
-  const maxValue: ModelParamValue = { value: "max", displayName: contextLabel(max) };
-  if (max <= 272_000) {
-    return { id: "context", displayName: "Context", values: [maxValue] };
-  }
-  return {
-    id: "context",
-    displayName: "Context",
-    values: [
-      { value: "272k", displayName: "272K" },
-      maxValue,
-    ],
-  };
+export function contextParameterForModel(
+ contextWindow?: number,
+ concreteValues?: ReadonlyArray<ModelParamValue>,
+): ModelParameter | null {
+ const max = finiteContextWindow(contextWindow);
+ if (!max) return null;
+ const maxValue: ModelParamValue = { value: "max", displayName: contextLabel(max) };
+ const normalizedConcrete = (concreteValues || [])
+ .map((entry) => {
+ const value = typeof entry?.value === "string" ? entry.value.trim() : "";
+ if (!value) return null;
+ if (value.toLowerCase() === "max" || value.toLowerCase() === "unlimited") return maxValue;
+ const tokens = contextValueTokens(value);
+ return tokens ? { value, ...(entry.displayName ? { displayName: entry.displayName } : {}) } : null;
+ })
+ .filter((entry): entry is ModelParamValue => Boolean(entry))
+ .filter((entry, index, all) => all.findIndex((candidate) => candidate.value === entry.value) === index);
+ if (normalizedConcrete.length) {
+ const values = normalizedConcrete.filter((entry) => entry.value !== "max");
+ if (max > 272_000 && !values.some((entry) => entry.value === "272k")) {
+ values.push({ value: "272k", displayName: "272K" });
+ }
+ values.push(maxValue);
+ return { id: "context", displayName: "Context", values };
+ }
+ if (max <= 272_000) {
+ return { id: "context", displayName: "Context", values: [maxValue] };
+ }
+ return {
+ id: "context",
+ displayName: "Context",
+ values: [
+ { value: "272k", displayName: "272K" },
+ maxValue,
+ ],
+ };
 }
 
 function cloneParameter(parameter: ModelParameter): ModelParameter {
@@ -90,12 +123,21 @@ export function modelParametersForModel(model: ModelParameterModel): ModelParame
   const parameters: ModelParameter[] = [];
   const seen = new Set<string>();
   for (const raw of model.parameters || []) {
+ if (raw.id === "context") continue;
     const parameter = cloneParameter(raw);
     if (seen.has(parameter.id)) continue;
     seen.add(parameter.id);
     parameters.push(parameter);
   }
-  const context = contextParameterForModel(model.contextWindow);
+  const contextDefinition = model.parameters?.find((parameter) => parameter.id === "context");
+ const variantContextValues = (model.variants || [])
+ .flatMap((variant) => variant)
+ .filter((parameter) => parameter.id === "context")
+ .map((parameter) => ({ value: parameter.value }));
+ const context = contextParameterForModel(model.contextWindow, [
+ ...(contextDefinition?.values || []),
+ ...variantContextValues,
+ ]);
   if (context && !seen.has("context")) {
     parameters.push(context);
     seen.add("context");
@@ -142,6 +184,7 @@ export function sanitizeModelParams(
   const allowed = new Map(modelParametersForModel(model).map((parameter) => [parameter.id, parameter]));
   const result: ModelParamSelection[] = [];
   for (const raw of params || []) {
+ if (!raw || typeof raw.id !== "string" || typeof raw.value !== "string") continue;
     const id = raw.id === "reasoning" ? "effort" : raw.id;
     const definition = allowed.get(id);
     if (!definition || !definition.values.some((value) => value.value === raw.value)) continue;
@@ -151,10 +194,24 @@ export function sanitizeModelParams(
 }
 
 export function providerNativeParams(
-  params?: ReadonlyArray<ModelParamSelection> | null,
+ params?: ReadonlyArray<ModelParamSelection> | null,
+): ModelParamSelection[];
+export function providerNativeParams(
+ model: ModelParameterModel,
+ params?: ReadonlyArray<ModelParamSelection> | null,
+): ModelParamSelection[];
+export function providerNativeParams(
+ modelOrParams?: ModelParameterModel | ReadonlyArray<ModelParamSelection> | null,
+ params?: ReadonlyArray<ModelParamSelection> | null,
 ): ModelParamSelection[] {
-  return (params || []).filter((param) =>
-    param.id !== "uncensored" &&
-    param.id !== "context",
-  );
+ const isSelectionArray = (value: unknown): value is ReadonlyArray<ModelParamSelection> =>
+ Array.isArray(value);
+ const selections = isSelectionArray(modelOrParams)
+ ? modelOrParams
+ : modelOrParams
+ ? sanitizeModelParams(modelOrParams, params)
+ : [];
+ return selections.filter((param) =>
+ param.id !== "uncensored" && param.id !== "context",
+ );
 }

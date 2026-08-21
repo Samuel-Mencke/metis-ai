@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { getChat, updateChat, type WorkspaceItem } from "@/lib/db-store";
 import { bearerTokenMatches } from "@/lib/security";
 import { getIdempotentResponse, saveIdempotentResponse } from "@/lib/shared-context";
+import { internalRunLeaseAuthorized } from "@/lib/internal-run-lease";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,6 +28,9 @@ export async function POST(req: Request) {
   const userId = req.headers.get("x-ai-chat-user-id")?.trim() || undefined;
   const jobId = req.headers.get("x-ai-chat-job-id")?.trim() || "";
   if (!chatId || !jobId) return Response.json({ error: "Invalid chat context" }, { status: 400 });
+  if (!internalRunLeaseAuthorized(req, jobId)) {
+    return Response.json({ error: "Worker run lease is expired or invalid" }, { status: 409 });
+  }
 
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
   const type = body.type === "plan" || body.type === "canvas" ? body.type : null;
