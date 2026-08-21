@@ -16,6 +16,8 @@ function inputFromBody(body: Record<string, unknown>): NoteWriteInput {
   return {
     title: typeof body.title === "string" ? body.title : undefined,
     content: typeof body.content === "string" ? body.content : undefined,
+    kind: body.kind === "project" || body.kind === "note" ? body.kind : undefined,
+    todos: Array.isArray(body.todos) ? body.todos as NoteWriteInput["todos"] : undefined,
     color: typeof body.color === "string" ? body.color : undefined,
     scope: body.scope === "global" || body.scope === "chat" || body.scope === "workspace" ? body.scope : undefined,
     chatId: typeof body.chatId === "string" ? body.chatId.trim() : undefined,

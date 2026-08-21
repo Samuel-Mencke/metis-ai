@@ -16,7 +16,6 @@ export async function POST(req: Request, { params }: Params) {
       clientId: id,
       ownerId,
       action: "get_info",
-      approved: true,
       source: "user",
       timeoutMs: 15_000,
     });
@@ -25,4 +24,3 @@ export async function POST(req: Request, { params }: Params) {
     return Response.json({ error: error instanceof Error ? error.message : "Connection test failed" }, { status: 400 });
   }
 }
-

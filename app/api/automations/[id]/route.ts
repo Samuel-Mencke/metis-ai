@@ -51,7 +51,11 @@ export async function PATCH(req: Request, { params }: Params) {
       try {
         const result = runAutomationNow(id, ownerId);
         return result
-          ? Response.json({ automation: result.automation, jobId: result.jobId, chatId: result.chatId }, { status: 202 })
+          ? Response.json({
+              automation: result.automation,
+              jobId: result.run.jobId,
+              chatId: result.run.chatId,
+            }, { status: 202 })
           : Response.json({ error: "Automation not found" }, { status: 404 });
       } catch (error) {
         if (error instanceof Error && (error.name === "ActiveChatRun" || error.name === "ActiveAutomationRun")) {
@@ -68,6 +72,7 @@ export async function PATCH(req: Request, { params }: Params) {
           ...(typeof body.modeId === "string" ? { modeId: body.modeId } : {}),
           ...(typeof body.modelId === "string" ? { modelId: body.modelId } : {}),
           ...(typeof body.extendedModelId === "string" ? { extendedModelId: body.extendedModelId } : {}),
+          ...(typeof body.maxRunMinutes === "number" ? { maxRunMinutes: body.maxRunMinutes } : {}),
           ...(typeof body.chatId === "string" ? { chatId: body.chatId } : {}),
           ...(typeof body.timezone === "string" ? { timezone: body.timezone } : {}),
           ...(scheduleFromBody(body) ? { schedule: scheduleFromBody(body) } : {}),

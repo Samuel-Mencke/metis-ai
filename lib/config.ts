@@ -22,6 +22,11 @@ const port = numberEnv("PORT", 3100);
 const host = env("AI_CHAT_HOST") || "127.0.0.1";
 const publicHost = host === "0.0.0.0" ? "127.0.0.1" : host;
 const publicUrl = env("AI_CHAT_PUBLIC_URL") || `http://${publicHost}:${port}`;
+const internalOrigin = env("AI_CHAT_INTERNAL_ORIGIN") || publicUrl;
+
+function internalUrl(name: string, route: string) {
+  return env(name) || `${internalOrigin.replace(/\/+$/, "")}${route}`;
+}
 
 export const config = {
   appName: env("APP_NAME") || "Metis AI",
@@ -34,13 +39,23 @@ export const config = {
   databasePath: env("CHAT_DB_PATH") || path.join(dataDir, "chat.sqlite"),
   host,
   mcpStateDir: env("AI_CHAT_MCP_STATE_DIR") || path.join(dataDir, "mcp-state"),
-  internalUrl:
-    env("AI_CHAT_INTERNAL_URL") || `http://127.0.0.1:${port}/api/internal/mcp-question`,
+  internalOrigin,
+  internalUrl: internalUrl("AI_CHAT_INTERNAL_URL", "/api/internal/mcp-question"),
+  workspaceUrl: internalUrl("AI_CHAT_WORKSPACE_URL", "/api/internal/mcp-workspace"),
+  chatUrl: internalUrl("AI_CHAT_CHAT_URL", "/api/internal/mcp-chat"),
+  notesUrl: internalUrl("AI_CHAT_NOTES_URL", "/api/internal/mcp-notes"),
+  memoryUrl: internalUrl("AI_CHAT_MEMORY_URL", "/api/internal/mcp-memory"),
+  browserUrl: internalUrl("AI_CHAT_BROWSER_URL", "/api/internal/browser"),
+  agentStateUrl: internalUrl("AI_CHAT_AGENT_STATE_URL", "/api/internal/mcp-agent-state"),
+  subagentUrl: internalUrl("AI_CHAT_SUBAGENT_URL", "/api/internal/mcp-subagent"),
+  automationUrl: internalUrl("AI_CHAT_AUTOMATION_URL", "/api/internal/mcp-automation"),
+  fileUrl: internalUrl("AI_CHAT_FILE_URL", "/api/internal/mcp-file"),
   publicUrl,
   serviceName: env("AI_CHAT_SERVICE_NAME") || "metis-ai",
   port,
   mcpPort: numberEnv("MCP_PORT", 8787),
   mcpPublicUrl: env("MCP_PUBLIC_URL") || `http://127.0.0.1:${numberEnv("MCP_PORT", 8787)}`,
+  mcpBearerToken: env("MCP_BEARER_TOKEN"),
   mcpAllowRemoteAdmin: booleanEnv("MCP_ALLOW_REMOTE_ADMIN"),
   docker: booleanEnv("METIS_DOCKER"),
   dockerWorkspace: "/workspace",

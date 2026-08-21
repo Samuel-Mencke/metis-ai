@@ -15,7 +15,7 @@ export async function POST(req: Request, { params }: Params) {
     command?: unknown;
     cwd?: unknown;
     timeout?: unknown;
-    approved?: unknown;
+    approvalId?: unknown;
   };
   if (typeof body.command !== "string" || !body.command.trim()) {
     return Response.json({ error: "Command is required" }, { status: 400 });
@@ -26,7 +26,7 @@ export async function POST(req: Request, { params }: Params) {
       ownerId,
       action: "execute_command",
       source: "user",
-      approved: body.approved === true,
+      ...(typeof body.approvalId === "string" ? { approvalId: body.approvalId } : {}),
       params: {
         command: body.command,
         ...(typeof body.cwd === "string" ? { cwd: body.cwd } : {}),
@@ -35,7 +35,12 @@ export async function POST(req: Request, { params }: Params) {
     });
     return Response.json({ result });
   } catch (error) {
+    if (error && typeof error === "object" && "approvalId" in error) {
+      return Response.json({
+        error: error instanceof Error ? error.message : "Remote action requires explicit user approval",
+        approvalId: String((error as { approvalId: unknown }).approvalId),
+      }, { status: 409 });
+    }
     return Response.json({ error: error instanceof Error ? error.message : "Remote command failed" }, { status: 400 });
   }
 }
-

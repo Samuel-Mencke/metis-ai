@@ -19,7 +19,7 @@ export async function POST(req: Request) {
   try {
     const body = (await req.json()) as { action?: string; [key: string]: unknown };
     if (!body.action) return Response.json({ error: "Browser action is required" }, { status: 400 });
-    const result = await performSharedBrowserAction(userId, chatId, { ...body, action: body.action });
+    const result = await performSharedBrowserAction(userId, chatId, { ...body, action: body.action, source: "agent" });
     return Response.json(result);
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Browser action failed" }, { status: 400 });

@@ -72,6 +72,7 @@ export function VoiceInput({
   const waveformPeakRef = useRef(0.12);
   const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const livePreviewRef = useRef("");
+  const discardingRef = useRef(false);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const startedAtRef = useRef(0);
   const lastStopSignalRef = useRef(stopSignal);
@@ -252,6 +253,10 @@ export function VoiceInput({
       recognition.onerror = (event) => {
         speechRecognitionRef.current = null;
         cleanup();
+        if (discardingRef.current) {
+          discardingRef.current = false;
+          return;
+        }
         setState("error");
         setError(event.error || "Browser transcription failed.");
         setRecording(false);
@@ -259,6 +264,10 @@ export function VoiceInput({
       recognition.onend = () => {
         speechRecognitionRef.current = null;
         cleanup();
+        if (discardingRef.current) {
+          discardingRef.current = false;
+          return;
+        }
         if (livePreviewRef.current) commitTranscript(livePreviewRef.current);
         else {
           setState("error");
@@ -356,6 +365,11 @@ export function VoiceInput({
         if (event.data.size) chunksRef.current.push(event.data);
       };
       recorder.onstop = () => {
+        if (discardingRef.current) {
+          discardingRef.current = false;
+          cleanup();
+          return;
+        }
         const duration = Math.max(1, Math.min(maxDuration, Math.floor((Date.now() - startedAtRef.current) / 1_000)));
         const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
         cleanup();
@@ -373,10 +387,13 @@ export function VoiceInput({
     }
   };
 
-  const discard = () => {
+  const discard = useCallback(() => {
+    const hasSpeechRecognition = Boolean(speechRecognitionRef.current);
+    const hasRecorder = recorderRef.current?.state === "recording";
+    discardingRef.current = hasSpeechRecognition || hasRecorder;
     speechRecognitionRef.current?.stop();
     speechRecognitionRef.current = null;
-    if (recorderRef.current?.state === "recording") recorderRef.current.stop();
+    if (hasRecorder) recorderRef.current?.stop();
     cleanup();
     setLastRecording(null);
     setElapsed(0);
@@ -387,7 +404,21 @@ export function VoiceInput({
     setError("");
     setState("idle");
     setRecording(false);
-  };
+    if (!hasSpeechRecognition && !hasRecorder) discardingRef.current = false;
+  }, [cleanup, onWaveformLevelChange, setRecording]);
+
+  useEffect(() => {
+    if (enabled) return;
+    discard();
+  }, [discard, enabled]);
+
+  useEffect(() => () => {
+    discardingRef.current = true;
+    speechRecognitionRef.current?.stop();
+    peerConnectionRef.current?.close();
+    if (recorderRef.current?.state === "recording") recorderRef.current.stop();
+    cleanup();
+  }, [cleanup]);
 
   if (!enabled) return null;
 

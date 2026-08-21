@@ -128,7 +128,7 @@ export async function PATCH(req: Request) {
     body.featureFlags && typeof body.featureFlags === "object" && !Array.isArray(body.featureFlags)
       ? Object.fromEntries(
           Object.entries(body.featureFlags)
-            .filter(([key, value]) => ["plans", "notes", "recovery", "askUserTimeout", "voiceInput"].includes(key) && typeof value === "boolean"),
+            .filter(([key, value]) => ["plans", "notes", "recovery", "askUserTimeout", "voiceInput", "browser"].includes(key) && typeof value === "boolean"),
         )
       : undefined;
   const compression =
@@ -165,7 +165,7 @@ export async function PATCH(req: Request) {
         ...(browserViewportWidth !== undefined ? { browserViewportWidth } : {}),
         ...(browserViewportHeight !== undefined ? { browserViewportHeight } : {}),
         ...(voiceInput !== undefined ? { voiceInput } : {}),
-        ...(featureFlags !== undefined ? { featureFlags } : {}),
+        ...(featureFlags !== undefined ? { featureFlags: { ...current.featureFlags, ...featureFlags } } : {}),
         ...(compression !== undefined ? { compression: { ...current.compression, ...compression } } : {}),
       },
       userId,

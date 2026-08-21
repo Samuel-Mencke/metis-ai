@@ -1,4 +1,6 @@
 import { config } from "@/lib/config";
+import { getGlobalModelSettings } from "@/lib/db-store";
+import { featureFlags } from "@/lib/feature-flags";
 
 export type SharedBrowserAction = {
   action: string;
@@ -7,6 +9,16 @@ export type SharedBrowserAction = {
   selector?: string;
   text?: string;
   key?: string;
+  value?: string;
+  targetSelector?: string;
+  filePath?: string;
+  exact?: boolean;
+  timeoutMs?: number;
+  includeScreenshot?: boolean;
+  includeSnapshot?: boolean;
+  steps?: SharedBrowserAction[];
+  frame?: string;
+  source?: "agent" | "user";
   x?: number;
   y?: number;
   deltaY?: number;
@@ -24,6 +36,8 @@ export type SharedBrowserResult = {
   screenshot?: string;
   snapshot?: string;
   viewport: { width: number; height: number };
+  form?: { text: string; controls: Array<Record<string, unknown>> };
+  batch?: Array<{ index: number; action: string; ok: boolean; error?: string }>;
 };
 
 export async function performSharedBrowserAction(
@@ -31,6 +45,11 @@ export async function performSharedBrowserAction(
   chatId: string,
   action: SharedBrowserAction,
 ) {
+  if (!featureFlags(getGlobalModelSettings(userId)).browser) {
+    throw new Error(
+      "The Metis workspace browser is disabled in Preferences. Enable Browser to use browser_* tools; shell/curl/Playwright are not used as a fallback.",
+    );
+  }
   const configuredToken =
     process.env.AI_CHAT_INTERNAL_TOKEN?.trim() ||
     process.env.MCP_BEARER_TOKEN?.trim();

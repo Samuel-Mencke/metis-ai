@@ -17,11 +17,13 @@ const {
   cleanupBrowserSessions,
   performBrowserAction,
   setBrowserViewport,
+  browserEvents,
 } = await import("./lib/server-browser.ts");
 const {
   authenticateClientMessage,
   attachRemoteClient,
 } = await import("./lib/remote-client-gateway.ts");
+const { logError } = await import("./lib/error-logs.ts");
 
 const port = Number(process.env.PORT || 3100);
 const host = process.env.AI_CHAT_HOST?.trim() || "127.0.0.1";
@@ -29,8 +31,38 @@ const dev = process.env.NODE_ENV !== "production";
 const nextApp = next({ dev, hostname: host, port });
 const handle = nextApp.getRequestHandler();
 const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+websocketServer.on("error", (error) => {
+  logError({
+    level: "error",
+    source: "ws",
+    message: `Browser WebSocket server error: ${error.message}`,
+    stack: error.stack,
+  });
+});
 const remoteClientWebsocketServer = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+remoteClientWebsocketServer.on("error", (error) => {
+  logError({
+    level: "error",
+    source: "ws",
+    message: `Remote-client WebSocket server error: ${error.message}`,
+    stack: error.stack,
+  });
+});
 const browserStreamSubscribers = new Map();
+const browserContextSignatures = new Map();
+let lastBrowserCleanupAt = 0;
+// Action-driven stream fanout. This also catches steps inside browser_batch, so
+// the sidebar advances while a long form is being completed instead of only
+// showing the final page. Background redirects are intentionally ignored.
+browserEvents.on("browser-event", (event) => {
+  if (!event || (event.type !== "action" && event.type !== "navigation")) return;
+  if (event.source !== "agent" && event.source !== "user") return;
+  const subscribers = browserStreamSubscribers.get(`${event.ownerId}:${event.chatId}`);
+  if (!subscribers?.size) return;
+  for (const notify of subscribers) {
+    Promise.resolve(notify(event)).catch(() => undefined);
+  }
+});
 
 function streamUrl(request) {
   const host = request.headers.host || `127.0.0.1:${port}`;
@@ -65,10 +97,17 @@ async function readRequestJson(request) {
 }
 
 function persistBrowserContext(userId, chatId, result) {
+  const key = `${userId}:${chatId}`;
+  const signature = JSON.stringify({
+    activeTabId: result.activeTabId || result.tabId,
+    tabs: (result.tabs || []).map((tab) => [tab.id, tab.url]),
+  });
+  if (browserContextSignatures.get(key) === signature) return;
+  browserContextSignatures.set(key, signature);
   updateChat(chatId, {
     browserContext: {
       tabs: result.tabs,
-      activeTabId: result.tabId,
+      activeTabId: result.activeTabId || result.tabId,
       sessionKey: chatId,
       updatedAt: new Date().toISOString(),
     },
@@ -76,17 +115,18 @@ function persistBrowserContext(userId, chatId, result) {
 }
 
 async function performSharedBrowserAction(userId, chatId, action) {
-  await cleanupBrowserSessions();
+  const now = Date.now();
+  if (now - lastBrowserCleanupAt > 60_000) {
+    lastBrowserCleanupAt = now;
+    await cleanupBrowserSessions();
+  }
   if (action.action === "close") {
     await closeBrowserSession(userId, chatId);
+    browserContextSignatures.delete(`${userId}:${chatId}`);
     return { closed: true };
   }
   const result = await performBrowserAction(userId, chatId, action);
   persistBrowserContext(userId, chatId, result);
-  const subscribers = browserStreamSubscribers.get(`${userId}:${chatId}`);
-  if (subscribers) {
-    await Promise.allSettled([...subscribers].map((notify) => notify(result)));
-  }
   return result;
 }
 
@@ -157,13 +197,20 @@ websocketServer.on("connection", async (socket, request, context, options) => {
   let tabId = options.tabId;
   let inFlight = false;
   let stopped = false;
+  let pendingPush = false;
+  let pendingMetadata = false;
   const streamState = { metadataKey: "" };
   const fps = Math.max(1, Math.min(Number(options.fps) || 5, 30));
   const quality = Math.max(35, Math.min(Number(options.quality) || 70, 90));
   const realtime = options.realtime !== false;
 
   const push = async (includeMetadata = false) => {
-    if (stopped || inFlight || socket.readyState !== 1) return;
+    if (stopped || socket.readyState !== 1) return;
+    if (inFlight) {
+      pendingPush = true;
+      pendingMetadata ||= includeMetadata;
+      return;
+    }
     inFlight = true;
     try {
       tabId = await sendFrame(socket, context, tabId, quality, streamState, includeMetadata);
@@ -171,15 +218,29 @@ websocketServer.on("connection", async (socket, request, context, options) => {
       socket.send(JSON.stringify({ type: "error", message: error instanceof Error ? error.message : "Browser stream failed" }));
     } finally {
       inFlight = false;
+      if (pendingPush && !stopped) {
+        const nextMetadata = pendingMetadata;
+        pendingPush = false;
+        pendingMetadata = false;
+        queueMicrotask(() => void push(nextMetadata));
+      }
     }
   };
 
   const subscriberKey = `${context.userId}:${context.chatId}`;
   const subscribers = browserStreamSubscribers.get(subscriberKey) || new Set();
-  const notify = (result) => {
-    if (result?.activeTabId) tabId = result.activeTabId;
+  let notifyTimer = null;
+  const notify = (event) => {
+    if (event?.tabId) tabId = event.tabId;
     streamState.metadataKey = "";
-    return push(true);
+    // Small debounce lets the DOM settle after a click/type while preserving a
+    // near-live preview. Bursts are coalesced instead of scheduling one image
+    // encode per tool event. push() also remembers one update while in flight.
+    if (notifyTimer) return;
+    notifyTimer = setTimeout(() => {
+      notifyTimer = null;
+      void push(true);
+    }, 45);
   };
   subscribers.add(notify);
   browserStreamSubscribers.set(subscriberKey, subscribers);
@@ -219,13 +280,31 @@ websocketServer.on("connection", async (socket, request, context, options) => {
 
   socket.on("close", () => {
     stopped = true;
+    if (notifyTimer) clearTimeout(notifyTimer);
+    notifyTimer = null;
     subscribers.delete(notify);
     if (!subscribers.size) browserStreamSubscribers.delete(subscriberKey);
   });
-  if (options.width && options.height) {
-    await setBrowserViewport(context.userId, context.chatId, options.width, options.height);
+  try {
+    if (options.width && options.height) {
+      await setBrowserViewport(context.userId, context.chatId, options.width, options.height);
+    }
+    await push(true);
+  } catch (error) {
+    stopped = true;
+    if (socket.readyState === 1) {
+      try {
+        socket.send(JSON.stringify({
+          type: "error",
+          message: error instanceof Error ? error.message : "Browser stream failed",
+        }));
+      } catch {
+        // The socket may have closed while the frame was being prepared.
+      }
+      socket.close();
+    }
+    return;
   }
-  await push(true);
   let timer;
   if (!realtime) return;
   const scheduleNextFrame = () => {
@@ -264,12 +343,28 @@ remoteClientWebsocketServer.on("connection", (socket, request) => {
 
 await nextApp.prepare();
 const server = http.createServer(async (request, response) => {
-  const url = streamUrl(request);
-  if (url.pathname === "/__internal/browser-engine") {
-    await handleBrowserEngine(request, response);
-    return;
+  try {
+    const url = streamUrl(request);
+    if (url.pathname === "/__internal/browser-engine") {
+      await handleBrowserEngine(request, response);
+      return;
+    }
+    await handle(request, response);
+  } catch (error) {
+    logError({
+      level: "error",
+      source: "ws",
+      message: `Stream request handler failed: ${error instanceof Error ? error.message : String(error)}`,
+      stack: error instanceof Error ? error.stack : undefined,
+      context: { url: request.url },
+    });
+    if (!response.headersSent) {
+      response.writeHead(500, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: "Stream request failed" }));
+    } else {
+      response.destroy();
+    }
   }
-  await handle(request, response);
 });
 server.on("upgrade", async (request, socket, head) => {
   const url = streamUrl(request);
@@ -300,7 +395,14 @@ server.on("upgrade", async (request, socket, head) => {
         height: url.searchParams.get("height"),
       });
     });
-  } catch {
+  } catch (error) {
+    logError({
+      level: "error",
+      source: "ws",
+      message: `WebSocket upgrade failed: ${error instanceof Error ? error.message : String(error)}`,
+      stack: error instanceof Error ? error.stack : undefined,
+      context: { pathname: url.pathname },
+    });
     socket.destroy();
   }
 });
@@ -309,3 +411,28 @@ server.listen(port, host, () => {
   const publicUrl = process.env.AI_CHAT_PUBLIC_URL?.trim() || `http://${host}:${port}`;
   console.log(`AI Chat listening on ${publicUrl} (bound to ${host}:${port})`);
 });
+
+let shuttingDown = false;
+const shutdown = (signal) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[server] ${signal} received; shutting down`);
+
+  // WebSocket/SSE clients can otherwise keep the process alive until systemd's
+  // stop timeout and turn a routine deploy into SIGKILL. Stop accepting new
+  // HTTP connections, close live sockets, and retain a short hard deadline.
+  server.close(() => process.exit(0));
+  server.closeIdleConnections?.();
+  for (const wsServer of [websocketServer, remoteClientWebsocketServer]) {
+    for (const client of wsServer.clients) {
+      try { client.close(1001, "Server restarting"); } catch {}
+    }
+    try { wsServer.close(); } catch {}
+  }
+  server.closeAllConnections?.();
+
+  const deadline = setTimeout(() => process.exit(0), 5_000);
+  deadline.unref();
+};
+process.once("SIGTERM", () => shutdown("SIGTERM"));
+process.once("SIGINT", () => shutdown("SIGINT"));

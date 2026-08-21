@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ExternalLink, LayoutGrid, Maximize2, Palette, Pin, PinOff, Plus, RefreshCw, Search, Trash2, ZoomIn, ZoomOut } from "lucide-react";
-import type { SharedNote } from "@/lib/store";
+import type { SharedNote, NoteTodo } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { EditableMarkdown } from "@/components/editable-markdown";
@@ -215,7 +215,7 @@ export function NotesVoid({
     saveTimers.current.set(note.id, timer);
   }, [notes, update]);
 
-  const create = async () => {
+  const create = async (kind: "note" | "project" = "note") => {
     setStatus("saving");
     try {
       const response = await fetch("/api/notes", {
@@ -223,8 +223,12 @@ export function NotesVoid({
         headers: { "Content-Type": "application/json", "Idempotency-Key": requestKey() },
         body: JSON.stringify({
           scope: "global",
+          kind,
+          title: kind === "project" ? "New project" : undefined,
           content: "",
+          todos: kind === "project" ? [] : undefined,
           position: { x: -view.x + 80, y: -view.y + 80 },
+          size: kind === "project" ? { width: 340, height: 280 } : undefined,
           color: NOTE_COLORS[notes.length % NOTE_COLORS.length],
         }),
       });
@@ -435,7 +439,8 @@ export function NotesVoid({
           {status === "loading" ? "Loading…" : status === "saving" ? "Saving…" : status === "offline" ? "Offline" : status === "error" ? "Error" : status === "saved" ? "Saved" : `${visibleNotes.length} notes`}
         </span>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          {!compact ? <Button type="button" size="xs" onClick={() => void create()}><Plus className="size-3.5" />New note</Button> : null}
+          {!compact ? <Button type="button" size="xs" onClick={() => void create("note")}><Plus className="size-3.5" />New note</Button> : null}
+          {!compact ? <Button type="button" size="xs" variant="outline" onClick={() => void create("project")}><Plus className="size-3.5" />New project</Button> : null}
           <Button type="button" size="xs" variant="ghost" title="Arrange notes in a tidy, consistent layout" aria-label="Arrange notes in a tidy, consistent layout" onClick={() => arrangeNotes()}><LayoutGrid className="size-3.5" />Arrange</Button>
           <Button type="button" size="icon-xs" variant="ghost" title="Fit all notes" aria-label="Fit all notes" onClick={() => fitAll()}><Maximize2 className="size-3.5" /></Button>
           <Button type="button" size="icon-xs" variant="ghost" title="Zoom out" aria-label="Zoom out" onClick={() => setView((current) => ({ ...current, zoom: Math.max(0.2, current.zoom - 0.1) }))}><ZoomOut className="size-3.5" /></Button>
@@ -624,9 +629,14 @@ export function NotesVoid({
                   }}
                   aria-label={`Edit note title: ${note.title}`}
                 >
-                  {note.title || "Untitled note"}
+                  {note.title || (note.kind === "project" ? "Untitled project" : "Untitled note")}
                 </button>
               )}
+              {note.kind === "project" ? (
+                <span className="rounded bg-black/10 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wide text-black/70">
+                  Project
+                </span>
+              ) : null}
               <Button
                 type="button"
                 size="icon-xs"
@@ -707,13 +717,58 @@ export function NotesVoid({
               onChange={(value) => scheduleUpdate(note, { content: value })}
               interactiveTasks
               className="min-h-0 flex-1 cursor-text bg-transparent text-xs text-black [&_.markdown-body]:text-black [&_.markdown-body_p]:my-1 [&_.markdown-body_ul]:my-1 [&_.markdown-body_ol]:my-1"
-              placeholder="Write a note…"
+              placeholder={note.kind === "project" ? "Project notes…" : "Write a note…"}
               aria-label="Note content"
               onPointerDown={(event) => {
                 event.stopPropagation();
                 setFrontNoteId(note.id);
               }}
             />
+            {note.kind === "project" ? (
+              <div
+                className="shrink-0 space-y-1 border-t border-black/10 px-2 py-1.5"
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                {(note.todos || []).map((todo, index) => {
+                  const done = todo.status === "completed";
+                  return (
+                    <label key={todo.id || `${todo.content}-${index}`} className="flex min-w-0 items-center gap-1.5 text-[11px] text-black/80">
+                      <input
+                        type="checkbox"
+                        checked={done}
+                        onChange={() => {
+                          const next = (note.todos || []).map((item, itemIndex) =>
+                            itemIndex === index
+                              ? { ...item, status: (done ? "pending" : "completed") as NoteTodo["status"] }
+                              : item,
+                          );
+                          void update(note, { todos: next });
+                        }}
+                      />
+                      <span className={done ? "truncate line-through opacity-60" : "truncate"}>{todo.content}</span>
+                    </label>
+                  );
+                })}
+                {!compact ? (
+                  <input
+                    className="h-6 w-full bg-transparent text-[11px] text-black outline-none placeholder:text-black/40"
+                    placeholder="Add a todo and press Enter"
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter") return;
+                      const content = event.currentTarget.value.trim();
+                      if (!content) return;
+                      event.preventDefault();
+                      const next = [
+                        ...(note.todos || []),
+                        { id: `todo-${Date.now()}`, content, status: "pending" as const },
+                      ];
+                      event.currentTarget.value = "";
+                      void update(note, { todos: next });
+                    }}
+                  />
+                ) : null}
+              </div>
+            ) : null}
             {([
               ["n", "inset-x-1/2 top-0 h-2 w-1/2 -translate-x-1/2 cursor-ns-resize"],
               ["ne", "right-0 top-0 size-3 cursor-nesw-resize"],

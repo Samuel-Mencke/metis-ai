@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { getDatabase, transaction } from "@/lib/sqlite";
+import { getDatabase, isSqliteBusyError, transaction } from "@/lib/sqlite";
 
 export type RemotePolicyMode = "restricted" | "approval_required" | "full_access";
 export type RemoteClientStatus = "online" | "offline" | "revoked";
@@ -20,6 +20,16 @@ export type RemotePolicy = {
   mode: RemotePolicyMode;
   allowlist: string[];
 };
+
+export const DEFAULT_REMOTE_POLICY: RemotePolicy = { mode: "full_access", allowlist: [] };
+
+export function normalizeRemotePolicy(policy?: Partial<RemotePolicy> | null): RemotePolicy {
+  const allowlist = [...new Set((policy?.allowlist || []).map((item) => String(item).trim()).filter(Boolean))].slice(0, 100);
+  return {
+    mode: policy?.mode === "restricted" ? "restricted" : "full_access",
+    allowlist,
+  };
+}
 
 export type RemoteClient = {
   id: string;
@@ -51,8 +61,31 @@ export type RemoteAuditEntry = {
   createdAt: string;
 };
 
+export type RemoteApproval = {
+  id: string;
+  ownerId: string;
+  clientId: string;
+  action: RemoteAction;
+  argsHash: string;
+  requestData: Record<string, unknown>;
+  source: "user" | "agent";
+  runId?: string;
+  toolCallId?: string;
+  expiresAt: string;
+  approvedAt?: string;
+  consumedAt?: string;
+  createdAt: string;
+};
+
 const iso = () => new Date().toISOString();
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+const REMOTE_SEEN_WRITE_INTERVAL_MS = 60_000;
+const remoteSeenWrittenAt = new Map<string, number>();
+
+function ignoreBusyTelemetry(error: unknown, operation: string) {
+  if (!isSqliteBusyError(error)) throw error;
+  console.warn(`[remote-client] sqlite busy; skipped ${operation}`);
+}
 const safeJson = <T>(value: unknown, fallback: T): T => {
   try {
     return JSON.parse(String(value)) as T;
@@ -60,6 +93,32 @@ const safeJson = <T>(value: unknown, fallback: T): T => {
     return fallback;
   }
 };
+
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, stableValue(item)]),
+    );
+  }
+  return value;
+}
+
+export function remoteArgsHash(params?: Record<string, unknown>) {
+  return hash(JSON.stringify(stableValue(params || {})));
+}
+
+export class RemoteApprovalRequiredError extends Error {
+  readonly approvalId: string;
+
+  constructor(approvalId: string) {
+    super("Remote action requires explicit user approval");
+    this.name = "RemoteApprovalRequiredError";
+    this.approvalId = approvalId;
+  }
+}
 
 function mapClient(row: Record<string, unknown>): RemoteClient {
   return {
@@ -73,7 +132,7 @@ function mapClient(row: Record<string, unknown>): RemoteClient {
     ...(row.hostname ? { hostname: String(row.hostname) } : {}),
     ...(row.address ? { address: String(row.address) } : {}),
     capabilities: safeJson<string[]>(row.capabilities, []),
-    policy: safeJson<RemotePolicy>(row.policy, { mode: "approval_required", allowlist: [] }),
+    policy: normalizeRemotePolicy(safeJson<RemotePolicy>(row.policy, DEFAULT_REMOTE_POLICY)),
     ...(row.lastSeenAt ? { lastSeenAt: String(row.lastSeenAt) } : {}),
     createdAt: String(row.createdAt),
     updatedAt: String(row.updatedAt),
@@ -128,7 +187,7 @@ export function registerRemoteClient(token: string, input: {
     input.version?.trim() || null,
     input.hostname?.trim() || null,
     JSON.stringify(input.capabilities?.slice(0, 64) || []),
-    JSON.stringify({ mode: "approval_required", allowlist: [] } satisfies RemotePolicy),
+    JSON.stringify(DEFAULT_REMOTE_POLICY),
     now,
     now,
   );
@@ -170,22 +229,49 @@ export function authenticateRemoteClient(id: string, credential: string) {
   const expected = Buffer.from(row.secretHash);
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return null;
   const now = iso();
-  getDatabase().prepare("UPDATE remote_client_credentials SET last_used_at = ? WHERE client_id = ? AND secret_hash = ?")
-    .run(now, id, row.secretHash);
-  markRemoteClientSeen(id);
+  try {
+    getDatabase().prepare("UPDATE remote_client_credentials SET last_used_at = ? WHERE client_id = ? AND secret_hash = ?")
+      .run(now, id, row.secretHash);
+  } catch (error) {
+    // Credential usage timestamps are telemetry. A busy database must not
+    // reject an otherwise valid remote-client authentication.
+    ignoreBusyTelemetry(error, "credential last-used update");
+  }
+  markRemoteClientSeen(id, undefined, true);
   return { clientId: id, ownerId: row.ownerId };
 }
 
-export function markRemoteClientSeen(id: string, address?: string) {
-  const now = iso();
-  getDatabase().prepare(
-    "UPDATE remote_clients SET status = 'online', last_seen_at = ?, address = COALESCE(?, address), updated_at = ? WHERE id = ? AND revoked_at IS NULL",
-  ).run(now, address ?? null, now, id);
+export function markRemoteClientSeen(id: string, address?: string, force = false) {
+  const nowMs = Date.now();
+  const lastWrittenAt = remoteSeenWrittenAt.get(id) || 0;
+  if (!force && nowMs - lastWrittenAt < REMOTE_SEEN_WRITE_INTERVAL_MS) return false;
+  const now = new Date(nowMs).toISOString();
+  try {
+    getDatabase().prepare(
+      "UPDATE remote_clients SET status = 'online', last_seen_at = ?, address = COALESCE(?, address), updated_at = ? WHERE id = ? AND revoked_at IS NULL",
+    ).run(now, address ?? null, now, id);
+    remoteSeenWrittenAt.set(id, nowMs);
+    return true;
+  } catch (error) {
+    // Heartbeats are advisory presence telemetry. Never let them become an
+    // uncaught WebSocket exception or take down unrelated agent streams.
+    ignoreBusyTelemetry(error, "heartbeat presence update");
+    return false;
+  }
 }
 
 export function markRemoteClientOffline(id: string) {
-  getDatabase().prepare("UPDATE remote_clients SET status = 'offline', updated_at = ? WHERE id = ? AND revoked_at IS NULL")
-    .run(iso(), id);
+  remoteSeenWrittenAt.delete(id);
+  try {
+    getDatabase().prepare("UPDATE remote_clients SET status = 'offline', updated_at = ? WHERE id = ? AND revoked_at IS NULL")
+      .run(iso(), id);
+    return true;
+  } catch (error) {
+    // last_seen_at is still enough to detect stale clients if this best-effort
+    // status write loses a race with another SQLite writer.
+    ignoreBusyTelemetry(error, "offline presence update");
+    return false;
+  }
 }
 
 export function updateRemoteClient(id: string, ownerId: string, patch: {
@@ -194,12 +280,7 @@ export function updateRemoteClient(id: string, ownerId: string, patch: {
 }) {
   const current = getRemoteClient(id, ownerId);
   if (!current) return null;
-  const nextPolicy = patch.policy
-    ? {
-        mode: patch.policy.mode,
-        allowlist: [...new Set(patch.policy.allowlist.map((item) => item.trim()).filter(Boolean))].slice(0, 100),
-      }
-    : current.policy;
+  const nextPolicy = patch.policy ? normalizeRemotePolicy(patch.policy) : current.policy;
   getDatabase().prepare(
     "UPDATE remote_clients SET name = ?, policy = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND revoked_at IS NULL",
   ).run(patch.name?.trim() || current.name, JSON.stringify(nextPolicy), iso(), id, ownerId);
@@ -224,20 +305,106 @@ export function deleteRemoteClient(id: string, ownerId: string) {
 
 export function authorizeRemoteAction(client: RemoteClient, action: RemoteAction, command?: string) {
   if (client.status === "revoked") return { allowed: false, requiresApproval: false, reason: "Client is revoked" };
-  if (client.policy.mode === "full_access") return { allowed: true, requiresApproval: false };
+  const mode = client.policy.mode === "restricted" ? "restricted" : "full_access";
+  if (mode === "full_access") return { allowed: true, requiresApproval: false };
   const mutatesFiles = action === "write_file" || action === "edit_file" || action === "delete_file";
   if (mutatesFiles) {
-    return client.policy.mode === "approval_required"
-      ? { allowed: true, requiresApproval: true }
-      : { allowed: false, requiresApproval: false, reason: "File changes are disabled by the client restricted policy" };
+    return { allowed: false, requiresApproval: false, reason: "File changes are disabled by the client restricted policy" };
   }
-  if (action !== "execute_command") return { allowed: true, requiresApproval: client.policy.mode === "approval_required" };
+  if (action === "get_info" || action === "list_directory" || action === "read_file") {
+    return { allowed: true, requiresApproval: false };
+  }
+  if (action !== "execute_command") return { allowed: true, requiresApproval: false };
   const normalized = command?.trim() || "";
   const allowed = client.policy.allowlist.some((entry) => normalized === entry || normalized.startsWith(`${entry} `));
-  if (client.policy.mode === "restricted") {
-    return { allowed, requiresApproval: false, reason: allowed ? undefined : "Command is not in the client allowlist" };
-  }
-  return { allowed: true, requiresApproval: true };
+  return { allowed, requiresApproval: false, reason: allowed ? undefined : "Command is not in the client allowlist" };
+}
+
+export function createRemoteApproval(input: {
+  ownerId: string;
+  clientId: string;
+  action: RemoteAction;
+  params?: Record<string, unknown>;
+  source?: "user" | "agent";
+  runId?: string;
+  toolCallId?: string;
+  ttlMs?: number;
+}) {
+  const client = getRemoteClient(input.clientId, input.ownerId);
+  if (!client) throw new Error("Remote client not found");
+  const authorization = authorizeRemoteAction(
+    client,
+    input.action,
+    typeof input.params?.command === "string" ? input.params.command : undefined,
+  );
+  if (!authorization.allowed) throw new Error(authorization.reason || "Remote action denied");
+  if (!authorization.requiresApproval) throw new Error("Remote action does not require approval");
+  const id = randomUUID();
+  const createdAt = iso();
+  const expiresAt = new Date(Date.now() + Math.max(5_000, Math.min(input.ttlMs || 5 * 60_000, 15 * 60_000))).toISOString();
+  getDatabase().prepare(
+    `INSERT INTO remote_approval_requests
+      (id, owner_id, client_id, action, args_hash, request_data, source, run_id, tool_call_id, expires_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    input.ownerId,
+    input.clientId,
+    input.action,
+    remoteArgsHash(input.params),
+    JSON.stringify(input.params || {}),
+    input.source || "user",
+    input.runId ?? null,
+    input.toolCallId ?? null,
+    expiresAt,
+    createdAt,
+  );
+  appendRemoteAudit({
+    ownerId: input.ownerId,
+    clientId: input.clientId,
+    source: input.source || "user",
+    action: input.action,
+    requestData: redactRemoteData(input.params),
+    status: "requested",
+  });
+  return { id, expiresAt };
+}
+
+export function approveRemoteApproval(id: string, ownerId: string) {
+  const approvedAt = iso();
+  const result = getDatabase().prepare(
+    `UPDATE remote_approval_requests
+     SET approved_at = ?
+     WHERE id = ? AND owner_id = ? AND approved_at IS NULL AND consumed_at IS NULL
+       AND expires_at > ?`,
+  ).run(approvedAt, id, ownerId, approvedAt);
+  return result.changes > 0;
+}
+
+export function consumeRemoteApproval(input: {
+  id: string;
+  ownerId: string;
+  clientId: string;
+  action: RemoteAction;
+  params?: Record<string, unknown>;
+}) {
+  const consumedAt = iso();
+  const result = getDatabase().prepare(
+    `UPDATE remote_approval_requests
+     SET consumed_at = ?
+     WHERE id = ? AND owner_id = ? AND client_id = ? AND action = ?
+       AND args_hash = ? AND approved_at IS NOT NULL AND consumed_at IS NULL
+       AND expires_at > ?`,
+  ).run(
+    consumedAt,
+    input.id,
+    input.ownerId,
+    input.clientId,
+    input.action,
+    remoteArgsHash(input.params),
+    consumedAt,
+  );
+  return result.changes > 0;
 }
 
 export function appendRemoteAudit(input: Omit<RemoteAuditEntry, "id" | "createdAt">) {
@@ -258,6 +425,16 @@ export function appendRemoteAudit(input: Omit<RemoteAuditEntry, "id" | "createdA
   return entry;
 }
 
+function redactRemoteData(params?: Record<string, unknown>) {
+  if (!params) return {};
+  return Object.fromEntries(Object.entries(params).map(([key, value]) => [
+    key,
+    /secret|token|password|credential/i.test(key)
+      ? "[redacted]"
+      : typeof value === "string" ? value.slice(0, 2_000) : value,
+  ]));
+}
+
 export function listRemoteAudit(ownerId: string, clientId?: string) {
   return (getDatabase().prepare(
     `SELECT id, owner_id as ownerId, client_id as clientId, source, action, request_data as requestData,
@@ -275,4 +452,3 @@ export function listRemoteAudit(ownerId: string, clientId?: string) {
     createdAt: String(row.createdAt),
   }));
 }
-

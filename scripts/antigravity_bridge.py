@@ -4,6 +4,9 @@
 This intentionally does not read Antigravity CLI keyring files or call private
 Google endpoints. Credentials are supplied by the parent process through the
 environment and the public SDK owns the request lifecycle.
+
+Metis tools are injected on the official `agy` OAuth path via mcp_config.json.
+This Python SDK fallback only streams chat tokens.
 """
 
 from __future__ import annotations

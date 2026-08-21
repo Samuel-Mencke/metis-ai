@@ -154,7 +154,7 @@ export function resolveQuestion(
       status?: QuestionStatus;
       heartbeatAt?: string;
     } | undefined;
-    if (!row?.data || (userId && row.userId && row.userId !== userId)) return false;
+    if (!row?.data || (userId && row.userId !== userId)) return false;
     const data = parseStored({ data: row.data });
     if (!data || !row.chatId) return false;
     if (data.status === "answered" && data.answers) {
@@ -194,7 +194,7 @@ function transitionQuestion(questionId: string, status: "cancelled" | "expired",
     const row = db.prepare(
       "SELECT chat_id as chatId, user_id as userId, data, version, status, heartbeat_at as heartbeatAt FROM pending_questions WHERE question_id = ?",
     ).get(questionId) as { chatId?: string; userId?: string; data?: string; version?: number; status?: QuestionStatus; heartbeatAt?: string } | undefined;
-    if (!row?.chatId || !row.data || (userId && row.userId && row.userId !== userId)) return false;
+    if (!row?.chatId || !row.data || (userId && row.userId !== userId)) return false;
     const data = parseStored({ data: row.data });
     if (!data) return false;
     if (data.status === status && data.answers) {
@@ -229,7 +229,7 @@ export function getPendingQuestion(questionId: string, userId?: string) {
   const row = getDatabase().prepare(
     "SELECT chat_id as chatId, user_id as userId, data, heartbeat_at as heartbeatAt FROM pending_questions WHERE question_id = ?",
   ).get(questionId) as { chatId?: string; userId?: string; data?: string; heartbeatAt?: string } | undefined;
-  if (!row?.data || (userId && row.userId && row.userId !== userId)) return null;
+  if (!row?.data || (userId && row.userId !== userId)) return null;
   const data = parseStored({ data: row.data });
   return data && row.chatId ? { ...data, chatId: row.chatId, heartbeatAt: row.heartbeatAt } : null;
 }

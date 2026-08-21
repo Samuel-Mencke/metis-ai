@@ -11,7 +11,7 @@ test("mermaid fences and flowchart sources are detected", () => {
 
 test("bare flowchart blocks are wrapped as mermaid fences", () => {
   const wrapped = wrapBareMermaid("Intro\n\nflowchart TD\n  installer[Installer] --> app[App]\n\nDone");
-  assert.match(wrapped, /```mermaid\nflowchart TD\n  installer\[Installer\] --> app\[App\]\n```/);
+  assert.match(wrapped, /```mermaid\nflowchart TD\n {2}installer\[Installer\] --> app\[App\]\n```/);
 });
 
 test("prepareMermaidSource quotes labels that mermaid would reject", () => {

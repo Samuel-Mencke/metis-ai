@@ -1,11 +1,16 @@
+import { resolveCapabilities } from "./capability-resolver";
 import type { ProviderDefinition, ProviderModelDefinition } from "@/lib/providers/types";
 
 const chatCapabilities = {
   streaming: true,
-  tools: false,
+  tools: true,
   vision: true,
   agent: false,
   modelDiscovery: true,
+  mcp: true,
+  browser: false,
+  skills: false,
+  subagents: false,
 } as const;
 
 const compatibleCapabilities = {
@@ -14,6 +19,10 @@ const compatibleCapabilities = {
   vision: true,
   agent: false,
   modelDiscovery: true,
+  mcp: true,
+  browser: false,
+  skills: false,
+  subagents: false,
 } as const;
 
 const agentCapabilities = {
@@ -22,12 +31,51 @@ const agentCapabilities = {
   vision: true,
   agent: true,
   modelDiscovery: false,
+  mcp: true,
+  browser: true,
+  skills: true,
+  subagents: true,
 } as const;
 
 const ANTIGRAVITY_EFFORT_PARAMETER = {
   id: "effort",
   displayName: "Effort",
   values: [
+    { value: "low", displayName: "Low" },
+    { value: "medium", displayName: "Medium" },
+    { value: "high", displayName: "High" },
+  ],
+} as const;
+
+const CODEX_EFFORT_PARAMETER = {
+  id: "effort",
+  displayName: "Reasoning effort",
+  values: [
+    { value: "minimal", displayName: "Minimal" },
+    { value: "low", displayName: "Low" },
+    { value: "medium", displayName: "Medium" },
+    { value: "high", displayName: "High" },
+    { value: "xhigh", displayName: "Extra high" },
+  ],
+} as const;
+
+const PORTABLE_REASONING_PARAMETER = {
+  id: "effort",
+  displayName: "Reasoning",
+  values: [
+    { value: "none", displayName: "None" },
+    { value: "low", displayName: "Low" },
+    { value: "medium", displayName: "Medium" },
+    { value: "high", displayName: "High" },
+    { value: "xhigh", displayName: "Extra high" },
+  ],
+} as const;
+
+const ANTHROPIC_REASONING_PARAMETER = {
+  id: "effort",
+  displayName: "Reasoning",
+  values: [
+    { value: "none", displayName: "None" },
     { value: "low", displayName: "Low" },
     { value: "medium", displayName: "Medium" },
     { value: "high", displayName: "High" },
@@ -58,9 +106,9 @@ export const PROVIDERS: ProviderDefinition[] = [
     defaultBaseUrl: "https://api.openai.com/v1",
     capabilities: chatCapabilities,
     models: models(
-      { id: "gpt-5", displayName: "GPT-5", tags: ["balanced"] },
-      { id: "gpt-5-mini", displayName: "GPT-5 Mini", tags: ["fast"] },
-      { id: "gpt-5-codex", displayName: "GPT-5 Codex", tags: ["coding", "reasoning"] },
+      { id: "gpt-5", displayName: "GPT-5", tags: ["balanced", "reasoning"], contextWindow: 400_000, parameters: [PORTABLE_REASONING_PARAMETER] },
+      { id: "gpt-5-mini", displayName: "GPT-5 Mini", tags: ["fast"], contextWindow: 400_000 },
+      { id: "gpt-5-codex", displayName: "GPT-5 Codex", tags: ["coding", "reasoning"], contextWindow: 400_000, parameters: [PORTABLE_REASONING_PARAMETER] },
     ),
     setupHint: "Create an API key in the OpenAI dashboard.",
   },
@@ -73,9 +121,9 @@ export const PROVIDERS: ProviderDefinition[] = [
     defaultBaseUrl: "https://api.anthropic.com/v1",
     capabilities: chatCapabilities,
     models: models(
-      { id: "claude-sonnet-4-6", displayName: "Claude Sonnet", tags: ["balanced", "coding"] },
-      { id: "claude-opus-4-6", displayName: "Claude Opus", tags: ["reasoning"] },
-      { id: "claude-haiku-4-5", displayName: "Claude Haiku", tags: ["fast"] },
+      { id: "claude-sonnet-4-6", displayName: "Claude Sonnet", tags: ["balanced", "coding"], contextWindow: 200_000 },
+      { id: "claude-opus-4-6", displayName: "Claude Opus", tags: ["reasoning"], contextWindow: 200_000, parameters: [ANTHROPIC_REASONING_PARAMETER] },
+      { id: "claude-haiku-4-5", displayName: "Claude Haiku", tags: ["fast"], contextWindow: 200_000 },
     ),
     setupHint: "Use a Claude Console API key. Claude.ai consumer OAuth is not supported for third-party apps.",
   },
@@ -88,8 +136,8 @@ export const PROVIDERS: ProviderDefinition[] = [
     defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta",
     capabilities: chatCapabilities,
     models: models(
-      { id: "gemini-2.5-flash", displayName: "Gemini 2.5 Flash", tags: ["fast"] },
-      { id: "gemini-2.5-pro", displayName: "Gemini 2.5 Pro", tags: ["reasoning", "coding"] },
+      { id: "gemini-2.5-flash", displayName: "Gemini 2.5 Flash", tags: ["fast"], contextWindow: 1_048_576 },
+      { id: "gemini-2.5-pro", displayName: "Gemini 2.5 Pro", tags: ["reasoning", "coding"], contextWindow: 1_048_576, parameters: [PORTABLE_REASONING_PARAMETER] },
     ),
     setupHint: "Use a Google AI Studio Gemini API key.",
   },
@@ -102,8 +150,8 @@ export const PROVIDERS: ProviderDefinition[] = [
     defaultBaseUrl: "https://api.x.ai/v1",
     capabilities: chatCapabilities,
     models: models(
-      { id: "grok-4", displayName: "Grok 4", tags: ["reasoning"] },
-      { id: "grok-3-mini", displayName: "Grok 3 Mini", tags: ["fast"] },
+      { id: "grok-4", displayName: "Grok 4", tags: ["reasoning"], contextWindow: 2_000_000, parameters: [PORTABLE_REASONING_PARAMETER] },
+      { id: "grok-3-mini", displayName: "Grok 3 Mini", tags: ["fast"], contextWindow: 131_072 },
     ),
     setupHint: "Create an API key in the xAI console.",
   },
@@ -116,8 +164,8 @@ export const PROVIDERS: ProviderDefinition[] = [
     defaultBaseUrl: "https://openrouter.ai/api/v1",
     capabilities: chatCapabilities,
     models: models(
-      { id: "openai/gpt-5", displayName: "GPT-5 via OpenRouter", tags: ["balanced"] },
-      { id: "anthropic/claude-sonnet-4-6", displayName: "Claude Sonnet via OpenRouter", tags: ["coding"] },
+      { id: "openai/gpt-5", displayName: "GPT-5 via OpenRouter", tags: ["balanced", "reasoning"], parameters: [PORTABLE_REASONING_PARAMETER] },
+      { id: "anthropic/claude-sonnet-4-6", displayName: "Claude Sonnet via OpenRouter", tags: ["coding"], parameters: [ANTHROPIC_REASONING_PARAMETER] },
       { id: "google/gemini-2.5-flash", displayName: "Gemini Flash via OpenRouter", tags: ["fast"] },
     ),
     setupHint: "Create an OpenRouter API key. The model list is refreshed from OpenRouter when requested.",
@@ -151,36 +199,41 @@ export const PROVIDERS: ProviderDefinition[] = [
     name: "OpenAI Codex",
     description: "Codex agent through the official Codex SDK and CLI runtime.",
     kind: "codex-agent",
-    authTypes: ["oauth"],
+    authTypes: ["oauth", "account", "api_key"],
     capabilities: agentCapabilities,
     models: models(
       {
-        id: "gpt-5.6-terra",
-        displayName: "GPT-5.6 Terra",
-        tags: ["coding", "agent"],
+        id: "gpt-5.4",
+        displayName: "GPT-5.4",
+        tags: ["reasoning", "coding", "agent"],
+        contextWindow: 1_050_000,
+        capabilities: { fast: true },
+        parameters: [CODEX_EFFORT_PARAMETER],
+        defaultParams: [{ id: "effort", value: "medium" }],
       },
       {
-        id: "gpt-5.6-luna",
-        displayName: "GPT-5.6 Luna",
+        id: "gpt-5.6",
+        displayName: "GPT-5.6",
+        tags: ["coding", "agent"],
+        parameters: [CODEX_EFFORT_PARAMETER],
+        defaultParams: [{ id: "effort", value: "medium" }],
+      },
+      {
+        id: "gpt-5.3-codex",
+        displayName: "GPT-5.3 Codex",
         tags: ["balanced", "coding", "agent"],
+        parameters: [CODEX_EFFORT_PARAMETER],
+        defaultParams: [{ id: "effort", value: "medium" }],
       },
       {
-        id: "gpt-5.5",
-        displayName: "GPT-5.5",
+        id: "gpt-5.2",
+        displayName: "GPT-5.2",
         tags: ["reasoning", "agent"],
-      },
-      {
-        id: "gpt-5.4-mini",
-        displayName: "GPT-5.4 Mini",
-        tags: ["fast", "agent"],
-      },
-      {
-        id: "codex-auto-review",
-        displayName: "Codex Auto Review",
-        tags: ["coding", "agent"],
+        parameters: [CODEX_EFFORT_PARAMETER],
+        defaultParams: [{ id: "effort", value: "medium" }],
       },
     ),
-    setupHint: "Use OAuth for ChatGPT/Codex usage.",
+    setupHint: "Use OAuth or an account credential for ChatGPT/Codex usage, or an OpenAI API key.",
   },
   {
     key: "claude-code",
@@ -215,8 +268,12 @@ export const PROVIDERS: ProviderDefinition[] = [
         id: id as string,
         displayName: displayName as string,
         tags: tags as string[],
-        parameters: [ANTIGRAVITY_EFFORT_PARAMETER],
-        defaultParams: [{ id: "effort", value: effort as string }],
+        ...( /^(gemini|gpt-oss)/i.test(id as string)
+          ? {
+              parameters: [ANTIGRAVITY_EFFORT_PARAMETER],
+              defaultParams: [{ id: "effort", value: effort as string }],
+            }
+          : {}),
       })),
     ),
     setupHint: "OAuth runs the official agy CLI remote login.",
@@ -229,6 +286,29 @@ export function getProviderDefinition(key: string) {
   return providerMap.get(key);
 }
 
+export function getProviderModelDefinition(providerKey: string, modelId: string) {
+  const provider = providerMap.get(providerKey);
+  if (!provider) return undefined;
+  const exact = provider.models.find((model) => model.id === modelId);
+  if (exact) return exact;
+  // Discovery can expose a provider variant that is not in the static
+  // registry. Reuse the provider's parameter contract for the same model
+  // family, while keeping the discovered id and metadata authoritative.
+  const family = provider.models.find((model) => {
+    if (providerKey === "codex") return /^gpt-5(?:[.-]|$)/i.test(model.id) && /^gpt-5(?:[.-]|$)/i.test(modelId);
+    if (providerKey === "antigravity") return /^(gemini|gpt-oss)/i.test(model.id) && /^(gemini|gpt-oss)/i.test(modelId);
+    return false;
+  });
+  return family;
+}
+
 export function listProviderDefinitions() {
   return PROVIDERS;
+}
+
+export function getVerifiedProviderCapabilities(providerKey: string, modelId?: string) {
+  const provider = providerMap.get(providerKey);
+  if (!provider) return undefined;
+  const model = modelId ? getProviderModelDefinition(providerKey, modelId) : undefined;
+  return resolveCapabilities(provider, model);
 }

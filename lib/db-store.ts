@@ -22,6 +22,24 @@ import type {
 import { chatUploadDir, resolveUploadPath } from "@/lib/uploads";
 
 const now = () => new Date().toISOString();
+
+function workerProjectionLeaseValid(chatId?: string) {
+  const jobId = process.env.AI_CHAT_JOB_ID?.trim();
+  const workerId = process.env.AI_CHAT_WORKER_ID?.trim();
+  const leaseToken = process.env.AI_CHAT_JOB_LEASE_TOKEN?.trim();
+  if (!jobId || !workerId || !leaseToken) return true;
+  const conditions = chatId ? "AND j.chat_id = ?" : "";
+  const params = chatId
+    ? [jobId, chatId, workerId, leaseToken, now()]
+    : [jobId, workerId, leaseToken, now()];
+  return Boolean(getDatabase().prepare(
+    `SELECT 1
+     FROM job_leases l
+     JOIN jobs j ON j.id = l.job_id
+     WHERE l.job_id = ? ${conditions}
+       AND l.worker_id = ? AND l.lease_token = ? AND l.expires_at > ?`,
+  ).get(...params));
+}
 const chatCache = new Map<string, { updatedAt: string; chat: Chat }>();
 const MAX_CHAT_KEYWORDS = 24;
 const MAX_CHAT_KEYWORD_LENGTH = 80;
@@ -32,6 +50,11 @@ type ChatPageResult = {
   totalMessages: number;
 };
 const chatPageCache = new Map<string, { updatedAt: string; page: ChatPageResult }>();
+
+export function clearStoreCaches() {
+  chatCache.clear();
+  chatPageCache.clear();
+}
 const CHAT_PAGE_CACHE_MAX = 128;
 let chatIndexCache: { key: string; expiresAt: number; chats: ChatIndexEntry[] } | null = null;
 
@@ -157,7 +180,8 @@ export function listChatsForUser(
                 json_extract(data, '$.badge') AS badge,
                 json_extract(data, '$.pinned') AS pinned,
                 json_extract(data, '$.archived') AS archived,
-                json_extract(data, '$.share') AS share
+                json_extract(data, '$.share') AS share,
+                json_extract(data, '$.automationRunId') AS automationRunId
          FROM chats WHERE owner_id = ?`,
       ).all(ownerId)
     : db.prepare(
@@ -174,13 +198,14 @@ export function listChatsForUser(
                 json_extract(data, '$.badge') AS badge,
                 json_extract(data, '$.pinned') AS pinned,
                 json_extract(data, '$.archived') AS archived,
-                json_extract(data, '$.share') AS share
+                json_extract(data, '$.share') AS share,
+                json_extract(data, '$.automationRunId') AS automationRunId
          FROM chats`,
       ).all();
   const result: ChatIndexEntry[] = rows.flatMap((row) => {
       const item = row as Record<string, unknown>;
       const archived = Boolean(item.archived);
-      if (item.incognito) return [];
+      if (item.incognito || item.automationRunId) return [];
       if (!options.includeArchived && archived) return [];
       const pendingQuestion = parseJsonField<PendingChatQuestion>(item.pendingQuestion);
       const share = parseJsonField<ChatShare>(item.share);
@@ -433,6 +458,9 @@ export function createChat(
   options?: { incognito?: boolean },
 ): Chat {
   return transaction(() => {
+    if (!workerProjectionLeaseValid()) {
+      throw new Error("Stale worker lease cannot create a chat projection.");
+    }
     const timestamp = now();
     const chat: Chat = {
       id: randomUUID(),
@@ -481,7 +509,12 @@ export function updateChat(
     agentId?: string | null;
     modelId?: string | null;
     modelParams?: Array<{ id: string; value: string }> | null;
-    queuedMessages?: Array<{ id: string; text: string }> | null;
+    queuedMessages?: Array<{
+      id: string;
+      text: string;
+      referenceText?: string;
+      references?: ChatMessage["references"];
+    }> | null;
     pinned?: boolean;
     archived?: boolean;
     canvas?: string | null;
@@ -498,6 +531,7 @@ export function updateChat(
   ownerId?: string,
 ) {
   return transaction(() => {
+    if (!workerProjectionLeaseValid(id)) return null;
     const chat = getChat(id, ownerId);
     if (!chat) return null;
     const next = { ...chat };
@@ -517,7 +551,37 @@ export function updateChat(
     if (patch.modelParams === null) delete next.modelParams;
     else if (patch.modelParams) next.modelParams = patch.modelParams;
     if (patch.queuedMessages === null) delete next.queuedMessages;
-    else if (patch.queuedMessages) next.queuedMessages = patch.queuedMessages;
+    else if (patch.queuedMessages) {
+      const queued = patch.queuedMessages
+        .filter((item) => item && typeof item.id === "string" && typeof item.text === "string")
+        .map((item) => ({
+          id: item.id.slice(0, 200),
+          text: item.text.slice(0, 100_000),
+          ...(typeof item.referenceText === "string" && item.referenceText.trim()
+            ? { referenceText: item.referenceText.slice(0, 100_000) }
+            : {}),
+          ...(Array.isArray(item.references)
+            ? {
+                references: item.references
+                  .filter((reference) => reference && typeof reference.id === "string" && typeof reference.kind === "string" && typeof reference.label === "string")
+                  .slice(0, 20)
+                  .map((reference) => ({
+                    kind: reference.kind.slice(0, 40),
+                    id: reference.id.slice(0, 300),
+                    label: reference.label.slice(0, 300),
+                    ...(reference.source === "explicit" || reference.source === "pinned" ? { source: reference.source } : {}),
+                    ...(typeof reference.detail === "string" ? { detail: reference.detail.slice(0, 500) } : {}),
+                    ...(typeof reference.path === "string" ? { path: reference.path.slice(0, 4_000) } : {}),
+                    ...(typeof reference.content === "string" ? { content: reference.content.slice(0, 8_000) } : {}),
+                  })),
+              }
+            : {}),
+        }))
+        .filter((item) => item.text.trim())
+        .slice(0, 50);
+      if (queued.length) next.queuedMessages = queued;
+      else delete next.queuedMessages;
+    }
     if (patch.pinned !== undefined) {
       if (patch.pinned) next.pinned = true;
       else delete next.pinned;
@@ -703,29 +767,64 @@ export function cloneChatByShareId(shareId: string, password: string | undefined
   });
 }
 
+
+export function removeQueuedMessage(chatId: string, messageId: string, ownerId?: string) {
+  return transaction(() => {
+    const chat = getChat(chatId, ownerId);
+    if (!chat?.queuedMessages?.length) return chat;
+    const nextQueue = chat.queuedMessages.filter((message) => message.id !== messageId);
+    if (nextQueue.length === chat.queuedMessages.length) return chat;
+    const next = { ...chat };
+    if (nextQueue.length) next.queuedMessages = nextQueue;
+    else delete next.queuedMessages;
+    return saveChatInternal(next);
+  });
+}
+
+export function listChatsWithQueuedMessages() {
+  const rows = getDatabase().prepare(
+    `SELECT data FROM chats
+     WHERE json_type(data, '$.queuedMessages') = 'array'
+       AND json_array_length(json_extract(data, '$.queuedMessages')) > 0
+     ORDER BY updated_at ASC`,
+  ).all();
+  return rows
+    .map((row) => rowChat(row))
+    .filter((chat): chat is Chat => Boolean(chat?.queuedMessages?.length));
+}
+
+export function appendMessageInTransaction(
+  chatId: string,
+  message: Omit<ChatMessage, "id" | "createdAt"> & { id?: string; createdAt?: string },
+  ownerId?: string,
+) {
+  if (!workerProjectionLeaseValid(chatId)) return null;
+  const chat = getChat(chatId, ownerId);
+  if (!chat) return null;
+  const id = message.id || randomUUID();
+  if (chat.messages.some((item) => item.id === id)) return chat;
+  chat.messages.push({
+    ...message,
+    id,
+    createdAt: message.createdAt || now(),
+  });
+  if (message.role === "user") {
+    chat.lastMessageSent = message.createdAt || chat.messages.at(-1)?.createdAt || now();
+  }
+  return saveChatInternal(chat);
+}
+
 export function appendMessage(
   chatId: string,
   message: Omit<ChatMessage, "id" | "createdAt"> & { id?: string; createdAt?: string },
+  ownerId?: string,
 ) {
-  return transaction(() => {
-    const chat = getChat(chatId);
-    if (!chat) return null;
-    const id = message.id || randomUUID();
-    if (chat.messages.some((item) => item.id === id)) return chat;
-    chat.messages.push({
-      ...message,
-      id,
-      createdAt: message.createdAt || now(),
-    });
-    if (message.role === "user") {
-      chat.lastMessageSent = message.createdAt || chat.messages.at(-1)?.createdAt || now();
-    }
-    return saveChatInternal(chat);
-  });
+  return transaction(() => appendMessageInTransaction(chatId, message, ownerId));
 }
 
 export function upsertMessage(chatId: string, message: Omit<ChatMessage, "createdAt"> & { createdAt?: string }) {
   return transaction(() => {
+    if (!workerProjectionLeaseValid(chatId)) return null;
     const chat = getChat(chatId);
     if (!chat) return null;
     const index = chat.messages.findIndex((item) => item.id === message.id);

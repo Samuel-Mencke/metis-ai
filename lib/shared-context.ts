@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { getDatabase, parseData, transaction } from "@/lib/sqlite";
+import { getDatabase, isSqliteForeignKeyError, parseData, transaction, withSqliteRetry } from "@/lib/sqlite";
 import type {
   NoteActivity,
   NoteAuthor,
+  NoteKind,
   NoteScope,
+  NoteTodo,
   SessionSnapshot,
   SharedNote,
   VoiceInputSettings,
@@ -27,6 +29,10 @@ export const ALLOWED_AUDIO_MIME_TYPES = new Set([
 ]);
 
 const iso = () => new Date().toISOString();
+
+function idempotencyScope(scope: string, ownerId?: string) {
+  return ownerId ? `${scope}:owner:${ownerId}` : scope;
+}
 
 function boundedText(value: unknown, max: number) {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
@@ -62,9 +68,9 @@ export function getIdempotentResponse<T>(scope: string, key: string, ownerId?: s
   const row = getDatabase().prepare(
     `SELECT response FROM idempotency_keys
      WHERE scope = ? AND key = ?
-       AND (? IS NULL OR owner_id = ? OR owner_id IS NULL)
-       AND (? IS NULL OR chat_id = ? OR chat_id IS NULL)`,
-  ).get(scope, key, ownerId ?? null, ownerId ?? null, chatId ?? null, chatId ?? null) as { response?: string } | undefined;
+       AND (? IS NULL OR owner_id = ?)
+       AND (? IS NULL OR chat_id = ?)`,
+  ).get(idempotencyScope(scope, ownerId), key, ownerId ?? null, ownerId ?? null, chatId ?? null, chatId ?? null) as { response?: string } | undefined;
   if (!row?.response) return null;
   try {
     return JSON.parse(row.response) as T;
@@ -85,7 +91,7 @@ export function saveIdempotentResponse<T>(
     `INSERT INTO idempotency_keys (scope, key, owner_id, chat_id, response, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(scope, key) DO UPDATE SET response = excluded.response, updated_at = excluded.updated_at`,
-  ).run(scope, key, ownerId ?? null, chatId ?? null, JSON.stringify(response), timestamp, timestamp);
+  ).run(idempotencyScope(scope, ownerId), key, ownerId ?? null, chatId ?? null, JSON.stringify(response), timestamp, timestamp);
   return response;
 }
 
@@ -93,6 +99,8 @@ export type NoteWriteInput = {
   title?: string;
   content?: string;
   color?: string;
+  kind?: NoteKind;
+  todos?: NoteTodo[];
   position?: { x?: number; y?: number };
   size?: { width?: number; height?: number };
   archived?: boolean;
@@ -102,6 +110,25 @@ export type NoteWriteInput = {
   author?: NoteAuthor;
   expectedVersion?: number;
 };
+
+export function normalizeNoteTodos(value: unknown): NoteTodo[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 80).flatMap((item, index) => {
+    const entry = item && typeof item === "object" ? item as Record<string, unknown> : { content: String(item || "") };
+    const content = String(entry.content || "").trim().slice(0, 300);
+    if (!content) return [];
+    const status = entry.status === "in_progress" || entry.status === "completed" ? entry.status : "pending";
+    const chatIds = Array.isArray(entry.chatIds)
+      ? entry.chatIds.filter((id): id is string => typeof id === "string" && Boolean(id.trim())).map((id) => id.trim().slice(0, 120)).slice(0, 40)
+      : undefined;
+    return [{
+      id: String(entry.id || `todo-${index + 1}`).slice(0, 80),
+      content,
+      status,
+      ...(chatIds?.length ? { chatIds } : {}),
+    }];
+  });
+}
 
 export class NoteConflictError extends Error {
   current?: SharedNote;
@@ -123,7 +150,7 @@ export function listNotes(input: {
 }) {
   const rows = getDatabase().prepare(
     `SELECT data FROM notes
-     WHERE (? IS NULL OR owner_id = ? OR owner_id IS NULL)
+     WHERE (? IS NULL OR owner_id = ?)
        AND (? IS NULL OR scope = 'global' OR (scope = 'chat' AND chat_id = ?) OR (scope = 'workspace' AND workspace_id = ?))
        AND (? IS NULL OR scope = ?)
        AND (? = 1 OR archived = 0)
@@ -148,7 +175,7 @@ export function listNotes(input: {
 export function getNote(id: string, ownerId?: string) {
   if (!id.trim()) return null;
   const row = getDatabase().prepare(
-    "SELECT data FROM notes WHERE id = ? AND (? IS NULL OR owner_id = ? OR owner_id IS NULL)",
+    "SELECT data FROM notes WHERE id = ? AND (? IS NULL OR owner_id = ?)",
   ).get(id, ownerId ?? null, ownerId ?? null);
   return rowToNote(row);
 }
@@ -178,7 +205,7 @@ function noteActivity(
 export function listNoteActivities(noteId: string, ownerId?: string) {
   const rows = getDatabase().prepare(
     `SELECT data FROM note_activities
-     WHERE note_id = ? AND (? IS NULL OR owner_id = ? OR owner_id IS NULL)
+     WHERE note_id = ? AND (? IS NULL OR owner_id = ?)
      ORDER BY created_at DESC LIMIT 100`,
   ).all(noteId, ownerId ?? null, ownerId ?? null);
   return rows.map((row) => parseData<NoteActivity>(row)).filter((item): item is NoteActivity => Boolean(item));
@@ -196,8 +223,10 @@ export function createNote(input: NoteWriteInput & { ownerId?: string; idempoten
     ...(input.chatId ? { chatId: input.chatId } : {}),
     ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
     scope: input.scope || (input.workspaceId ? "workspace" : input.chatId ? "chat" : "global"),
-    title: boundedText(input.title, 200) || "Untitled note",
+    title: boundedText(input.title, 200) || (input.kind === "project" ? "Untitled project" : "Untitled note"),
     content: boundedText(input.content, 50_000),
+    ...(input.kind === "project" ? { kind: "project" as const } : { kind: "note" as const }),
+    ...(normalizeNoteTodos(input.todos).length ? { todos: normalizeNoteTodos(input.todos) } : {}),
     color: /^#[0-9a-f]{6}$/i.test(input.color || "") ? String(input.color) : "#fef08a",
     position: {
       x: Math.max(-100_000, Math.min(100_000, Number(input.position?.x) || 0)),
@@ -243,6 +272,8 @@ export function updateNote(
       ...current,
       ...(input.title !== undefined ? { title: boundedText(input.title, 200) || current.title } : {}),
       ...(input.content !== undefined ? { content: boundedText(input.content, 50_000) } : {}),
+      ...(input.kind === "project" || input.kind === "note" ? { kind: input.kind } : {}),
+      ...(input.todos !== undefined ? { todos: normalizeNoteTodos(input.todos) } : {}),
       ...(input.color !== undefined && /^#[0-9a-f]{6}$/i.test(input.color) ? { color: input.color } : {}),
       ...(input.position ? {
         position: {
@@ -294,7 +325,7 @@ export function revertChatNotes(chatId: string, ownerId: string | undefined, cut
        FROM note_activities a
        JOIN notes n ON n.id = a.note_id
        WHERE n.chat_id = ? AND n.scope = 'chat'
-         AND (? IS NULL OR n.owner_id = ? OR n.owner_id IS NULL)
+         AND (? IS NULL OR n.owner_id = ?)
          AND a.created_at > ?
        ORDER BY a.created_at DESC`,
     ).all(chatId, ownerId ?? null, ownerId ?? null, cutoff) as Array<{
@@ -340,7 +371,7 @@ export function revertChatNotes(chatId: string, ownerId: string | undefined, cut
   });
 }
 
-export function saveSnapshot(snapshot: SessionSnapshot) {
+function writeSnapshotRow(snapshot: SessionSnapshot) {
   const db = getDatabase();
   const serialized = JSON.stringify(snapshot);
   if (snapshot.checkpoint === "periodic") {
@@ -370,10 +401,24 @@ export function saveSnapshot(snapshot: SessionSnapshot) {
   return snapshot;
 }
 
+export function saveSnapshot(snapshot: SessionSnapshot) {
+  return withSqliteRetry(() => {
+    try {
+      return writeSnapshotRow(snapshot);
+    } catch (error) {
+      if (snapshot.ownerId && isSqliteForeignKeyError(error)) {
+        const { ownerId: _ownerId, ...rest } = snapshot;
+        return writeSnapshotRow(rest);
+      }
+      throw error;
+    }
+  });
+}
+
 export function getLatestSnapshot(chatId: string, ownerId?: string) {
   const rows = getDatabase().prepare(
     `SELECT data FROM session_snapshots
-     WHERE chat_id = ? AND (? IS NULL OR owner_id = ? OR owner_id IS NULL)
+     WHERE chat_id = ? AND (? IS NULL OR owner_id = ?)
      ORDER BY updated_at DESC LIMIT 5`,
   ).all(chatId, ownerId ?? null, ownerId ?? null);
   for (const row of rows) {
@@ -465,7 +510,7 @@ export function createVoiceJob(input: {
 
 export function getVoiceJob(id: string, ownerId?: string) {
   const row = getDatabase().prepare(
-    "SELECT data FROM voice_jobs WHERE id = ? AND (? IS NULL OR owner_id = ? OR owner_id IS NULL)",
+    "SELECT data FROM voice_jobs WHERE id = ? AND (? IS NULL OR owner_id = ?)",
   ).get(id, ownerId ?? null, ownerId ?? null);
   return parseData<VoiceTranscriptionJob>(row);
 }
@@ -481,7 +526,7 @@ export function updateVoiceJob(id: string, patch: Partial<Pick<VoiceTranscriptio
 export function listVoiceJobs(ownerId?: string, chatId?: string) {
   const rows = getDatabase().prepare(
     `SELECT data FROM voice_jobs
-     WHERE (? IS NULL OR owner_id = ? OR owner_id IS NULL)
+     WHERE (? IS NULL OR owner_id = ?)
        AND (? IS NULL OR chat_id = ?)
      ORDER BY updated_at DESC LIMIT 50`,
   ).all(ownerId ?? null, ownerId ?? null, chatId ?? null, chatId ?? null);

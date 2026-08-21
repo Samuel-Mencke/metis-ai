@@ -23,7 +23,7 @@ test("cursor and provider runners inject the shared identity prompt first", () =
   assert.match(worker, /import \{ metisAgentIdentity \} from "@\/lib\/agent-identity"/);
   assert.match(worker, /const prompt = \[\s*metisAgentIdentity\(\),/);
   assert.match(provider, /import \{ metisAgentIdentity \} from "@\/lib\/agent-identity"/);
-  assert.match(provider, /return \[\s*metisAgentIdentity\(\),/);
+  assert.match(provider, /(?:return|const prompt =) \[\s*metisAgentIdentity\(\),/);
   assert.match(modes, /You are Metis AI, running in the Metis AI harness/);
   assert.doesNotMatch(provider, /You are a provider inside a private AI chat application/);
 });

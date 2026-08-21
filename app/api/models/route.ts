@@ -1,15 +1,28 @@
 import { Cursor } from "@cursor/sdk";
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { filterAllowedModels } from "@/lib/model-access";
+import {
+  defaultParamsForModel,
+  modelParametersForModel,
+  UNCENSORED_PARAMETER,
+} from "@/lib/model-params";
 import { isUncensoredEnabled } from "@/lib/feature-flags";
-import { UNCENSORED_PARAMETER } from "@/lib/model-params";
 import {
   findActiveConnection,
   getProviderConnectionSecret,
   listProviderConnections,
+  listProviderModels,
+  providerAuthPriority,
 } from "@/lib/provider-connections";
-import { providerModelsForConnection } from "@/lib/providers/discovery";
+import {
+  persistDiscoveredModels,
+  providerModelCacheState,
+  providerModelsForConnection,
+  scheduleProviderModelRefresh,
+} from "@/lib/providers/discovery";
 import { modelKey } from "@/lib/providers/types";
+import { contextWindowOf as providerContextWindow } from "@/lib/context-window";
+import { getVerifiedProviderCapabilities } from "@/lib/providers/registry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -53,18 +66,15 @@ function withUncensoredParameter(parameters: ModelParameter[] = []) {
   return [...without, UNCENSORED_PARAMETER];
 }
 
-function contextWindowOf(value: unknown) {
-  if (!value || typeof value !== "object") return undefined;
-  const item = value as Record<string, unknown>;
-  const candidate = [
-    item.contextWindow,
-    item.context_window,
-    item.maxInputTokens,
-    item.max_input_tokens,
-    item.inputTokenLimit,
-    item.input_token_limit,
-  ].find((entry) => typeof entry === "number" && Number.isFinite(entry) && entry > 0);
-  return typeof candidate === "number" ? candidate : undefined;
+function modelContextWindow(value: unknown, id?: string, displayName?: string) {
+ const record = value && typeof value === "object"
+ ? value as { id?: unknown; displayName?: unknown; contextWindow?: unknown }
+ : null;
+ return providerContextWindow({
+ id: id || (typeof record?.id === "string" ? record.id : ""),
+ displayName: displayName || (typeof record?.displayName === "string" ? record.displayName : ""),
+ contextWindow: record?.contextWindow,
+ }) ?? providerContextWindow(value);
 }
 
 export async function GET(req: Request) {
@@ -90,6 +100,9 @@ export async function GET(req: Request) {
   if (apiKey) {
     try {
       const listed = await Cursor.models.list({ apiKey });
+      const storedById = cursorConnection
+        ? new Map(listProviderModels(cursorConnection.id).map((model) => [model.id, model]))
+        : new Map<string, { contextWindow?: number }>();
       cursorModels = listed.map((m) => {
         const defaultVariant =
           m.variants?.find((v) => v.isDefault) ?? m.variants?.[0];
@@ -101,53 +114,123 @@ export async function GET(req: Request) {
             displayName: v.displayName,
           })),
         }));
+        const variantParams = (defaultVariant?.params ?? [])
+          .filter((p) => p.id !== "cyber")
+          .map((p) => ({ id: p.id, value: p.value }));
+        const discoveredWindow = providerContextWindow(m);
+        const storedWindow = storedById.get(m.id)?.contextWindow;
+        const contextWindow = discoveredWindow || storedWindow;
+ const normalizedModel = {
+          id: m.id,
+          displayName: m.displayName || m.id,
+          contextWindow,
+          parameters: cursorParams,
+          defaultParams: variantParams,
+ variants: (m.variants ?? []).map((variant) => variant.params.map((param) => ({ id: param.id, value: param.value }))),
+        };
+        const parameters = modelParametersForModel(normalizedModel);
+        const defaultParams = defaultParamsForModel({
+          ...normalizedModel,
+          parameters,
+        });
         return {
           id: m.id,
           displayName: m.displayName || m.id,
-          ...(contextWindowOf(m) ? { contextWindow: contextWindowOf(m) } : {}),
+          ...(contextWindow ? { contextWindow } : {}),
           providerId: "cursor",
           providerName: "Cursor",
           source: "cursor",
           description: m.description,
-          parameters: withUncensoredParameter(cursorParams),
-          defaultParams: (defaultVariant?.params ?? [])
-            .filter((p) => p.id !== "cyber")
-            .map((p) => ({ id: p.id, value: p.value })),
+          capabilities: getVerifiedProviderCapabilities("cursor", m.id)?.verified,
+          parameters: withUncensoredParameter(parameters),
+          defaultParams,
         };
       });
       cursorSource = "cursor";
+      if (cursorConnection) {
+        persistDiscoveredModels(
+          cursorConnection.id,
+          listed.map((m) => {
+            const discoveredWindow = providerContextWindow(m);
+            const defaultVariant = m.variants?.find((variant) => variant.isDefault) ?? m.variants?.[0];
+            const variantParams = (defaultVariant?.params ?? []).map((param) => ({ id: param.id, value: param.value }));
+            const effectiveWindow = discoveredWindow;
+ return {
+              id: m.id,
+              displayName: m.displayName || m.id,
+              description: m.description,
+              ...(effectiveWindow ? { contextWindow: effectiveWindow, contextWindowDiscovered: Boolean(discoveredWindow) } : {}),
+            };
+          }),
+        );
+      }
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to list Cursor models";
     }
   }
 
-  const connections = userId ? listProviderConnections(userId, false) : [];
+  const connections = userId
+    ? listProviderConnections(userId, false)
+        .filter((connection) => {
+          if (connection.authType === "local" || connection.authType === "vertex_adc") return true;
+          return Boolean(getProviderConnectionSecret(connection.id, userId)?.secret);
+        })
+        .sort((a, b) => providerAuthPriority(a.authType) - providerAuthPriority(b.authType))
+    : [];
+  if (userId) {
+    const emptyRefreshes: Array<Promise<unknown>> = [];
+    for (const connection of connections) {
+      if (connection.providerKey === "cursor" || !connection.enabled) continue;
+      const state = providerModelCacheState(connection.id);
+      if (state === "fresh") continue;
+      const secretConnection = getProviderConnectionSecret(connection.id, userId);
+      if (!secretConnection) continue;
+      if (state === "empty") emptyRefreshes.push(scheduleProviderModelRefresh(secretConnection));
+      else void scheduleProviderModelRefresh(secretConnection);
+    }
+    if (emptyRefreshes.length) await Promise.all(emptyRefreshes);
+  }
   const connectionModels: ModelInfo[] = [];
   for (const connection of connections) {
     if (connection.providerKey === "cursor") continue;
     const models = providerModelsForConnection({ ...connection });
     connectionModels.push(
-      ...models.map((model) => ({
-        id: model.key || modelKey(model.providerKey, model.id),
-        displayName: model.displayName,
-        description: model.description,
-        providerId: model.providerKey,
-        providerName: model.providerName,
-        connectionId: model.connectionId,
-        connectionLabel: model.connectionLabel,
-        source: model.source,
-        tags: "tags" in model && Array.isArray(model.tags) ? model.tags : undefined,
-        ...(contextWindowOf(model) ? { contextWindow: contextWindowOf(model) } : {}),
-        capabilities: model.capabilities as Record<string, boolean> | undefined,
-        parameters: withUncensoredParameter(
-          model.parameters?.map((parameter) => ({
-            id: parameter.id,
-            displayName: parameter.displayName,
-            values: parameter.values.map((value) => ({ ...value })),
-          })) ?? [],
-        ),
-        defaultParams: model.defaultParams?.map((parameter) => ({ ...parameter })),
-      })),
+      ...models.map((model) => {
+        const contextWindow = modelContextWindow(model, model.id, model.displayName);
+        const baseParameters = model.parameters?.map((parameter) => ({
+          id: parameter.id,
+          displayName: parameter.displayName,
+          values: parameter.values.map((value) => ({ ...value })),
+        })) || [];
+        const normalizedModel = {
+          id: model.id,
+          displayName: model.displayName,
+          contextWindow,
+          capabilities: model.capabilities as Record<string, boolean> | undefined,
+          parameters: baseParameters,
+          defaultParams: model.defaultParams?.map((parameter) => ({ ...parameter })),
+        };
+        const parameters = modelParametersForModel(normalizedModel);
+        const defaultParams = defaultParamsForModel({
+          ...normalizedModel,
+          parameters,
+        });
+        return {
+          id: model.key || modelKey(model.providerKey, model.id),
+          displayName: model.displayName,
+          description: model.description,
+          providerId: model.providerKey,
+          providerName: model.providerName,
+          connectionId: model.connectionId,
+          connectionLabel: model.connectionLabel,
+          source: model.source,
+          tags: "tags" in model && Array.isArray(model.tags) ? model.tags : undefined,
+          ...(contextWindow ? { contextWindow } : {}),
+          capabilities: model.capabilities as Record<string, boolean> | undefined,
+          ...(parameters.length ? { parameters: withUncensoredParameter(parameters) } : {}),
+          defaultParams,
+        };
+      }),
     );
   }
 

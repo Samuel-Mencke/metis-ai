@@ -32,7 +32,6 @@ export async function POST(req: Request) {
       label,
       authType: "oauth",
       config: { ...(config || {}), pendingOAuthFlow: true },
-      clearSecret: true,
       enabled: true,
     });
     if (!connection) throw new Error("Could not create OAuth connection.");

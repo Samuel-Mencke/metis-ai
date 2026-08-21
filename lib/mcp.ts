@@ -1,5 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
+import {
+  capabilityManifestHash,
+  createCapabilityManifest,
+  persistCapabilityManifest,
+  type CapabilityCategory,
+} from "@/lib/capabilities";
 import { config } from "@/lib/config";
 import { getUserAccess, getUserExecutionIdentity, isHostAdmin, requireUserExecutionIdentity } from "@/lib/user-access";
 export { getUserExecutionIdentity } from "@/lib/user-access";
@@ -31,7 +37,70 @@ export type McpContext = {
   compressionEnabled?: boolean;
   compressionMode?: string;
   compressionToolResults?: boolean;
+  capabilityManifest?: string;
+  capabilityHash?: string;
 };
+
+export function buildMcpContext(input: {
+  chatId?: string;
+  userId?: string;
+  jobId?: string;
+  incognito?: boolean;
+  automation?: boolean;
+  modeId?: string;
+  modePolicy?: string | { allowedCategories: unknown; toolOverrides?: unknown };
+  compressionEnabled?: boolean;
+  compressionMode?: string;
+  compressionToolResults?: boolean;
+  workspaceId?: string;
+  attemptId?: string;
+  policyVersion?: string;
+  allowedCategories?: readonly CapabilityCategory[];
+  toolOverrides?: Record<string, boolean>;
+  childMcpGrants?: Record<string, readonly string[]>;
+}): McpContext {
+  const modePolicy = typeof input.modePolicy === "string"
+    ? input.modePolicy
+    : input.modePolicy
+      ? JSON.stringify({
+          allowedCategories: input.modePolicy.allowedCategories,
+          toolOverrides: input.modePolicy.toolOverrides || {},
+        })
+      : undefined;
+  const capabilityManifest = input.userId && input.jobId
+    ? createCapabilityManifest({
+        ownerId: input.userId,
+        workspaceId: input.workspaceId || input.chatId || "default",
+        runId: input.jobId,
+        attemptId: input.attemptId,
+        policyVersion: input.policyVersion,
+        allowedCategories: input.allowedCategories || [],
+        toolOverrides: input.toolOverrides,
+        childMcpGrants: input.childMcpGrants,
+      })
+    : undefined;
+  const durableManifest = capabilityManifest
+    ? persistCapabilityManifest(capabilityManifest)
+    : undefined;
+  return {
+    chatId: input.chatId,
+    userId: input.userId,
+    jobId: input.jobId,
+    incognito: input.incognito,
+    automation: input.automation,
+    modeId: input.modeId,
+    modePolicy,
+    compressionEnabled: input.compressionEnabled,
+    compressionMode: input.compressionMode,
+    compressionToolResults: input.compressionToolResults,
+    ...(durableManifest
+      ? {
+          capabilityManifest: JSON.stringify(durableManifest),
+          capabilityHash: capabilityManifestHash(durableManifest),
+        }
+      : {}),
+  };
+}
 
 export function getMcpServers(context: McpContext = {}): McpServerMap {
   const appRoot = config.root;
@@ -54,10 +123,24 @@ export function getMcpServers(context: McpContext = {}): McpServerMap {
       MCP_COMPRESSION_ENABLED: context.compressionEnabled ? "1" : undefined,
       MCP_COMPRESSION_MODE: context.compressionMode,
       MCP_COMPRESSION_TOOL_RESULTS: context.compressionToolResults === false ? "0" : "1",
+      MCP_CAPABILITY_MANIFEST: context.capabilityManifest,
+      MCP_CAPABILITY_HASH: context.capabilityHash,
       MCP_AGENT_CWD: agentCwd,
-      MCP_OS_USERNAME: identity.username,
-      MCP_OS_UID: String(identity.uid),
-      MCP_OS_GID: String(identity.gid),
+      AI_CHAT_INTERNAL_ORIGIN: config.internalOrigin,
+      AI_CHAT_PUBLIC_URL: config.publicUrl,
+      AI_CHAT_INTERNAL_URL: config.internalUrl,
+      AI_CHAT_WORKSPACE_URL: config.workspaceUrl,
+      AI_CHAT_CHAT_URL: config.chatUrl,
+      AI_CHAT_NOTES_URL: config.notesUrl,
+      AI_CHAT_MEMORY_URL: config.memoryUrl,
+      AI_CHAT_BROWSER_URL: config.browserUrl,
+      AI_CHAT_AGENT_STATE_URL: config.agentStateUrl,
+      AI_CHAT_SUBAGENT_URL: config.subagentUrl,
+      AI_CHAT_AUTOMATION_URL: config.automationUrl,
+      AI_CHAT_FILE_URL: config.fileUrl,
+      MCP_OS_USERNAME: identity?.username,
+      MCP_OS_UID: identity ? String(identity.uid) : undefined,
+      MCP_OS_GID: identity ? String(identity.gid) : undefined,
       MCP_ALLOW_ROOT_AGENTS: config.allowRootAgents ? "1" : "0",
       MCP_IS_HOST_ADMIN: isHostAdmin(context.userId) ? "1" : "0",
     }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
@@ -74,21 +157,6 @@ export function getMcpServers(context: McpContext = {}): McpServerMap {
       cwd: appRoot,
       env,
     },
-    ...(config.mcpPublicUrl
-      ? {
-          "ai-chat-universal": {
-            type: "http" as const,
-            url: `${config.mcpPublicUrl.replace(/\/$/, "")}/all`,
-            headers: {
-              Authorization: `Bearer ${process.env.MCP_BEARER_TOKEN || ""}`,
-              "X-AI-Chat-User-Id": context.userId || "",
-              "X-AI-Chat-Id": context.chatId || "",
-              "X-AI-Chat-Job-Id": context.jobId || "",
-              "X-AI-Chat-Incognito": context.incognito ? "1" : "0",
-            },
-          },
-        }
-      : {}),
   };
 }
 
@@ -114,20 +182,61 @@ export async function checkGatewayHealth(): Promise<{
   ok: boolean;
   url: string;
   detail: string;
+  checks?: Record<string, { ok: boolean; url: string; detail: string }>;
 }> {
-  const url = `${config.mcpPublicUrl.replace(/\/$/, "")}/health`;
-  try {
-    const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(2500) });
-    const body = await response.json().catch(() => ({})) as { ok?: boolean; name?: string };
-    if (!response.ok || body.ok === false) {
-      return { ok: false, url, detail: `MCP gateway health returned HTTP ${response.status}` };
-    }
-    return { ok: true, url, detail: body.name || "MCP gateway healthy" };
-  } catch (error) {
-    return {
-      ok: false,
-      url,
-      detail: error instanceof Error ? error.message : "MCP gateway unreachable",
-    };
-  }
-}
+  const checks = Object.fromEntries(
+    await Promise.all(
+      [
+        ["gateway", `${config.mcpPublicUrl.replace(/\/+$/, "")}/health`],
+        ["workspace", config.workspaceUrl],
+        ["chat", config.chatUrl],
+        ["subagent", config.subagentUrl],
+        ["agentState", config.agentStateUrl],
+      ].map(async ([name, url]) => {
+        try {
+          const response = await fetch(url, {
+            headers: config.mcpBearerToken
+              ? { Authorization: `Bearer ${config.mcpBearerToken}` }
+              : undefined,
+            signal: AbortSignal.timeout(2_000),
+          });
+          const contentType = response.headers.get("content-type") || "";
+          const body = await response.text();
+          const validBody = !/^text\/html\b/i.test(contentType) && !/^\s*<!doctype html/i.test(body);
+          // Gateway /health returns JSON { ok, name } — surface an explicit ok:false.
+          let bodyOk = true;
+          let gatewayName = "";
+          if (name === "gateway") {
+            try {
+              const parsed = JSON.parse(body) as { ok?: boolean; name?: string };
+              bodyOk = parsed.ok !== false;
+              gatewayName = parsed.name || "";
+            } catch {
+              bodyOk = false;
+            }
+          }
+          const ok = response.ok && validBody && bodyOk;
+          return [name, {
+            ok,
+            url,
+            detail: ok
+              ? gatewayName ? `HTTP ${response.status} · ${gatewayName}` : `HTTP ${response.status}`
+              : `HTTP ${response.status}${validBody ? "" : "; HTML response received"}`,
+          }] as const;
+        } catch (error) {
+          return [name, {
+            ok: false,
+            url,
+            detail: error instanceof Error ? error.message : "health check failed",
+          }] as const;
+        }
+      }),
+    ),
+  );
+  const ok = Object.values(checks).every((check) => check.ok);
+  return {
+    ok,
+    url: "stdio://ai-chat-internal-mcp",
+    detail: ok ? "internal MCP and runtime routes are healthy" : "one or more MCP/runtime routes are unhealthy",
+    checks,
+  };}

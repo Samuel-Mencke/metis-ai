@@ -2,16 +2,21 @@ import {
   getChat,
   normalizeChatKeywords,
   searchChatsForUser,
-  titleFromMessage,
   updateChat,
 } from "@/lib/db-store";
 import { bearerTokenMatches } from "@/lib/security";
+import { internalRunLeaseAuthorized } from "@/lib/internal-run-lease";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function authorized(req: Request) {
   return bearerTokenMatches(req, process.env.MCP_BEARER_TOKEN);
+}
+
+export async function GET(req: Request) {
+  if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  return Response.json({ ok: true, service: "chat" });
 }
 
 export async function POST(req: Request) {
@@ -22,6 +27,9 @@ export async function POST(req: Request) {
   const jobId = req.headers.get("x-ai-chat-job-id")?.trim() || "";
   const chat = chatId ? getChat(chatId, userId) : null;
   if (!chat || !jobId) return Response.json({ error: "Invalid chat context" }, { status: 400 });
+  if (!internalRunLeaseAuthorized(req, jobId)) {
+    return Response.json({ error: "Worker run lease is expired or invalid" }, { status: 409 });
+  }
 
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
   const action = body.action === "search" ? "search" : body.action === "title" ? "title" : "update";
@@ -40,16 +48,6 @@ export async function POST(req: Request) {
   if (action === "title") {
     const title = typeof body.title === "string" ? body.title.trim().slice(0, 200) : "";
     if (!title) return Response.json({ error: "title must not be empty" }, { status: 400 });
-    const inferredSource = chat.titleSource || (() => {
-      const firstUserMessage = chat.messages.find((message) => message.role === "user");
-      return firstUserMessage && chat.title !== titleFromMessage(firstUserMessage.content)
-        ? "user"
-        : "default";
-    })();
-    const source = inferredSource;
-    if (source !== "default" && body.approved !== true) {
-      return Response.json({ requiresApproval: true, title, titleSource: source, actor: "agent", jobId });
-    }
     const updated = updateChat(chatId, { title, titleSource: "agent" }, userId);
     if (!updated) return Response.json({ error: "Chat not found" }, { status: 404 });
     return Response.json({

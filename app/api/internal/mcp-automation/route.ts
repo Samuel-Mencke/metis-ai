@@ -4,6 +4,7 @@ import {
   deleteAutomation,
   getAutomation,
   listAutomations,
+  runAutomationNow,
   setAutomationStatus,
   updateAutomation,
   type AutomationSchedule,
@@ -47,16 +48,19 @@ export async function POST(req: Request) {
       if (!schedule) throw new Error("A schedule is required.");
       return Response.json(withAutomationLink(createAutomation({
         ownerId,
+        creator: "agent",
         chatId: typeof body.chatId === "string" ? body.chatId : req.headers.get("x-ai-chat-id") || undefined,
         name: typeof body.name === "string" ? body.name : "",
         prompt: typeof body.prompt === "string" ? body.prompt : "",
-        schedule,
-        timezone: typeof body.timezone === "string" ? body.timezone : undefined,
-        modeId: typeof body.modeId === "string" ? body.modeId : undefined,
+        modeId: typeof body.modeId === "string" ? body.modeId : "agent",
         modelId: typeof body.modelId === "string" ? body.modelId : undefined,
         extendedModelId: typeof body.extendedModelId === "string" ? body.extendedModelId : undefined,
+        maxRunMinutes: typeof body.maxRunMinutes === "number" ? body.maxRunMinutes : undefined,
+        schedule,
+        timezone: typeof body.timezone === "string" ? body.timezone : undefined,
       })));
     }
+    if (action === "run") return Response.json(runAutomationNow(id, ownerId));
     if (action === "pause" || action === "resume") {
       return Response.json(withAutomationLink(setAutomationStatus(id, ownerId, action === "resume" ? "active" : "paused")));
     }
@@ -67,10 +71,11 @@ export async function POST(req: Request) {
         ...(typeof body.name === "string" ? { name: body.name } : {}),
         ...(typeof body.prompt === "string" ? { prompt: body.prompt } : {}),
         ...(typeof body.chatId === "string" ? { chatId: body.chatId } : {}),
-        ...(typeof body.timezone === "string" ? { timezone: body.timezone } : {}),
         ...(typeof body.modeId === "string" ? { modeId: body.modeId } : {}),
         ...(typeof body.modelId === "string" ? { modelId: body.modelId } : {}),
         ...(typeof body.extendedModelId === "string" ? { extendedModelId: body.extendedModelId } : {}),
+        ...(typeof body.maxRunMinutes === "number" ? { maxRunMinutes: body.maxRunMinutes } : {}),
+        ...(typeof body.timezone === "string" ? { timezone: body.timezone } : {}),
         ...(schedule ? { schedule } : {}),
       })));
     }

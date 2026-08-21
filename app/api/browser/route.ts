@@ -34,10 +34,11 @@ export async function GET(req: Request) {
     const result = await performSharedBrowserAction(owner, chatId, {
       action: url.searchParams.get("action") || "screenshot",
       tabId: url.searchParams.get("tabId") || undefined,
+      source: "user",
     });
     if (url.searchParams.get("format") === "image" && result.screenshot) {
       return new Response(Buffer.from(result.screenshot, "base64"), {
-        headers: { "Content-Type": "image/png", "Cache-Control": "no-store" },
+        headers: { "Content-Type": "image/jpeg", "Cache-Control": "no-store" },
       });
     }
     return Response.json(result);
@@ -58,7 +59,7 @@ export async function POST(req: Request) {
   const chatId = body.chatId?.trim();
   if (!owner || !chatId || !body.action) return Response.json({ error: "chatId and action are required" }, { status: 400 });
   try {
-    const result = await performSharedBrowserAction(owner, chatId, { ...body, action: body.action });
+    const result = await performSharedBrowserAction(owner, chatId, { ...body, action: body.action, source: "user" });
     return Response.json(result);
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Browser action failed" }, { status: 400 });

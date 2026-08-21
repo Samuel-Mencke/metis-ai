@@ -2,6 +2,8 @@
 Description=Metis AI
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -9,12 +11,22 @@ User=YOUR_USER
 Group=YOUR_GROUP
 WorkingDirectory=YOUR_INSTALL_DIR
 EnvironmentFile=YOUR_INSTALL_DIR/.env
+EnvironmentFile=-YOUR_INSTALL_DIR/.deploy.env
 Environment=HOME=YOUR_HOME
 Environment=NODE_ENV=production
+Environment=NODE_OPTIONS=--max-old-space-size=4096
 Environment=PATH=YOUR_NODE_BIN_DIR:YOUR_INSTALL_DIR/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=YOUR_NODE_BIN YOUR_INSTALL_DIR/server.mjs
-Restart=always
-RestartSec=5
+MemoryHigh=1536M
+MemoryMax=2G
+TasksMax=512
+KillMode=control-group
+ExecStartPre=YOUR_INSTALL_DIR/scripts/ensure-production-build.sh
+ExecStart=YOUR_NODE_BIN YOUR_INSTALL_DIR/node_modules/tsx/dist/cli.mjs YOUR_INSTALL_DIR/server.mjs
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=20min
+TimeoutStopSec=15s
+SuccessExitStatus=143
 
 [Install]
 WantedBy=multi-user.target

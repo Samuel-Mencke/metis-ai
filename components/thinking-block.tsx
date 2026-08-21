@@ -45,7 +45,7 @@ export function ThinkingBlock({
         )}
       >
         <ChevronRight className={cn("size-3 shrink-0 text-current opacity-50 transition-[opacity,transform] group-hover:opacity-100", expanded && "rotate-90")} />
-        <span className="truncate font-medium text-muted-foreground">Thinking</span>
+        <span className="truncate font-medium text-muted-foreground">{done ? "Thought" : "Thinking"}</span>
         {durationLabel ? (
           <span className="shrink-0 text-muted-foreground/70">· {durationLabel}</span>
         ) : !done ? (

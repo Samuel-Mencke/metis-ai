@@ -1,36 +1,65 @@
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { appendRunEvent, claimNextJob, getJob, recoverStaleJobs, updateJob } from "@/lib/db-jobs";
-import { appendMessage, getChat, updateChat, upsertMessage } from "@/lib/db-store";
+import { writeWorkerHeartbeat } from "@/lib/worker-health";
+import { appendRunEvent, cancelChildJobs, claimNextJob, enqueueJob, getActiveJob, getJob, listChildJobs, reapExpiredJobLeases, recoverStaleJobs, requeueSwitchingJob, updateJob } from "@/lib/db-jobs";
+import { snapshotInterruptedJob } from "@/lib/recovery";
+import { appendMessage, appendMessageInTransaction, getChat, listChatsWithQueuedMessages, removeQueuedMessage, updateChat, upsertMessage } from "@/lib/db-store";
 import { expirePendingQuestions } from "@/lib/db-questions";
 import {
   claimDueAutomations,
   failAutomationClaim,
   finalizeAutomationRunForJob,
-  linkAutomationRunJob,
-  startAutomationRun,
+  queueAutomationRun,
 } from "@/lib/automations";
-import { enqueueJob } from "@/lib/db-jobs";
-import { workerConcurrency } from "@/lib/worker-concurrency";
+import { parseWorkerConcurrency, waitForSchedulerTick } from "@/lib/worker-scheduler";
+import { logError } from "@/lib/error-logs";
 
 const pollMs = Number(process.env.AI_CHAT_WORKER_POLL_MS || 500);
-const concurrency = workerConcurrency();
+const concurrency = parseWorkerConcurrency(process.env.AI_CHAT_WORKER_CONCURRENCY);
 const configuredMaxJobMs = Number(process.env.AI_CHAT_WORKER_MAX_JOB_MS || 30 * 60 * 1000);
 const maxJobMs = Number.isFinite(configuredMaxJobMs)
   ? Math.max(60_000, configuredMaxJobMs)
   : 30 * 60 * 1000;
+const configuredCrashRetries = Number(process.env.AI_CHAT_WORKER_CRASH_RETRIES || 2);
+const crashRetries = Number.isFinite(configuredCrashRetries)
+  ? Math.max(0, Math.min(5, Math.floor(configuredCrashRetries)))
+  : 2;
 let stopping = false;
 
 function stop() {
   stopping = true;
 }
 
-function runJobInIsolatedProcess(jobId: string) {
+function runJobInIsolatedProcess(claimedJob: Awaited<ReturnType<typeof claimNextJob>>) {
+  if (!claimedJob) return Promise.resolve();
+  const jobId = claimedJob.id;
   return new Promise<void>((resolveProcess, reject) => {
     const markFailed = (message: string) => {
-      updateJob(jobId, { status: "error", error: message });
+      const beforeFailure = getJob(jobId);
+      if (!beforeFailure || ["cancelled", "interrupted", "completed"].includes(beforeFailure.status)) {
+        console.warn(`[ai-chat-worker] ignored child failure for terminal job ${jobId} (${beforeFailure?.status || "missing"})`);
+        return;
+      }
+      try {
+        updateJob(jobId, { status: "error", error: message });
+        cancelChildJobs(jobId, beforeFailure.userId, "Parent agent failed.");
+        const failedJob = getJob(jobId);
+        void logError({
+          level: "error",
+          source: "worker",
+          chatId: failedJob?.chatId,
+          userId: failedJob?.userId || undefined,
+          message: `Worker process failed: ${message}`,
+          context: { jobId, stderrTail: stderr.slice(-2000) },
+        });
+      } catch (error) {
+        // Failure reporting itself must never terminate the scheduler.
+        console.error(`[ai-chat-worker] could not persist failure for ${jobId}`, error);
+        return;
+      }
       const job = getJob(jobId);
-      if (job) {
+      if (job && job.status === "error") {
         appendRunEvent(job.id, job.chatId, job.userId, "error", { message });
         const chat = getChat(job.chatId, job.userId);
         if (chat && !chat.messages.some(
@@ -63,26 +92,78 @@ function runJobInIsolatedProcess(jobId: string) {
         }, job.userId);
       }
     };
+    const requeueUnexpectedCrash = (message: string) => {
+      const current = getJob(jobId);
+      if (!current || current.status !== "running") return false;
+      // attempts is incremented when a job is claimed. Two crash retries means
+      // at most three isolated-process attempts for the same logical run.
+      if (current.attempts >= crashRetries + 1) return false;
+      const resumedAt = new Date().toISOString();
+      const updated = updateJob(jobId, {
+        status: "queued",
+        error: undefined,
+        resumePrompt: "The isolated worker process crashed unexpectedly. Resume from the saved agent/chat/tool/browser state. Do not repeat completed tool calls or user-facing work.",
+        resumeRequestedAt: resumedAt,
+      });
+      if (!updated) return false;
+      updateChat(current.chatId, {
+        runStatus: "running",
+        runUpdatedAt: resumedAt,
+        queueMessage: null,
+        badge: null,
+      }, current.userId);
+      appendRunEvent(current.id, current.chatId, current.userId, "status", {
+        status: "recovering",
+        message: "Worker process restarted automatically; continuing from the last checkpoint.",
+        attempt: current.attempts + 1,
+      });
+      void logError({
+        level: "warn",
+        source: "worker",
+        chatId: current.chatId,
+        userId: current.userId || undefined,
+        message: "Unexpected worker child exit; automatically resumed the run.",
+        context: { jobId, attempt: current.attempts, detail: message.slice(-1200) },
+      });
+      return true;
+    };
     let forceKillTimer: NodeJS.Timeout | undefined;
     let stderr = "";
+    const requestedJobMaxMs = Number(getJob(jobId)?.maxRuntimeMs);
+    const jobMaxMs = Number.isFinite(requestedJobMaxMs)
+      ? Math.max(60_000, Math.min(requestedJobMaxMs, 7 * 24 * 60 * 60_000))
+      : maxJobMs;
     const timeout = setTimeout(() => {
-      markFailed(`Worker job exceeded the ${Math.round(maxJobMs / 60_000)} minute limit.`);
+      markFailed(`Worker job exceeded the ${Math.round(jobMaxMs / 60_000)} minute limit.`);
       child.kill("SIGTERM");
       forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 10_000);
-    }, maxJobMs);
+    }, jobMaxMs);
     const child = spawn(
       process.execPath,
       [resolve("node_modules/tsx/dist/cli.mjs"), "worker-job.ts", jobId],
       {
         cwd: process.cwd(),
-        env: process.env,
+        env: {
+          ...process.env,
+          ...(claimedJob.leaseOwner ? { AI_CHAT_WORKER_ID: claimedJob.leaseOwner } : {}),
+          ...(claimedJob.leaseToken ? { AI_CHAT_JOB_LEASE_TOKEN: claimedJob.leaseToken } : {}),
+          AI_CHAT_JOB_ID: claimedJob.id,
+        },
         stdio: ["ignore", "inherit", "pipe"],
       },
     );
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr = `${stderr}${chunk.toString()}`.slice(-4_000);
     });
-    child.once("error", reject);
+    child.once("error", (error) => {
+      const message = `Could not start isolated worker: ${error instanceof Error ? error.message : String(error)}`;
+      if (requeueUnexpectedCrash(message)) {
+        resolveProcess();
+        return;
+      }
+      markFailed(message);
+      reject(error);
+    });
     child.once("exit", (code, signal) => {
       clearTimeout(timeout);
       if (forceKillTimer) clearTimeout(forceKillTimer);
@@ -96,30 +177,187 @@ function runJobInIsolatedProcess(jobId: string) {
       const detail = stderr
         .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
         .replace(/(api[_-]?key|access[_-]?token|refresh[_-]?token)\s*[:=]\s*\S+/gi, "$1=[redacted]")
+        .split(/\r?\n/)
+        .filter((line) => !/ExperimentalWarning|node --trace-warnings/i.test(line))
+        .join("\n")
         .trim();
       const message = detail ? `${baseMessage} ${detail.slice(-2_000)}` : baseMessage;
+      const current = getJob(jobId);
+      if (!current || ["cancelled", "interrupted", "completed", "switching"].includes(current.status)) {
+        resolveProcess();
+        return;
+      }
+      if (stopping && current.status === "running") {
+        const resumedAt = new Date().toISOString();
+        updateJob(jobId, {
+          status: "queued",
+          error: undefined,
+          resumePrompt: "The worker stopped intentionally. Continue from the last saved agent/chat/tool/browser state without repeating completed work.",
+          resumeRequestedAt: resumedAt,
+        });
+        updateChat(current.chatId, {
+          runStatus: "running",
+          runUpdatedAt: resumedAt,
+          queueMessage: null,
+          badge: null,
+        }, current.userId);
+        appendRunEvent(current.id, current.chatId, current.userId, "status", {
+          status: "recovering",
+          message: "Worker stopped intentionally; the run will continue when the worker is available again.",
+        });
+        resolveProcess();
+        return;
+      }
+      if (requeueUnexpectedCrash(message)) {
+        resolveProcess();
+        return;
+      }
       markFailed(message);
       reject(new Error(message));
     });
   });
 }
 
+function reconcileSubagentParent(parentJobId: string) {
+ const parent = getJob(parentJobId);
+ if (!parent || parent.subagentFollowUp || !["completed", "error", "cancelled", "interrupted"].includes(parent.status)) return;
+ const children = listChildJobs(parent.id, parent.userId);
+ const asyncChildren = children.filter((child) => child.subagentAutoReview && !child.subagentFollowUp);
+ if (!asyncChildren.length || asyncChildren.some((child) => ["queued", "running", "switching", "waiting_input", "waiting_for_user"].includes(child.status))) return;
+ if (children.some((child) => child.subagentFollowUp)) return;
+
+ const outcomes = asyncChildren.map((child) => {
+ const childChat = getChat(child.chatId, child.userId);
+ const assistant = childChat
+ ? [...childChat.messages].reverse().find((message) => message.role === "assistant")
+ : undefined;
+ const state = child.status === "completed" ? "completed" : child.status;
+ return `- ${child.subagentTitle || "Subagent"} (${state})${child.error ? `: ${child.error}` : assistant?.content ? `: ${assistant.content.slice(0, 2_000)}` : ""}`;
+ }).join("\\n");
+ const reviewPrompt = [
+ "Automatic subagent lifecycle review.",
+ "All asynchronous subagents for the parent run are now terminal. Inspect their outcomes and the current working tree, verify whether their requested work was actually completed, and fix or adjust incomplete, conflicting, or failed work yourself. Do not merely summarize the reports. Preserve successful changes and avoid repeating completed work.",
+ "Child outcomes:",
+ outcomes,
+ ].join("\\n\\n");
+ const messageId = randomUUID();
+ const reviewJob = enqueueJob({
+ chatId: parent.chatId,
+ userId: parent.userId,
+ message: reviewPrompt,
+ messageId,
+ modeId: parent.modeId,
+ modelId: parent.modelId,
+ extendedModelId: parent.extendedModelId,
+ modelParams: parent.modelParams,
+ parentJobId: parent.id,
+ parentChatId: parent.chatId,
+ subagentTitle: "Subagent lifecycle review",
+ subagentDepth: parent.subagentDepth,
+ subagentFollowUp: true,
+ ...(parent.maxRuntimeMs ? { maxRuntimeMs: parent.maxRuntimeMs } : {}),
+ }, {
+ beforeInsert: () => appendMessage(parent.chatId, {
+ id: messageId,
+ role: "user",
+ content: reviewPrompt,
+ }),
+ });
+ updateChat(parent.chatId, {
+ runStatus: "running",
+ runUpdatedAt: new Date().toISOString(),
+ queueMessage: reviewJob.queueMessage || null,
+ badge: null,
+ }, parent.userId);
+ appendRunEvent(parent.id, parent.chatId, parent.userId, "subagent_review_queued", {
+ reviewJobId: reviewJob.id,
+ children: asyncChildren.map((child) => ({ jobId: child.id, status: child.status })),
+ });
+}
+
+function reconcileJobLifecycle(jobId: string) {
+ const job = getJob(jobId);
+ if (!job || !["completed", "error", "cancelled", "interrupted"].includes(job.status)) return;
+ reconcileSubagentParent(job.id);
+ if (job.parentJobId) reconcileSubagentParent(job.parentJobId);
+}
+
+function enqueuePersistedChatFollowUp(chatId: string, userId?: string) {
+  if (getActiveJob(chatId, userId)) return null;
+  const chat = getChat(chatId, userId);
+  const queued = chat?.queuedMessages?.[0];
+  if (!chat || !queued?.text.trim()) return null;
+
+  let job;
+  try {
+    job = enqueueJob({
+      chatId: chat.id,
+      userId: chat.ownerId || userId,
+      message: queued.text.trim(),
+      messageId: queued.id,
+      ...(queued.referenceText ? { referenceText: queued.referenceText } : {}),
+      ...(queued.references?.length
+        ? {
+            references: queued.references.map(({ source: _source, ...reference }) => reference),
+          }
+        : {}),
+      ...(chat.agentId ? { agentId: chat.agentId } : {}),
+      ...(chat.modelId ? { modelId: chat.modelId } : {}),
+      ...(chat.modelParams?.length ? { modelParams: chat.modelParams } : {}),
+      ...(chat.sessionState?.modeId ? { modeId: chat.sessionState.modeId } : {}),
+      ...(chat.incognito ? { incognito: true } : {}),
+    }, {
+      beforeInsert: () => {
+        const appended = appendMessageInTransaction(chat.id, {
+          id: queued.id,
+          role: "user",
+          content: queued.text.trim(),
+          ...(queued.referenceText ? { referenceText: queued.referenceText } : {}),
+          ...(queued.references?.length ? { references: queued.references } : {}),
+        }, chat.ownerId || userId);
+        if (!appended) throw new Error("Chat disappeared while draining its queued message.");
+      },
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "ActiveChatRun") return null;
+    throw error;
+  }
+
+  // Remove only after durable enqueue. If this process dies between enqueue and
+  // removal, messageId idempotency makes the next drain harmless.
+  removeQueuedMessage(chat.id, queued.id, chat.ownerId || userId);
+  if (["completed", "cancelled", "error", "interrupted"].includes(job.status)) {
+    console.log(`[ai-chat-worker] removed stale queued message ${queued.id}; job ${job.id} is already ${job.status}`);
+    return job;
+  }
+  updateChat(chat.id, {
+    runStatus: "running",
+    runUpdatedAt: new Date().toISOString(),
+    queueMessage: job.queueMessage || null,
+    badge: null,
+  }, chat.ownerId || userId);
+  appendRunEvent(job.id, chat.id, chat.ownerId || userId, "status", {
+    status: "queued",
+    message: "Queued follow-up accepted by the server and will run in chat order.",
+  });
+  console.log(`[ai-chat-worker] drained queued chat message ${queued.id} -> ${job.id} (${chat.id})`);
+  return job;
+}
+
+function drainPersistedChatQueues() {
+  for (const chat of listChatsWithQueuedMessages()) {
+    try {
+      enqueuePersistedChatFollowUp(chat.id, chat.ownerId);
+    } catch (error) {
+      console.error(`[ai-chat-worker] could not drain queued message for ${chat.id}`, error);
+    }
+  }
+}
+
 function enqueueDueAutomations() {
   for (const automation of claimDueAutomations()) {
-    const run = startAutomationRun(automation);
     try {
-      const job = enqueueJob({
-        chatId: run.chatId,
-        userId: automation.ownerId,
-        message: automation.prompt,
-        messageId: run.messageId,
-        ...(automation.modeId ? { modeId: automation.modeId } : {}),
-        ...(automation.modelId ? { modelId: automation.modelId } : {}),
-        ...(automation.extendedModelId ? { extendedModelId: automation.extendedModelId } : {}),
-        automationId: automation.id,
-        automationRunId: run.id,
-      });
-      linkAutomationRunJob(run.id, job.id);
+      queueAutomationRun(automation, "scheduled");
     } catch (error) {
       failAutomationClaim(
         automation.id,
@@ -134,12 +372,39 @@ process.on("SIGTERM", stop);
 process.on("SIGINT", stop);
 
 async function main() {
-  recoverStaleJobs();
-  console.log(`[ai-chat-worker] started (concurrency: ${concurrency})`);
+  writeWorkerHeartbeat();
+  const heartbeat = setInterval(() => writeWorkerHeartbeat(), 5_000);
+  heartbeat.unref();
+  for (const expired of reapExpiredJobLeases()) {
+    updateChat(expired.chatId, {
+      runStatus: "running",
+      runUpdatedAt: expired.updatedAt,
+      queueMessage: null,
+      badge: null,
+    }, expired.userId);
+    appendRunEvent(expired.id, expired.chatId, expired.userId, "status", {
+      status: "recovering",
+      message: "Worker lease expired; the run was requeued from its durable checkpoint.",
+    });
+  }
+  const recovered = recoverStaleJobs();
+  for (const job of recovered.interrupted) snapshotInterruptedJob(job);
+  if (recovered.resumed.length) {
+    console.log(`[ai-chat-worker] requeued ${recovered.resumed.length} orphaned run${recovered.resumed.length === 1 ? "" : "s"} after restart`);
+  }
+  if (recovered.interrupted.length) {
+    console.log(`[ai-chat-worker] marked ${recovered.interrupted.length} orphaned run${recovered.interrupted.length === 1 ? "" : "s"} interrupted after restart`);
+  }
+  console.log(`[ai-chat-worker] started (concurrency: ${Number.isFinite(concurrency) ? concurrency : "unlimited"})`);
   const active = new Set<Promise<void>>();
   let lastQuestionExpiry = 0;
+  let lastQueueDrain = 0;
   while (!stopping) {
     enqueueDueAutomations();
+    if (Date.now() - lastQueueDrain > 1_000) {
+      lastQueueDrain = Date.now();
+      drainPersistedChatQueues();
+    }
     if (Date.now() - lastQuestionExpiry > 5_000) {
       lastQuestionExpiry = Date.now();
       for (const expired of expirePendingQuestions()) {
@@ -158,30 +423,42 @@ async function main() {
       }
     }
     while (!stopping && active.size < concurrency) {
-      const job = claimNextJob();
+      const job = claimNextJob({
+        // Keep one slot available for a normal interactive chat while
+        // background automation/MCP work is already occupying the pool.
+        interactiveOnly: Number.isFinite(concurrency) &&
+          concurrency > 1 &&
+          active.size >= concurrency - 1,
+      });
       if (!job) break;
       console.log(`[ai-chat-worker] claimed ${job.id} (${job.chatId})`);
-      const task = runJobInIsolatedProcess(job.id)
+      const task = runJobInIsolatedProcess(job)
         .catch((error) => {
           console.error(`[ai-chat-worker] job ${job.id} failed`, error);
         })
         .finally(() => {
-          finalizeAutomationRunForJob(job.id);
           active.delete(task);
+          const current = getJob(job.id);
+          if (current?.status === "switching") {
+            requeueSwitchingJob(job.id);
+          } else if (current && ["completed", "cancelled", "error", "interrupted"].includes(current.status)) {
+            finalizeAutomationRunForJob(job.id);
+            reconcileJobLifecycle(job.id);
+            // Explicit cancellation pauses the user's queued follow-ups. Normal
+            // completion or failure advances the FIFO so one broken run cannot
+            // strand later change requests.
+            if (current.status !== "cancelled") {
+              enqueuePersistedChatFollowUp(current.chatId, current.userId);
+            }
+          }
         });
       active.add(task);
     }
-    if (active.size >= concurrency) {
-      await Promise.race(active);
-      continue;
-    }
-    if (active.size > 0) {
-      await Promise.race(active);
-      continue;
-    }
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    await waitForSchedulerTick(active, concurrency, pollMs);
   }
   await Promise.all(active);
+  clearInterval(heartbeat);
+  writeWorkerHeartbeat("stopping");
   console.log("[ai-chat-worker] stopped");
 }
 

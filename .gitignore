@@ -23,3 +23,9 @@ __pycache__/
 data/mcp-state/
 data/uploads/
 data/artifacts/
+
+# local secrets / backups
+.deploy.env
+.env.bak*
+*.env.bak*
+config.yaml.bak*

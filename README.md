@@ -286,6 +286,7 @@ settings are:
 | `MCP_ALLOW_REMOTE_ADMIN` | Allow remote administrative operations | `false` |
 | `MCP_ENABLE_REMOTE_SERVERS` | Enable remote MCP servers | `false` |
 | `MCP_ENABLE_OPTIONAL_SERVERS` | Enable optional integrations | `false` |
+| `MCP_LOCAL_SEARCH_URL` | Local SearXNG JSON endpoint used before remote search | Unset |
 
 <p align="center">
   <img src="./public/development.png" alt="Development" width="100%">

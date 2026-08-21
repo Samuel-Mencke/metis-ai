@@ -19,6 +19,13 @@ export type ProviderCapabilities = {
   vision: boolean;
   agent: boolean;
   modelDiscovery: boolean;
+  reasoning?: boolean;
+  fast?: boolean;
+  mcp?: boolean;
+  browser?: boolean;
+  skills?: boolean;
+  subagents?: boolean;
+  usage?: boolean;
 };
 
 export type ProviderModelParameter = {
@@ -31,6 +38,7 @@ export type ProviderModelDefinition = {
   id: string;
   displayName: string;
   description?: string;
+  contextWindow?: number;
   capabilities?: Partial<ProviderCapabilities>;
   tags?: string[];
   parameters?: ReadonlyArray<ProviderModelParameter>;

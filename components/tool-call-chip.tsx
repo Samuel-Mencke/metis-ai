@@ -1,31 +1,49 @@
 "use client";
 
 import {
+  BookOpen,
   Bot,
   Brain,
   Cable,
   CalendarClock,
   ChevronRight,
   Code2,
-  ClipboardList,
   FilePenLine,
-  FileSearch,
+  FolderOpen,
   Globe2,
   ListTodo,
   LoaderCircle,
   ExternalLink,
-  Palette,
+  Search,
   StickyNote,
   Terminal,
   Trash2,
+  Wrench,
 } from "lucide-react";
-import { memo, useEffect, useState } from "react";
+import { memo, useState } from "react";
 import { cn } from "@/lib/utils";
 import { AutomationCard } from "@/components/automation-card";
 import { PlanWorkspaceCard } from "@/components/plan-workspace-card";
+import { planLooksParallelizable } from "@/lib/modes";
 import { CanvasWorkspaceCard } from "@/components/canvas-workspace-card";
-import { ThinkingBlock, formatThinkingDuration } from "@/components/thinking-block";
+
+import {
+  compactFileDiff,
+  enrichToolDisplay,
+  isToolRunning,
+  planFromToolPayload,
+  todosFromToolPayload,
+  toolCallHeadline,
+  toolGroupLabel,
+  truncateToolText,
+  type ToolActionIcon,
+} from "@/lib/tool-call-display";
+import { looksLikeTranscriptDump } from "@/lib/agent-transcript";
+
+const toolCallTriggerClass =
+  "inline-flex max-w-full cursor-pointer items-center gap-1 appearance-none rounded-none border-0 bg-transparent p-0 text-left text-[11px] font-light text-muted-foreground/70 shadow-none ring-0 outline-none transition-colors hover:bg-transparent hover:text-muted-foreground focus-visible:ring-0";
 import { parseAutomationCard } from "@/lib/tool-kind";
+import { ThinkingBlock, formatThinkingDuration } from "@/components/thinking-block";
 
 export type ToolCallData = {
   id: string;
@@ -40,6 +58,7 @@ export type ToolCallData = {
   todos?: Array<{ id?: string; content: string; status?: string }>;
   subagent?: {
     agentId?: string;
+    chatId?: string;
     title?: string;
     mode?: string;
     model?: string;
@@ -53,10 +72,25 @@ type ToolCallProps = ToolCallData & {
   onOpenDiff?: () => void;
   onOpenSubagent?: () => void;
   onOpenWorkspace?: () => void;
-  onBuildPlan?: (plan: { title: string; content: string }) => void;
+  onBuildPlan?: (plan: { title: string; content: string; workspaceLink?: string }, options?: { multiAgent?: boolean }) => void;
   buildDisabled?: boolean;
   onOpenRaw?: () => void;
   autoExpand?: boolean;
+  locked?: boolean;
+  nested?: boolean;
+  hostnames?: Record<string, string>;
+};
+
+const ACTION_ICONS: Record<ToolActionIcon, typeof BookOpen> = {
+  folder: FolderOpen,
+  search: Search,
+  read: BookOpen,
+  edit: FilePenLine,
+  shell: Terminal,
+  mcp: Wrench,
+  browser: Globe2,
+  subagent: Bot,
+  other: Globe2,
 };
 
 function formatStructuredValue(value: unknown, indent = 0): string {
@@ -87,6 +121,7 @@ function formatStructuredValue(value: unknown, indent = 0): string {
 
 function formatToolOutput(value?: string): string {
   if (!value) return "";
+  if (looksLikeTranscriptDump(value)) return "";
   try {
     const parsed: unknown = JSON.parse(value);
     if (
@@ -108,11 +143,13 @@ function formatToolOutput(value?: string): string {
     ) {
       return (parsed as { plan: string }).plan;
     }
-    return typeof parsed === "string" ? parsed : formatStructuredValue(parsed);
+    const formatted = typeof parsed === "string" ? parsed : formatStructuredValue(parsed);
+    if (looksLikeTranscriptDump(formatted)) return "";
+    return truncateToolText(formatted);
   } catch {
     // Tool output is often plain text.
   }
-  return value;
+  return truncateToolText(value);
 }
 
 function displayedDiffStats(diff?: ToolCallData["diff"], input?: string) {
@@ -153,34 +190,6 @@ function displayedDiffStats(diff?: ToolCallData["diff"], input?: string) {
     additions: Math.max(0, afterEnd - start),
     deletions: Math.max(0, beforeEnd - start),
   };
-}
-
-function planInfo(input?: string, result?: string, detail?: string) {
-  const sources = [input, result, detail].filter(Boolean) as string[];
-  for (const source of sources) {
-    try {
-      const parsed = JSON.parse(source) as Record<string, unknown>;
-      const value = parsed.value && typeof parsed.value === "object"
-        ? parsed.value as Record<string, unknown>
-        : {};
-      const content = [parsed.plan, parsed.content, value.plan, value.content]
-        .find((candidate): candidate is string => typeof candidate === "string");
-      if (content !== undefined) {
-        const title = [parsed.title, parsed.name, value.title, value.name]
-          .find((candidate): candidate is string => typeof candidate === "string" && Boolean(candidate.trim()));
-        return {
-          title: title?.trim() || "Plan",
-          content: content.trim(),
-          workspaceLink: typeof parsed.workspaceLink === "string" ? parsed.workspaceLink : undefined,
-        };
-      }
-    } catch {
-      if (source.trim() && !source.trim().startsWith("{")) {
-        return { title: "Plan", content: source.trim() };
-      }
-    }
-  }
-  return null;
 }
 
 function canvasInfo(input?: string, result?: string, detail?: string) {
@@ -233,6 +242,16 @@ function noteInfo(input?: string, result?: string, detail?: string) {
     }
   }
   return null;
+}
+
+function toolReactKey(tool: ToolCallData, index: number): string {
+  const id = tool.id?.trim();
+  if (id) return `tool-${tool.kind || "other"}-${id}`;
+  const fingerprint = [tool.kind, tool.name, tool.path, tool.input, tool.result]
+    .filter(Boolean)
+    .join(":")
+    .slice(0, 160);
+  return `tool-${fingerprint || "unknown"}-${index}`;
 }
 
 function automationInfo(name: string, input?: string, result?: string, detail?: string) {
@@ -343,45 +362,34 @@ export const ToolCallChip = memo(function ToolCallChip({
   buildDisabled,
   onOpenRaw,
   autoExpand = false,
+  locked = false,
+  nested = false,
   todos,
+  hostnames,
 }: ToolCallProps) {
-  const [expanded, setExpanded] = useState(Boolean(autoExpand));
-  const running = ["running", "in_progress", "pending", "started", "executing", "queued"].includes(status.toLowerCase());
-
-  useEffect(() => {
-    if (autoExpand) setExpanded(true);
-  }, [autoExpand]);
-
-  const config = {
-    plan: { label: "Plan", icon: ClipboardList, color: "text-blue-400", border: "border-blue-400/30", bg: "bg-blue-400/10" },
-    edit: { label: "File edit", icon: FilePenLine, color: "text-emerald-400", border: "border-emerald-400/30", bg: "bg-emerald-400/10" },
-    read: { label: "Read", icon: FileSearch, color: "text-slate-300", border: "border-slate-400/30", bg: "bg-slate-400/10" },
-    shell: { label: "Shell", icon: Terminal, color: "text-orange-400", border: "border-orange-400/30", bg: "bg-orange-400/10" },
-    subagent: { label: "Subagent", icon: Bot, color: "text-purple-400", border: "border-purple-400/30", bg: "bg-purple-400/10" },
-    mcp: { label: "MCP", icon: Cable, color: "text-cyan-400", border: "border-cyan-400/30", bg: "bg-cyan-400/10" },
-    canvas: { label: "Canvas", icon: Palette, color: "text-pink-400", border: "border-pink-400/30", bg: "bg-pink-400/10" },
-    note: { label: "Note", icon: StickyNote, color: "text-yellow-300", border: "border-yellow-300/30", bg: "bg-yellow-300/10" },
-    todo: { label: "Tasks", icon: ListTodo, color: "text-blue-400", border: "border-blue-400/30", bg: "bg-blue-400/10" },
-    browser: { label: "Browser", icon: Globe2, color: "text-cyan-400", border: "border-cyan-400/30", bg: "bg-cyan-400/10" },
-    memory: { label: "Memory", icon: Brain, color: "text-violet-400", border: "border-violet-400/30", bg: "bg-violet-400/10" },
-    automation: { label: "Automation", icon: CalendarClock, color: "text-teal-300", border: "border-teal-400/30", bg: "bg-teal-400/10" },
-    other: { label: name.replaceAll("_", " "), icon: Globe2, color: "text-muted-foreground", border: "border-border/50", bg: "bg-muted/20" },
-  }[kind ?? "other"];
-  const deleteTool = /(^|[._:/-])(delete|remove|unlink)(?=[._:/-]|$)/i.test(name);
-  const Icon = deleteTool && kind === "edit" ? Trash2 : config.icon;
-  const toolLabel = deleteTool && kind === "edit" ? "File delete" : config.label;
-  const clickable = kind === "edit" && Boolean(diff || path);
-  const subagentClickable = kind === "subagent";
-  const workspaceClickable = kind === "plan" || kind === "canvas" || kind === "browser";
-  const detailsToggleable = !clickable && !subagentClickable && !workspaceClickable;
-  if (kind === "todo" && todos?.length) {
-    const completed = todos.filter((todo) => todo.status === "completed" || todo.status === "done").length;
+  const [userOpen, setUserOpen] = useState(false);
+  const running = isToolRunning(status);
+  const expanded = locked ? autoExpand : autoExpand || userOpen;
+  const display = enrichToolDisplay({ name, input, result, kind });
+  const todoItems = todos?.length ? todos : display.todos;
+  const resolvedKind = display.kind;
+  const resolvedName = display.name || name;
+  const deleteTool = /(^|[._:/-])(delete|remove|unlink)(?=[._:/-]|$)/i.test(resolvedName);
+  const headline = toolCallHeadline({ name: resolvedName, kind: resolvedKind, input, detail, path, hostnames });
+  const Icon = deleteTool && (resolvedKind === "edit" || headline.icon === "edit")
+    ? Trash2
+    : ACTION_ICONS[headline.icon];
+  const clickable = resolvedKind === "edit" && Boolean(diff || path);
+  const subagentClickable = resolvedKind === "subagent";
+  const workspaceClickable = resolvedKind === "plan" || resolvedKind === "canvas" || resolvedKind === "browser";
+  if (todoItems?.length) {
+    const completed = todoItems.filter((todo) => /^(completed|done)$/i.test(todo.status || "")).length;
     return (
       <div className="my-2 w-full px-1 py-0.5">
         <div className="mb-1.5 flex items-center gap-2 text-xs">
           <ListTodo className="size-3.5 text-blue-400" />
           <span className="font-medium text-foreground/80">Tasks</span>
-          <span className="text-muted-foreground/70">{completed}/{todos.length}</span>
+          <span className="text-muted-foreground/70">{completed}/{todoItems.length}</span>
           {onOpenRaw ? (
             <button
               type="button"
@@ -394,8 +402,8 @@ export const ToolCallChip = memo(function ToolCallChip({
           ) : null}
         </div>
         <div className="space-y-1">
-          {todos.map((todo, index) => {
-            const done = todo.status === "completed" || todo.status === "done";
+          {todoItems.map((todo, index) => {
+            const done = /^(completed|done)$/i.test(todo.status || "");
             return (
               <div key={todo.id ?? `${todo.content}-${index}`} className="flex min-w-0 items-center gap-2 text-xs">
                 <span className={cn("flex size-3.5 shrink-0 items-center justify-center rounded-full border text-[9px]", done ? "border-emerald-400/60 bg-emerald-400/15 text-emerald-400" : "border-border/70 text-muted-foreground/50")}>
@@ -409,7 +417,7 @@ export const ToolCallChip = memo(function ToolCallChip({
       </div>
     );
   }
-  if (kind === "memory") {
+  if (resolvedKind === "memory") {
     const memoryOutput = formatToolOutput(result || detail || input) || "Memory updated";
     return (
       <div className="my-1 flex w-full items-start gap-2 px-1 py-0.5 text-xs">
@@ -421,24 +429,11 @@ export const ToolCallChip = memo(function ToolCallChip({
       </div>
     );
   }
-  const plan = kind === "plan" ? planInfo(input, result, detail) : null;
-  const mcpInfo = kind === "mcp" ? mcpDisplayInfo(name, input, detail) : undefined;
-  const displayName = kind === "plan"
-    ? plan?.title || ""
-    : mcpInfo?.label || path || name.replaceAll("_", " ");
-  const genericInfo = kind !== "plan" && kind !== "mcp"
-    ? toolDisplayInfo(kind, name, input, detail, path)
-    : undefined;
-  const compactName = genericInfo?.label || displayName;
-  const previewText = mcpInfo?.detail
-    || genericInfo?.detail
-    || (kind === "subagent" ? subagent?.prompt : undefined)
-    || (kind === "shell" ? formatToolOutput(result) : undefined);
-  const compactDetail = previewText && !isSameCompactText(compactName, previewText)
-    ? (previewText.length > 120 ? `${previewText.slice(0, 117)}…` : previewText)
-    : undefined;
+  const plan = resolvedKind === "plan" ? planFromToolPayload(input, result, detail) : null;
+  const previewText = headline.preview;
+  const automation = !running ? automationInfo(name, input, result, detail) : null;
   const diffStats = displayedDiffStats(diff, input);
-  if (kind === "plan" && !running && plan) {
+  if (resolvedKind === "plan" && !running && plan) {
     return (
       <PlanWorkspaceCard
         title={plan.title}
@@ -446,11 +441,14 @@ export const ToolCallChip = memo(function ToolCallChip({
         workspaceLink={plan.workspaceLink}
         onOpen={onOpenWorkspace}
         onBuild={() => onBuildPlan?.(plan)}
+        onBuildWithAgents={() => onBuildPlan?.(plan, { multiAgent: true })}
+        showMultiAgent={planLooksParallelizable(plan.content)}
         buildDisabled={buildDisabled}
+        compact
       />
     );
   }
-  const canvas = kind === "canvas" && !running
+  const canvas = resolvedKind === "canvas" && !running
     ? canvasInfo(input, result, detail)
     : null;
   if (canvas) {
@@ -463,7 +461,7 @@ export const ToolCallChip = memo(function ToolCallChip({
       />
     );
   }
-  const note = kind === "note" && !running ? noteInfo(input, result, detail) : null;
+  const note = resolvedKind === "note" && !running ? noteInfo(input, result, detail) : null;
   if (note) {
     return (
       <section className="my-2.5 w-full rounded-lg border border-border/50 border-l-yellow-300/70 bg-muted/20 p-2.5">
@@ -516,7 +514,6 @@ export const ToolCallChip = memo(function ToolCallChip({
       </section>
     );
   }
-  const automation = !running ? automationInfo(name, input, result, detail) : null;
   if (automation) {
     return (
       <AutomationCard
@@ -532,101 +529,112 @@ export const ToolCallChip = memo(function ToolCallChip({
     );
   }
   return (
-    <div>
-      <div
-          role={clickable || subagentClickable || workspaceClickable || detailsToggleable ? "button" : undefined}
-          tabIndex={clickable || subagentClickable || workspaceClickable || detailsToggleable ? 0 : undefined}
-          aria-expanded={detailsToggleable ? expanded : undefined}
+    <div className="my-0.5 w-full min-w-0" style={{ overflowAnchor: "none" }}>
+      <div className="group flex w-full min-w-0 items-center gap-1">
+        <button
+          type="button"
+          className={cn(toolCallTriggerClass, "min-w-0 flex-1")}
           onClick={() => {
-            if (clickable) onOpenDiff?.();
-            else if (subagentClickable) onOpenSubagent?.();
-            else if (workspaceClickable && onOpenWorkspace) onOpenWorkspace();
-            else setExpanded((value) => !value);
-          }}
-          onKeyDown={(event) => {
-            if ((clickable || subagentClickable || workspaceClickable || detailsToggleable) && (event.key === "Enter" || event.key === " ")) {
-              event.preventDefault();
-              if (clickable) onOpenDiff?.();
-              else if (subagentClickable) onOpenSubagent?.();
-              else if (workspaceClickable && onOpenWorkspace) onOpenWorkspace();
-              else setExpanded((value) => !value);
+            if (subagentClickable && onOpenSubagent) {
+              onOpenSubagent();
+              return;
             }
+            if (locked) return;
+            setUserOpen((open) => !open);
           }}
-          className={cn(
-            "my-1 group flex w-full max-w-full cursor-pointer items-center gap-2 px-1 py-0.5 text-left text-xs text-muted-foreground transition-colors",
-            "cursor-pointer hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-          )}
         >
-      {detailsToggleable ? (
-        <ChevronRight className={cn("size-3 shrink-0 text-current opacity-50 transition-[opacity,transform] group-hover:opacity-100", expanded && "rotate-90")} />
-      ) : null}
-      <span className={cn("flex size-4 shrink-0 items-center justify-center", config.color)}>
-        {running ? <LoaderCircle className="size-3 animate-spin" /> : <Icon className="size-3" />}
-      </span>
-      <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          <span className={cn("shrink-0 font-medium", deleteTool ? "text-rose-400" : config.color)}>
-            {toolLabel}
-          </span>
-          {compactName && compactName.toLocaleLowerCase() !== toolLabel.toLocaleLowerCase() ? (
-            <span className="min-w-0 truncate text-foreground/75">{compactName}</span>
+          {running ? (
+            <LoaderCircle className="size-3 shrink-0 animate-spin" />
+          ) : nested ? null : (
+            <ChevronRight className={cn("size-3 shrink-0 transition-transform", expanded && "rotate-90")} />
+          )}
+          <Icon className="size-3 shrink-0 opacity-70" />
+          <span className={cn("truncate", deleteTool && "text-rose-400/80")}>{headline.title}</span>
+          {previewText ? (
+            <span className="hidden truncate text-muted-foreground/45 sm:inline">· {previewText}</span>
           ) : null}
           {kind === "subagent" && subagent?.model ? (
-            <span className="shrink-0 text-[10px] text-muted-foreground/70">{subagent.model}</span>
+            <span className="shrink-0 text-[10px] text-muted-foreground/50">{subagent.model}</span>
           ) : null}
           {kind === "edit" && diffStats ? (
-            <span className="shrink-0 text-[10px] text-muted-foreground/70">
+            <span className="shrink-0 text-[10px] text-muted-foreground/50">
               +{diffStats.additions} -{diffStats.deletions}
             </span>
           ) : null}
-          {compactDetail && !path ? (
-            <span className="min-w-0 truncate text-[11px] text-muted-foreground/65">· {compactDetail}</span>
-          ) : null}
-      </div>
-      {workspaceClickable ? (
-        <button
-          type="button"
-          className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground/60 hover:bg-muted hover:text-foreground"
-          aria-label={`Open ${kind === "canvas" ? "canvas" : kind === "plan" ? "plan" : "browser"} in side panel`}
-          title={`Open ${kind === "canvas" ? "canvas" : kind === "plan" ? "plan" : "browser"}`}
-          onClick={(event) => {
-            event.stopPropagation();
-            onOpenWorkspace?.();
-          }}
-        >
-          <ExternalLink className="size-3" />
         </button>
-      ) : null}
-          {onOpenRaw ? (
-            <button
-              type="button"
-              className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground/50 hover:bg-muted hover:text-foreground"
-              aria-label="Show raw tool information"
-              onClick={(event) => {
-                event.stopPropagation();
-                onOpenRaw();
-              }}
-            >
-              <Code2 className="size-3" />
-            </button>
-          ) : null}
-        </div>
+        {clickable ? (
+          <button
+            type="button"
+            className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground/40 opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
+            aria-label="Open file diff"
+            title="Open file diff"
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenDiff?.();
+            }}
+          >
+            <FilePenLine className="size-3" />
+          </button>
+        ) : null}
+        {subagentClickable ? (
+          <button
+            type="button"
+            className="flex size-5 shrink-0 items-center justify-center rounded text-violet-300/80 opacity-100 transition-opacity hover:bg-muted hover:text-foreground"
+            aria-label="Open subagent"
+            title="Open subagent"
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenSubagent?.();
+            }}
+          >
+            <ExternalLink className="size-3" />
+          </button>
+        ) : null}
+        {workspaceClickable ? (
+          <button
+            type="button"
+            className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground/40 opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
+            aria-label={`Open ${resolvedKind === "canvas" ? "canvas" : resolvedKind === "plan" ? "plan" : "browser"} in side panel`}
+            title={`Open ${resolvedKind === "canvas" ? "canvas" : resolvedKind === "plan" ? "plan" : "browser"}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenWorkspace?.();
+            }}
+          >
+            <ExternalLink className="size-3" />
+          </button>
+        ) : null}
+        {onOpenRaw ? (
+          <button
+            type="button"
+            className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground/40 opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
+            aria-label="Show raw tool information"
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenRaw();
+            }}
+          >
+            <Code2 className="size-3" />
+          </button>
+        ) : null}
+      </div>
       {expanded ? (
-        <div className="my-1 min-w-0 max-w-full max-h-72 space-y-2 overflow-x-hidden overflow-y-auto pl-7 pr-1 text-[11px] leading-4 text-muted-foreground">
+        <div className="my-1 min-w-0 max-h-72 max-w-full space-y-2 overflow-x-hidden overflow-y-auto pl-4 text-[11px] font-light leading-4 text-muted-foreground/80">
           {input ? (
             <section>
-              <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Request</p>
+              <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground/60">Request</p>
               <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono">{formatToolOutput(input)}</pre>
             </section>
           ) : null}
-          {kind === "edit" && diff ? (
+          {kind === "edit" && diff && (diff.before !== undefined || diff.after !== undefined) ? (
             <section>
-              <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground">File diff</p>
-              <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono">{`Before:\n${diff.before || "(empty)"}\n\nAfter:\n${diff.after || "(empty)"}`}</pre>
+              <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground/60">File diff</p>
+              <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono">{compactFileDiff(diff.before, diff.after)}</pre>
             </section>
           ) : null}
           {result || detail ? (
             <section>
-              <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Response</p>
+              <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground/60">Response</p>
               <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono">{formatToolOutput(result || detail)}</pre>
             </section>
           ) : null}
@@ -642,27 +650,34 @@ export function PlanToolCallCard({
   onOpenWorkspace,
   onBuildPlan,
   buildDisabled,
+  hostnames,
 }: {
   tool: ToolCallData;
   onOpenWorkspace?: () => void;
-  onBuildPlan?: (plan: { title: string; content: string }) => void;
+  onBuildPlan?: (plan: { title: string; content: string; workspaceLink?: string }, options?: { multiAgent?: boolean }) => void;
   buildDisabled?: boolean;
+  hostnames?: Record<string, string>;
 }) {
-  const plan = planInfo(tool.input, tool.result, tool.detail);
-  if (tool.status !== "running" && plan) {
+ const plan = planFromToolPayload(tool.input, tool.result, tool.detail);
+  if (!isToolRunning(tool.status) && plan) {
     return (
       <PlanWorkspaceCard
         title={plan.title}
         content={plan.content}
+        workspaceLink={plan.workspaceLink}
         onOpen={onOpenWorkspace}
         onBuild={() => onBuildPlan?.(plan)}
+        onBuildWithAgents={() => onBuildPlan?.(plan, { multiAgent: true })}
+        showMultiAgent={planLooksParallelizable(plan.content)}
         buildDisabled={buildDisabled}
+        compact
       />
     );
   }
   return (
     <ToolCallChip
       {...tool}
+      hostnames={hostnames}
       onOpenWorkspace={onOpenWorkspace}
       onBuildPlan={onBuildPlan}
       buildDisabled={buildDisabled}
@@ -681,7 +696,7 @@ export type ActivityEntry =
   | { type: "tool"; tool: ToolCallData };
 
 export const ToolCallGroup = memo(function ToolCallGroup({
-  tools,
+  tools = [],
   thinking = [],
   activity,
   onOpenDiff,
@@ -692,77 +707,55 @@ export const ToolCallGroup = memo(function ToolCallGroup({
   onOpenRaw,
   includePlans = true,
   autoExpand = false,
+  live = false,
+  hostnames,
 }: {
-  tools?: ToolCallData[];
+  tools: ToolCallData[];
   thinking?: ActivityThinking[];
   activity?: ActivityEntry[];
   onOpenDiff?: (tool: ToolCallData) => void;
   onOpenSubagent?: (tool: ToolCallData) => void;
   onOpenWorkspace?: (tool: ToolCallData) => void;
-  onBuildPlan?: (tool: ToolCallData, plan: { title: string; content: string }) => void;
+  onBuildPlan?: (tool: ToolCallData, plan: { title: string; content: string; workspaceLink?: string }, options?: { multiAgent?: boolean }) => void;
   buildDisabled?: boolean;
   onOpenRaw?: (tool: ToolCallData) => void;
   includePlans?: boolean;
   autoExpand?: boolean;
+  live?: boolean;
+  hostnames?: Record<string, string>;
 }) {
-  const [expanded, setExpanded] = useState(Boolean(autoExpand));
-  useEffect(() => {
-    if (autoExpand) setExpanded(true);
-  }, [autoExpand]);
-
-  const entries: ActivityEntry[] = activity ?? [
-    ...thinking.map((item) => ({ type: "thinking" as const, thinking: item })),
-    ...(tools ?? []).map((tool) => ({ type: "tool" as const, tool })),
-  ];
-  const allTools = entries.filter((entry): entry is { type: "tool"; tool: ToolCallData } => entry.type === "tool").map((entry) => entry.tool);
-  const thinkingItems = entries
-    .filter((entry): entry is { type: "thinking"; thinking: ActivityThinking } => entry.type === "thinking")
-    .map((entry) => entry.thinking);
-  const planTools = includePlans ? allTools.filter((tool) => tool.kind === "plan") : [];
-  const noteTools = allTools.filter((tool) => tool.kind === "note");
-  const automationTools = allTools.filter((tool) => isAutomationCardTool(tool));
-  const regularEntries = entries.filter((entry) => {
-    if (entry.type === "thinking") return Boolean(entry.thinking.text?.trim()) || entry.thinking.done === false;
-    if (entry.tool.kind === "note") return false;
-    if (isAutomationCardTool(entry.tool)) return false;
-    if (!includePlans && entry.tool.kind === "plan") return false;
-    return true;
-  });
-  const regularTools = regularEntries
-    .filter((entry): entry is { type: "tool"; tool: ToolCallData } => entry.type === "tool")
-    .map((entry) => entry.tool);
-  const first = regularTools[0];
-  const firstMcpInfo = first?.kind === "mcp"
-    ? mcpDisplayInfo(first.name, first.input, first.detail)
-    : undefined;
-  const working = regularTools.some((tool) => tool.status === "running")
-    || thinkingItems.some((item) => item.done === false);
-  const thinkingMs = thinkingItems.reduce((sum, item) => sum + (item.durationMs ?? 0), 0);
-  const durationLabel = formatThinkingDuration(thinkingMs);
-  const thinkingDone = thinkingItems.length === 0 || thinkingItems.every((item) => item.done !== false);
-  const thinkLabel = thinkingItems.length === 0
-    ? null
-    : thinkingDone
-      ? (durationLabel ? `Thought for ${durationLabel}` : "Thought")
-      : "Thinking";
-  const toolLabel = regularTools.length === 0
-    ? null
-    : regularTools.length === 1
-      ? (firstMcpInfo?.label || first?.name.replaceAll("_", " ") || "Tool")
-      : `${regularTools.length} tools`;
-  const label = [thinkLabel, toolLabel].filter(Boolean).join(" · ") || "Activity";
-  const useDropdown = thinkingItems.some((item) => item.text?.trim() || item.done === false) || regularTools.length > 1;
-
-  const renderTool = (tool: ToolCallData) => (
+  const [userOpen, setUserOpen] = useState(false);
+  const isTodoTool = (tool: ToolCallData) =>
+    tool.kind === "todo" ||
+    Boolean(tool.todos?.length) ||
+    Boolean(todosFromToolPayload(tool.input, tool.result)?.length);
+  const planTools = includePlans ? tools.filter((tool) => tool.kind === "plan") : [];
+  const noteTools = tools.filter((tool) => tool.kind === "note");
+  const todoTools = tools.filter((tool) => isTodoTool(tool));
+  const regularTools = tools.filter(
+    (tool) =>
+      tool.kind !== "note" &&
+      tool.kind !== "plan" &&
+      !isTodoTool(tool),
+  );
+  const automationTools = tools.filter((tool) => isAutomationCardTool(tool));
+  const regularEntries = regularTools.filter((tool) => !isAutomationCardTool(tool));
+  const groupTitle = toolGroupLabel(regularEntries);
+  const groupOpen = userOpen || Boolean(live) || Boolean(autoExpand);
+  const lastToolId = regularTools[regularTools.length - 1]?.id;
+  const renderTool = (tool: ToolCallData, nested = false) => (
     <ToolCallChip
       {...tool}
+      hostnames={hostnames}
+      nested={nested}
       onOpenDiff={() => onOpenDiff?.(tool)}
       onOpenSubagent={() => onOpenSubagent?.(tool)}
       onOpenWorkspace={() => onOpenWorkspace?.(tool)}
-      onBuildPlan={(plan) => onBuildPlan?.(tool, plan)}
+      onBuildPlan={(plan, options) => onBuildPlan?.(tool, plan, options)}
       buildDisabled={buildDisabled}
       onOpenRaw={() => onOpenRaw?.(tool)}
-      autoExpand={autoExpand}
+      autoExpand={!nested && Boolean(live) && tool.id === lastToolId}
+      locked={!nested && Boolean(live)}
     />
   );
   const renderEntry = (entry: ActivityEntry, index: number) => {
@@ -784,11 +777,14 @@ export const ToolCallGroup = memo(function ToolCallGroup({
   if (regularEntries.length === 0) {
     return (
       <>
-        {planTools.map((tool) => (
-          <div key={tool.id}>{renderTool(tool)}</div>
+        {planTools.map((tool, index) => (
+          <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
         ))}
-        {noteTools.map((tool) => (
-          <div key={tool.id}>{renderTool(tool)}</div>
+        {noteTools.map((tool, index) => (
+          <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
+        ))}
+        {todoTools.map((tool, index) => (
+          <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
         ))}
         {automationTools.map((tool) => (
           <div key={tool.id}>{renderTool(tool)}</div>
@@ -797,39 +793,45 @@ export const ToolCallGroup = memo(function ToolCallGroup({
     );
   }
   return (
-    <>
-      {planTools.map((tool) => (
-        <div key={tool.id}>{renderTool(tool)}</div>
+    <div className="w-full min-w-0" style={{ overflowAnchor: "none" }}>
+      {planTools.map((tool, index) => (
+        <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
       ))}
-      {noteTools.map((tool) => (
-        <div key={tool.id}>{renderTool(tool)}</div>
+      {noteTools.map((tool, index) => (
+        <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
       ))}
-      {automationTools.map((tool) => (
-        <div key={tool.id}>{renderTool(tool)}</div>
+      {todoTools.map((tool, index) => (
+        <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
       ))}
-      {!useDropdown ? renderTool(regularTools[0]) : (
-        <div className="my-2 w-full">
+      {regularEntries.length === 1 ? (
+        <div className="flex flex-col">
+          {regularEntries.map((tool, index) => (
+            <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
+          ))}
+        </div>
+      ) : (
+        <div className="my-1 w-full">
           <button
             type="button"
-            aria-expanded={expanded}
-            onClick={() => setExpanded((value) => !value)}
-            className="group flex w-full cursor-pointer items-center gap-2 px-1 py-0.5 text-left text-xs text-muted-foreground transition-colors hover:text-foreground"
+            className={toolCallTriggerClass}
+            onClick={() => setUserOpen((open) => !open)}
           >
-            <ChevronRight className={cn("size-3 shrink-0 text-current opacity-50 transition-[opacity,transform] group-hover:opacity-100", expanded && "rotate-90")} />
-            <span className="truncate text-foreground/75">{label}</span>
-            {working ? (
-              <span className="ml-auto flex items-center" aria-label="Working">
-                <LoaderCircle className="size-3.5 animate-spin text-muted-foreground/80" />
-              </span>
-            ) : null}
+            {regularEntries.some((tool) => isToolRunning(tool.status)) ? (
+              <LoaderCircle className="size-3 shrink-0 animate-spin" />
+            ) : (
+              <ChevronRight className={cn("size-3 shrink-0 transition-transform", groupOpen && "rotate-90")} />
+            )}
+            <span className="truncate">{groupTitle}</span>
           </button>
-          {expanded ? (
-            <div className="mt-1 space-y-2 pl-3">
-              {regularEntries.map((entry, index) => renderEntry(entry, index))}
+          {groupOpen ? (
+            <div className="mt-0.5 space-y-0 pl-4">
+              {regularEntries.map((tool, index) => (
+                <div key={toolReactKey(tool, index)}>{renderTool(tool, true)}</div>
+              ))}
             </div>
           ) : null}
         </div>
       )}
-    </>
+    </div>
   );
 });

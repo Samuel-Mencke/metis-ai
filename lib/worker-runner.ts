@@ -5,7 +5,6 @@ import {
   createChat,
   getChat,
   getGlobalModelSettings,
-  listMemories,
   updateChat,
   upsertMessage,
   type ToolPart,
@@ -14,6 +13,7 @@ import {
 import { getUserAgentCwd, getMcpServers } from "@/lib/mcp";
 import { resolveAgentPath } from "@/lib/revert";
 import { appendRunEvent, enqueueJob, getJob, touchJob, updateJob } from "@/lib/db-jobs";
+import { logError } from "@/lib/error-logs";
 import { isModelAllowed } from "@/lib/model-access";
 import { buildAttachmentPrompt } from "@/lib/uploads";
 import type { AgentJob } from "@/lib/jobs";
@@ -22,11 +22,27 @@ import {
   getProviderConnectionSecret,
 } from "@/lib/provider-connections";
 import { parseModelKey } from "@/lib/providers/types";
+import { providerModelsForConnection } from "@/lib/providers/discovery";
+import { routeModel, type RoutingModel } from "@/lib/model-routing";
+import { routeTask } from "@/lib/agent-efficiency";
+import type { Chat } from "@/lib/store";
 import { runAlternativeProviderJob } from "@/lib/providers/runner";
+import { appendAgentTrace } from "@/lib/agent-trace";
+import { parseAgentTranscript, stripTranscriptDump } from "@/lib/agent-transcript";
+import { snapshotInterruptedJob } from "@/lib/recovery";
 import { createSnapshot } from "@/lib/shared-context";
 import { allModes, modeById } from "@/lib/modes";
-import type { AgentMode, MessagePart, ToolPermissionCategory } from "@/lib/store";
+import { featureFlags } from "@/lib/feature-flags";
+import type { AgentMode, MessagePart } from "@/lib/store";
 import { compress, type CompressionMode } from "@/lib/compression";
+import { compactMessagePartsForPersistence, persistToolsForMessage } from "@/lib/tool-persistence";
+import { subagentMetadataFromTool } from "@/lib/subagent-tool";
+import { METIS_SHARED_AGENT_CONTROL, toolContractPrompt } from "@/lib/agent-control";
+import { classifyToolKind, innerToolName, todosFromToolPayload } from "@/lib/tool-call-display";
+import { canRecoverCursorSend, cursorSessionFailureKind } from "@/lib/cursor-session-recovery";
+import { providerNativeParams } from "@/lib/model-params";
+import { uncensoredInstructions } from "@/lib/uncensored";
+import { recordSignal, type TaskCategory } from "@/lib/model-telemetry";
 import { classifyTool, resolveMcpToolName, toolDetailFromArgs } from "@/lib/tool-kind";
 import { metisAgentIdentity } from "@/lib/agent-identity";
 import { sanitizeModelParams } from "@/lib/feature-flags";
@@ -35,23 +51,22 @@ const AGENT_INIT_TIMEOUT_MS = 90_000;
 const AGENT_INACTIVITY_TIMEOUT_MS = 5 * 60_000;
 const AGENT_WAIT_TIMEOUT_MS = 90_000;
 
-function nativeToolsForMode(mode: AgentMode): string[] | undefined {
-  if (mode.id === "agent") return undefined;
-  const tools = new Set<string>(["mcp"]);
-  const categoryTools: Record<ToolPermissionCategory, string[]> = {
-    read: ["read", "grep", "glob", "ls", "readLints", "readTodos"],
-    write: ["edit", "delete", "applyAgentDiff"],
-    terminal: ["shell"],
-    browser: ["webSearch", "webFetch"],
-    memory: ["mcp"],
-    remote: ["mcp"],
-    plan: ["updateTodos", "readTodos"],
-    subagent: ["task"],
-  };
-  for (const category of mode.allowedCategories) {
-    for (const tool of categoryTools[category]) tools.add(tool);
-  }
-  return [...tools];
+function telemetryCategory(message: string): TaskCategory {
+  const kind = routeTask(message).kind;
+  if (kind === "edit") return "coding";
+  if (kind === "debug") return "debugging";
+  if (kind === "research") return "research";
+  if (kind === "lookup") return "chat";
+  if (kind === "large") return "long-context";
+  return "chat";
+}
+
+function nativeToolsForMode(mode: AgentMode, options?: { browserEnabled?: boolean }): string[] | undefined {
+  // Provider CLIs must use the Metis MCP surface exclusively. Mode/category
+  // filtering is enforced by the gateway's MCP_MODE_POLICY.
+  void mode;
+  void options;
+  return ["mcp"];
 }
 
 const PERSISTED_CONTEXT_MAX_CHARS = 120_000;
@@ -285,77 +300,33 @@ function extractSubagent(
   args: unknown,
   result: unknown,
 ): ToolPart["subagent"] | undefined {
-  if (classifyTool(name) !== "subagent") return undefined;
-  const input = asRecord(args);
-  const output = asRecord(result);
-  const resultValue = asRecord(output.value);
-  const steps = Array.isArray(resultValue.conversationSteps)
-    ? resultValue.conversationSteps
-    : Array.isArray(resultValue.messages)
-      ? resultValue.messages
-      : [];
-  const nestedTools = steps
-    .map((step) => asRecord(step))
-    .flatMap((item) => {
-      const candidates = Array.isArray(item.tools)
-        ? item.tools
-        : item.toolCall || item.tool_call
-          ? [item.toolCall || item.tool_call]
-          : item.tool
-            ? [item.tool]
-            : [];
-      return candidates.map((candidate) => asRecord(candidate));
-    })
-    .map((item, index) => {
-      const name = typeof item.name === "string" ? item.name : typeof item.toolName === "string" ? item.toolName : "tool";
-      return {
-        id: typeof item.id === "string" ? item.id : `${name}-${index}`,
-        name,
-        status: typeof item.status === "string" ? item.status : "completed",
-        kind: classifyTool(name),
-        ...(item.input !== undefined ? { input: JSON.stringify(item.input) } : {}),
-        ...(item.result !== undefined ? { result: JSON.stringify(item.result) } : {}),
-      } satisfies ToolPart;
-    });
-  let thinking = "";
-  const messages = steps
-    .map((step) => {
-      const item = asRecord(step);
-      const thinkingText = asText(item.thinkingMessage ?? item.thinking ?? item.reasoning);
-      if (thinkingText) thinking += `${thinking ? "\n\n" : ""}${thinkingText}`;
-      const role = typeof item.role === "string"
-        ? item.role
-        : typeof item.type === "string"
-          ? item.type
-          : "assistant";
-      const text = asText(item.text ?? item.content ?? item.message ?? item.response ?? item.answer ?? item.result);
-      return text ? { role, text } : null;
-    })
-    .filter((message): message is { role: string; text: string } => Boolean(message));
-  const agentId = [input.agentId, resultValue.agentId].find(
-    (value): value is string => typeof value === "string" && value.length > 0,
-  );
-  const title = [input.description, input.title].find(
-    (value): value is string => typeof value === "string" && value.length > 0,
-  );
-  const prompt = typeof input.prompt === "string" ? input.prompt : undefined;
-  const mode = typeof input.mode === "string" ? input.mode : undefined;
-  const model = typeof input.model === "string" ? input.model : undefined;
-  if (!agentId && !title && !prompt && !mode && !model && !messages.length) return undefined;
-  return {
-    agentId,
-    title,
-    mode,
-    model,
-    prompt,
-    ...(thinking ? { thinking } : {}),
-    ...(messages.length ? { messages } : {}),
-    ...(nestedTools.length ? { tools: nestedTools } : {}),
-  };
+  return subagentMetadataFromTool(name, args, result, classifyTool(name));
 }
 
 function normalizeToolId(value: string) {
   return value.trim().replace(/\s+/g, "");
+}
+
+function toolEventValue(update: Record<string, unknown>, ...keys: string[]) {
+  for (const key of keys) {
+    const value = update[key];
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return undefined;
+}
+
+function normalizedToolDelta(update: Record<string, unknown>) {
+  const nested = asRecord(update.toolCall) || asRecord(update.tool_call) || {};
+  return {
+    callId: toolEventValue(update, "callId", "call_id", "toolCallId", "tool_call_id") ??
+      toolEventValue(nested, "callId", "call_id", "toolCallId", "tool_call_id"),
+    name: toolEventValue(update, "name", "toolName", "tool_name", "tool") ??
+      toolEventValue(nested, "name", "toolName", "tool_name", "tool"),
+    args: toolEventValue(update, "args", "input", "arguments", "toolInput", "tool_input") ??
+      toolEventValue(nested, "args", "input", "arguments", "toolInput", "tool_input"),
+    result: toolEventValue(update, "result", "output", "content", "toolResult", "tool_result") ??
+      toolEventValue(nested, "result", "output", "content", "toolResult", "tool_result"),
+  };
 }
 
 function isFinishedToolStatus(value: string) {
@@ -535,15 +506,103 @@ function markJobError(job: AgentJob, message: string) {
     badge: "red",
   }, job.userId);
   appendRunEvent(job.id, job.chatId, job.userId, "error", { message });
+  appendAgentTrace(job, "error", { message });
+}
+
+/**
+ * Resolve the "auto" model key for a job. Gathers candidates from every
+ * enabled provider connection (any provider kind), pulls passive telemetry
+ * when the model_signals table exists, and delegates the actual choice to the
+ * pure `routeModel` function in lib/model-routing.ts.
+ */
+async function resolveAutoModel(job: AgentJob, chat: Chat): Promise<string | null> {
+  if (!job.userId) return null;
+  try {
+    const { listProviderConnections } = await import("@/lib/provider-connections");
+    const connections = listProviderConnections(job.userId, false);
+    const candidates: RoutingModel[] = [];
+    for (const connection of connections) {
+      if (connection.providerKey === "cursor") continue;
+      try {
+        for (const model of providerModelsForConnection(connection)) {
+          candidates.push({
+            key: model.key,
+            id: model.id,
+            displayName: model.displayName,
+            contextWindow: model.contextWindow,
+            tags: "tags" in model && Array.isArray(model.tags) ? model.tags : undefined,
+          });
+        }
+      } catch {
+        // A broken connection should not break routing for the others.
+      }
+    }
+    if (!candidates.length) return null;
+
+    // Approximate the working context: current prompt + recent history.
+    const historyTokens = Math.ceil(
+      chat.messages.slice(-20).reduce((total: number, message: { content: string }) => total + message.content.length, 0) / 4,
+    );
+    const promptTokens = Math.ceil((job.message || "").length / 4);
+    const description = [
+      job.message || "",
+      job.referenceText ? `context: ${job.referenceText.slice(0, 400)}` : "",
+    ].filter(Boolean).join("\n");
+
+    let signals;
+    try {
+      const { getAllModelPerformance } = await import("@/lib/model-telemetry");
+      const known = new Set(candidates.map((model) => model.key));
+      const summaries = getAllModelPerformance({ sinceDays: 30 })
+        .filter((summary) => known.has(summary.modelId));
+      if (summaries.length) {
+        signals = {
+          byModel: Object.fromEntries(summaries.map((summary) => [summary.modelId, {
+            compositeScore: summary.compositeScore,
+            successRate: summary.successRate,
+            avgTimeToFirstTokenMs: summary.avgTimeToFirstTokenMs,
+            avgLatencyMs: summary.avgLatencyMs,
+            totalRuns: summary.totalRuns,
+          }])),
+        };
+      }
+    } catch {
+      // model_signals is created lazily; absence is a normal first-run state.
+    }
+
+    const routed = routeModel(description, candidates, signals) ||
+      routeModel(description + "\n", candidates) ||
+      candidates[0].key;
+    return isModelAllowed(job.userId, routed) ? routed : candidates.find((model) => isModelAllowed(job.userId, model.key))?.key || null;
+  } catch {
+    return null;
+  }
 }
 
 export async function runQueuedJob(job: AgentJob) {
+  const runStartedAt = Date.now();
   const chat = getChat(job.chatId, job.userId);
   if (!chat) {
     markJobError(job, "Chat not found or access denied.");
     return;
   }
-  const requestedModelId = job.modelId || chat.modelId || "";
+  let requestedModelId = job.modelId || chat.modelId || "";
+  // Context-aware auto routing: "auto" resolves to a concrete model based on
+  // the task shape (simple → fast, complex/code → high tier, big context →
+  // largest window) across ALL enabled provider connections, not just one
+  // provider kind. Passive model_signals telemetry nudges the choice when
+  // available. Falls back to the first allowed model when routing cannot
+  // decide.
+  if (requestedModelId === "auto" && job.userId) {
+    const routed = await resolveAutoModel(job, chat);
+    if (routed) {
+      requestedModelId = routed;
+      appendAgentTrace(job, "info", { message: `Auto routing selected ${routed}.` });
+    } else {
+      markJobError(job, "No model is available for automatic routing. Select a model first.");
+      return;
+    }
+  }
   if (!requestedModelId) {
     markJobError(job, "No model is selected for this chat.");
     return;
@@ -572,6 +631,7 @@ export async function runQueuedJob(job: AgentJob) {
   const assistantMessageId = crypto.randomUUID();
   appendMessage(job.chatId, { id: assistantMessageId, role: "assistant", content: "" });
   const emit = (event: string, data: unknown) => {
+    appendAgentTrace(job, event, data);
     const result = appendRunEvent(job.id, job.chatId, job.userId, event, data);
     const needsAttention = event === "question" || event === "error";
     if (needsAttention) {
@@ -610,8 +670,18 @@ export async function runQueuedJob(job: AgentJob) {
   const compressionMode: CompressionMode = compressionSettings?.mode || "stacked";
   const compressContext = (value: string, enabled: boolean) =>
     compressionEnabled && enabled ? compress(value, compressionMode).text : value;
+  const flags = featureFlags(globalModelSettings);
   const activeMode = modeById(job.modeId || chat.sessionState?.modeId, globalModelSettings.customModes || []);
-  const nativeTools = nativeToolsForMode(activeMode);
+  const modeCategories = flags.browser
+    ? activeMode.allowedCategories
+    : activeMode.allowedCategories.filter((category) => category !== "browser");
+  const nativeTools = nativeToolsForMode({ ...activeMode, allowedCategories: modeCategories }, { browserEnabled: flags.browser });
+  const runToolContract = toolContractPrompt({
+    modeId: activeMode.id,
+    provider: "cursor-agent",
+    toolNames: nativeTools,
+    nativeTools: nativeTools === undefined,
+  });
   const availableModes = allModes(globalModelSettings.customModes || [])
     .map((mode) => `${mode.id} (${mode.name})`)
     .join(", ");
@@ -623,9 +693,14 @@ export async function runQueuedJob(job: AgentJob) {
     automation: Boolean(job.automationId),
     modeId: activeMode.id,
     modePolicy: JSON.stringify({
-      allowedCategories: activeMode.allowedCategories,
+      allowedCategories: modeCategories,
       toolOverrides: activeMode.toolOverrides || {},
     }),
+    workspaceId: job.chatId,
+    attemptId: job.runId || job.id,
+    policyVersion: `mode:${activeMode.id}:v1`,
+    allowedCategories: modeCategories,
+    toolOverrides: activeMode.toolOverrides || {},
     compressionEnabled,
     compressionMode,
     compressionToolResults: Boolean(compressionSettings?.compressToolResults ?? true),
@@ -642,7 +717,9 @@ export async function runQueuedJob(job: AgentJob) {
             name,
             {
               description: `Delegate work to a ${name} subagent using the configured standard model.`,
-              prompt: `Use the configured standard subagent model (${configuredSubagentModel}) for this task.`,
+              prompt: activeMode.id === "plan"
+                ? `Read-only research/planning subagent. Inspect code and gather facts. Do not write files, do not call create_plan, and return a concise finding for the parent planner. Use the configured standard subagent model (${configuredSubagentModel}).`
+                : `Use the configured standard subagent model (${configuredSubagentModel}) for this task.`,
               model: {
                 id: configuredSubagentModel,
                 ...(configuredSubagentModelParams.length
@@ -659,7 +736,20 @@ export async function runQueuedJob(job: AgentJob) {
       : "Subagent model policy: no standard subagent model is configured. Choose the subagent model yourself.";
   const heartbeat = setInterval(() => {
     touchJob(job.id);
+    const active = tools.filter((tool) => isActiveToolStatus(tool.status));
+    appendAgentTrace(job, "heartbeat", {
+      textChars: text.length,
+      toolCount: tools.length,
+      activeTools: active.map((tool) => ({ id: tool.id, name: tool.name, status: tool.status })),
+    });
   }, 30_000);
+  appendAgentTrace(job, "start", {
+    modelId: job.modelId,
+    modeId: activeMode.id,
+    cwd: agentCwd,
+    resume: Boolean(job.resumePrompt),
+    tracePath: `${job.createdAt.slice(0, 10)}/${job.id}.jsonl`,
+  });
   let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
   let checkpointDirty = false;
   const checkpointNow = () => {
@@ -667,8 +757,8 @@ export async function runQueuedJob(job: AgentJob) {
       id: assistantMessageId,
       role: "assistant",
       content: text,
-      ...(tools.length ? { tools: [...tools] } : {}),
-      ...(parts.length ? { parts: [...parts] } : {}),
+      ...(tools.length ? { tools: persistToolsForMessage(job.chatId, assistantMessageId, tools) } : {}),
+      ...(parts.length ? { parts: compactMessagePartsForPersistence(parts) } : {}),
       ...(providedAttachments.length ? { attachments: [...providedAttachments] } : {}),
     });
     checkpointDirty = false;
@@ -737,17 +827,74 @@ export async function runQueuedJob(job: AgentJob) {
     );
     const model = {
       id: requestedModelId,
-      ...(modelParams?.length ? { params: modelParams } : {}),
+      ...(modelParams?.length
+        ? { params: providerNativeParams(modelParams) }
+        : {}),
     };
     agent = job.agentId || chat.agentId
-      ? await withTimeout(Agent.resume(job.agentId || chat.agentId!, {
-          apiKey,
-          model,
-          local: { cwd: agentCwd, settingSources: ["project"] },
-          ...(nativeTools ? { tools: nativeTools } : {}),
-          mcpServers: getMcpServers(mcpContext),
-          ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
-        }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be resumed within 90 seconds.")
+      ? await (async () => {
+          try {
+            return await withTimeout(Agent.resume(job.agentId || chat.agentId!, {
+              apiKey,
+              model,
+              local: { cwd: agentCwd, settingSources: ["project"] },
+              ...(nativeTools ? { tools: nativeTools } : {}),
+              mcpServers: getMcpServers(mcpContext),
+              ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
+            }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be resumed within 90 seconds.");
+          } catch (resumeError) {
+            const sessionFailure = cursorSessionFailureKind(resumeError);
+            if (sessionFailure === "missing") {
+              // Stale agent id (server restart, expired session): fall back to a
+              // fresh agent instead of failing the whole job.
+              appendRunEvent(job.id, job.chatId, job.userId, "info", {
+                message: "Previous agent session was not found; started a new session.",
+              });
+              updateChat(job.chatId, { agentId: null }, job.userId);
+              return await withTimeout(Agent.create({
+                apiKey,
+                model,
+                local: { cwd: agentCwd, settingSources: ["project"] },
+                ...(nativeTools ? { tools: nativeTools } : {}),
+                mcpServers: getMcpServers(mcpContext),
+                ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
+              }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be created within 90 seconds.");
+            }
+            if (sessionFailure === "active_run") {
+              // The persisted agent still has a live/locked run (crashed worker,
+              // concurrent send). Retry resume once after a short grace period,
+              // then start a fresh session instead of failing the job.
+              appendRunEvent(job.id, job.chatId, job.userId, "info", {
+                message: "Agent session still had an active run; retrying once before starting a new session.",
+              });
+              await new Promise((resolve) => setTimeout(resolve, 3_000));
+              try {
+                return await withTimeout(Agent.resume(job.agentId || chat.agentId!, {
+                  apiKey,
+                  model,
+                  local: { cwd: agentCwd, settingSources: ["project"] },
+                  ...(nativeTools ? { tools: nativeTools } : {}),
+                  mcpServers: getMcpServers(mcpContext),
+                  ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
+                }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be resumed within 90 seconds.");
+              } catch (retryError) {
+                appendRunEvent(job.id, job.chatId, job.userId, "info", {
+                  message: "Active run did not clear; starting a new agent session.",
+                });
+                updateChat(job.chatId, { agentId: null }, job.userId);
+                return await withTimeout(Agent.create({
+                  apiKey,
+                  model,
+                  local: { cwd: agentCwd, settingSources: ["project"] },
+                  ...(nativeTools ? { tools: nativeTools } : {}),
+                  mcpServers: getMcpServers(mcpContext),
+                  ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
+                }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be created within 90 seconds.");
+              }
+            }
+            throw resumeError;
+          }
+        })()
       : await withTimeout(Agent.create({
           apiKey,
           model,
@@ -761,10 +908,17 @@ export async function runQueuedJob(job: AgentJob) {
     updateChat(job.chatId, { agentId: agent.agentId }, job.userId);
     const prompt = [
       metisAgentIdentity(),
+      ...((job.modelParams?.length ? job.modelParams : chat.modelParams)
+        ?.some((param) => param.id === "uncensored" && param.value === "true")
+        ? [uncensoredInstructions()]
+        : []),
       `Current agent mode: ${activeMode.name}\n${activeMode.instructions}`,
+      "Working style: precise, technically fluent, proactive. Act with your tools instead of describing steps. Reply in the user's language — German in, German out. No filler phrases. On clear orders decide and act yourself; ask back only when genuinely ambiguous or destructive.",
+      runToolContract,
+      "Browser: for login, forms, captchas, checkouts, and long page tasks ALWAYS use the persistent Metis in-app browser (browser_navigate, browser_form_state, browser_batch, browser_wait_for, browser_fill_form, browser_snapshot). Inspect the current state first; navigate only when the URL actually needs to change, and never reload or re-login merely to inspect progress. browser_form_state and browser_extract_text include embedded frames and return frame hints/selectors. Batch repetitive actions and wait on DOM conditions instead of sleeps. Do not use shell, curl, Playwright, or Cursor webFetch as a substitute when a real page is needed. webSearch/webFetch are only for simple lookup. Request browser_screenshot only when visual reasoning is genuinely required.",
       `Available mode IDs for request_mode_change: ${availableModes || "agent (Agent), plan (Plan), ask (Ask)"}. Use the exact ID before the parentheses; never invent values such as "Code". For implementation or file changes, request modeId "agent".`,
       "Response recommendation rule: when the result is incomplete, uses demo/stub endpoints, or still lacks real integrations, clearly say what is and is not implemented, then always provide 1–3 concise, concrete next-step recommendations in exactly one ```suggestions fenced block so the UI can render clickable actions. End by asking whether to implement the recommended next step. Do not present demo functionality as production-ready.",
-      ...(activeMode.id !== "agent"
+      ...(activeMode.id !== "agent" && !job.automationId
         ? [
             "Mode transition rule: if the user's request requires a tool category this mode does not allow, you MUST call the request_mode_change MCP tool and ask for confirmation. Do not merely tell the user to switch modes manually. After confirmation, continue the original request in this same run using the newly allowed MCP tools (for example write_file); do not wait for a second user message.",
           ]
@@ -773,12 +927,15 @@ export async function runQueuedJob(job: AgentJob) {
         ? ["Incognito mode: do not use or mention personal context, memories, chat metadata, notes, or workspaces. Incognito-only tool restrictions are enforced server-side."]
         : job.automationId
           ? [
-              "Automation run: execute autonomously without waiting for the user. Never call ask_user, request_mode_change, wait, subagent_status, or any confirmation/user-approval tool. If information is missing, make a safe reasonable assumption and continue; if the task cannot be completed safely, explain that in the final response.",
+              "Automation run: execute autonomously without waiting for the user. All tools allowed by the configured mode remain available, including the MCP gateway and child MCPs, remote tools, subagents, and the persistent Metis in-app browser. Use them normally whenever they help complete the task. Never call ask_user, request_mode_change, wait, subagent_status, or any confirmation/user-approval tool. If information is missing, make a safe reasonable assumption and continue; if the task cannot be completed safely, explain that in the final response.",
+              "Automation browser state is durable for this run and seeded from the automation context chat. Prefer the shared Metis browser tools for real web interaction so login/session state and live browser visibility remain consistent. Do not launch a detached browser through shell or Playwright.",
+              "Automation persistence: treat the current chat as this run's durable transcript. Keep tool/Todo progress current and checkpoint useful intermediate work; long runs may be resumed after worker or process interruptions without repeating completed actions.",
+              job.automationContext ? `Automation-level context from the source chat and prior completed runs. Use it as durable background context, but keep this run's transcript separate:\n${job.automationContext}` : "",
             ]
         : [
-            `Memories:\n${listMemories(job.userId).map((memory) => `- ${memory.content}`).join("\n") || "(none yet)"}`,
+                  "Personal context: the context_search / context_profile / context_remember MCP tools access the owner's shared context hub (devices, services, projects, preferences). When a task touches the owner's infrastructure, projects, or devices, consult them FIRST instead of asking the user. Do not dump contents unprompted; cite only what the query returned. Store newly learned durable preferences (how the owner wants things) via context_remember. list_memories/add_memory manage lightweight in-app memories the same way.",
             `Current chat keywords: ${chat.keywords?.join(", ") || "(none)"}`,
-            `Existing workspaces:\n${chat.workspaces?.map((item) => `[${item.type}] ${item.name} (link: workspace://${item.type}/${item.id})\n${item.content}`).join("\n\n") || "(none)"}`,
+            `Existing workspaces:\n${chat.workspaces?.map((item) => `[${item.type}] ${item.name} (workspace://${item.type}/${item.id})`).join("\n") || "(none)"}`,
           ]),
       ...(job.incognito || chat.incognito ? [] : [
       "When referring to an existing or newly created plan/canvas, include its exact Markdown link using workspace://plan/<id> or workspace://canvas/<id>.",
@@ -786,15 +943,18 @@ export async function runQueuedJob(job: AgentJob) {
       "Use list_notes or search_notes when you need note IDs before linking them.",
       "To create an automation, call create_automation with name, prompt, and schedule (kind: once | interval | days | monthly). Recurring minute schedules must be at least 60. Use list_automations, update_automation, pause_automation, resume_automation, and delete_automation for existing ones. Do not claim an automation was created without a completed tool call. When referring to an automation, include its exact Markdown link using automation://<id>, for example [Name](automation://id).",
       "When you use browser results, selected references, or other verifiable web sources, cite the exact URL immediately after the sentence it supports using the format [Source: Website title](URL). At the end, put every source used in exactly one fenced block starting with ```sources, with one Markdown link per line. Never invent URLs; if no verifiable source is available, do not create a sources block.",
-      "To create a plan or canvas, call the MCP tools create_plan or create_canvas with title and content. Use an empty content string for a blank workspace, and do not claim creation without a completed tool call.",
+      "Workspace rule: create or edit a plan/canvas only when the active mode and user request allow it. Never claim a workspace exists until the tool result or persisted workspace confirms it.",
       "For memories, use list_memories to retrieve the current user's entries, add_memory only for useful durable facts or preferences, and edit_memory with the exact memory id to change an existing entry. Never claim a memory was changed without a completed tool call.",
       "To edit an existing workspace, call edit_plan or edit_canvas with its exact id and the changed title/content. Do not create a duplicate when the user asked to edit.",
       "When the chat topic is clear or changes, silently call update_chat_keywords with 3-8 concise, non-sensitive search terms using mode=add. Do not mention this metadata maintenance in the main response. Use search_chats when you need to locate an earlier chat by title, keyword, or message content.",
-      "Use delete_memory, delete_plan, and delete_canvas only for explicit user requests. Before destructive or external actions, use request_confirmation and continue only when the user chooses Confirm.",
+      job.automationId
+        ? "Unattended automation approval rule: request_confirmation is unavailable. Follow the automation prompt and existing permissions; do not stop merely to request interactive approval."
+        : "Use delete_memory, delete_plan, and delete_canvas only for explicit user requests. Before destructive or external actions, use request_confirmation and continue only when the user chooses Confirm.",
       "Use list_workspaces before editing or deleting a workspace, and use git_status/git_diff to inspect project changes. Browser helpers include browser_extract_text, browser_fill_form, and browser_download.",
       ]),
       "You can create a follow-up chat by outputting exactly one or more fenced blocks in this format:\n```chat title=\"Short title\"\nMessage to send in the new chat\n```\nThe block creates a new chat for the current user, sends the message there, and starts an agent run. Do not claim a chat was created without outputting this block.",
       "When useful, offer up to five concise follow-up questions at the end using exactly this UI-only format. Use `display text => prompt to insert` when the visible label should differ from the inserted prompt:\n```suggestions\nExplain this in more detail => Explain the database synchronization in more detail, with a concrete example.\nShow me an example\n```\nDo not mention or explain this format outside the block.",
+      METIS_SHARED_AGENT_CONTROL,
       subagentModelInstruction,
       `Your private AI workspace is:\n${agentCwd}\nUse this directory as the working directory for project files and commands. Do not use another user's workspace.`,
       ...(job.incognito || chat.incognito
@@ -829,16 +989,28 @@ export async function runQueuedJob(job: AgentJob) {
     ].filter(Boolean).join("\n\n");
     let receivedTextDelta = false;
     let cancellationRequested = false;
+    let modelSwitchTarget: { modelId: string; modelParams?: Array<{ id: string; value: string }> } | null = null;
     let activeRun: { cancel: () => Promise<unknown> } | null = null;
     let run: Awaited<ReturnType<typeof agent.send>>;
     let sendTimeout: ReturnType<typeof setTimeout> | undefined;
     let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
-    let inactivityTimedOut = false;
     const resetInactivityTimer = () => {
       if (inactivityTimer) clearTimeout(inactivityTimer);
       inactivityTimer = setTimeout(() => {
-        inactivityTimedOut = true;
-        void activeRun?.cancel().catch(() => undefined);
+        const active = tools.filter((tool) => isActiveToolStatus(tool.status));
+        const payload = {
+          reason: active.length ? "active_tool" : "stream_gap",
+          activeTools: active.map((tool) => ({ id: tool.id, name: tool.name, status: tool.status })),
+          textChars: text.length,
+        };
+        appendAgentTrace(job, "inactivity", payload);
+        emit("status", {
+          status: "running",
+          message: active.length
+            ? `Waiting on ${active.map((tool) => tool.name).join(", ")}.`
+            : "No new tokens for 5 minutes; continuing instead of aborting.",
+        });
+        resetInactivityTimer();
       }, AGENT_INACTIVITY_TIMEOUT_MS);
     };
     const markSendProgress = () => {
@@ -877,23 +1049,20 @@ export async function runQueuedJob(job: AgentJob) {
       emit("thinking", payload);
     };
     const ingestTool = (rawToolEvent: Record<string, unknown>, eventType: string) => {
-      const rawCallId =
-        rawToolEvent.call_id ||
-        rawToolEvent.callId ||
-        rawToolEvent.tool_call_id;
+      const normalized = normalizedToolDelta(rawToolEvent);
+      const rawCallId = normalized.callId;
       const toolId = normalizeToolId(typeof rawCallId === "string" ? rawCallId : crypto.randomUUID());
-      const existingTool = tools.find((tool) => tool.id === toolId);
+      const existingTool = tools.find((tool) => tool.id === toolId)
+        || tools.find((tool) => tool.id === `todo-${job.id}`);
       const toolName =
-        (typeof rawToolEvent.name === "string" && rawToolEvent.name) ||
-        (typeof rawToolEvent.tool_name === "string" && rawToolEvent.tool_name) ||
-        (typeof rawToolEvent.toolName === "string" && rawToolEvent.toolName) ||
+        (typeof normalized.name === "string" && normalized.name) ||
         existingTool?.name ||
         "tool";
       const toolStatus =
         (typeof rawToolEvent.status === "string" && rawToolEvent.status) ||
         (eventType === "tool_result" || eventType === "tool-call-completed" ? "completed" : "running");
-      const toolArgs = rawToolEvent.args ?? rawToolEvent.input ?? rawToolEvent.arguments;
-      const toolResult = rawToolEvent.result ?? rawToolEvent.output ?? rawToolEvent.content;
+      const toolArgs = normalized.args;
+      const toolResult = normalized.result;
       const detail = toolDetailFromArgs(toolArgs) || existingTool?.detail;
       const subagent = extractSubagent(toolName, toolArgs, toolResult);
       let editArgs = toolArgs;
@@ -915,25 +1084,32 @@ export async function runQueuedJob(job: AgentJob) {
             )
           : {};
       const resolvedName = resolveMcpToolName(toolName, toolArgs, existingTool?.input);
+      const displayName = innerToolName(resolvedName, editArgs, toolResult);
+      const inputText = editArgs !== undefined ? JSON.stringify(editArgs) : undefined;
+      const resultText = toolResult !== undefined && !subagent ? JSON.stringify(toolResult) : undefined;
+      const todos = todosFromToolPayload(inputText, resultText);
+      const kind = classifyToolKind(displayName || resolvedName, editArgs, toolResult);
+      const stableId = kind === "todo" ? `todo-${job.id}` : toolId;
       const nextTool: ToolPart = {
-        id: toolId,
-        name: resolvedName,
+        id: stableId,
+        name: displayName || resolvedName,
         status: toolStatus,
-        kind: classifyTool(resolvedName, toolArgs),
+        kind,
         ...(detail ? { detail } : {}),
         ...(editMetadata.path ? { path: editMetadata.path } : {}),
         ...(editMetadata.diff ? { diff: editMetadata.diff } : {}),
-        ...(editArgs !== undefined ? { input: JSON.stringify(editArgs) } : {}),
-        ...(toolResult !== undefined ? { result: JSON.stringify(toolResult) } : {}),
+        ...(inputText ? { input: inputText } : {}),
+        ...(resultText ? { result: resultText } : {}),
+        ...(todos?.length ? { todos } : {}),
         ...(subagent ? { subagent } : {}),
       };
-      const existingToolIndex = tools.findIndex((tool) => tool.id === toolId);
+      const existingToolIndex = tools.findIndex((tool) => tool.id === stableId);
       if (existingToolIndex >= 0) {
         tools[existingToolIndex] = { ...tools[existingToolIndex], ...nextTool };
       } else {
         tools.push(nextTool);
       }
-      const existingPartIndex = parts.findIndex((part) => part.type === "tool" && part.id === toolId);
+      const existingPartIndex = parts.findIndex((part) => part.type === "tool" && part.id === stableId);
       if (existingPartIndex >= 0) {
         const previousPart = parts[existingPartIndex];
         if (previousPart.type === "tool") parts[existingPartIndex] = { ...previousPart, ...nextTool };
@@ -1004,14 +1180,14 @@ export async function runQueuedJob(job: AgentJob) {
             automationLink: `automation://${parsedAutomation.id}`,
           });
         }
-        const storedTool = tools.find((tool) => tool.id === toolId);
+        const storedTool = tools.find((tool) => tool.id === stableId);
         if (storedTool) storedTool.result = nextTool.result;
-        const storedPart = parts.find((part) => part.type === "tool" && part.id === toolId);
+        const storedPart = parts.find((part) => part.type === "tool" && part.id === stableId);
         if (storedPart?.type === "tool") storedPart.result = nextTool.result;
       }
       emit("tool", {
-        callId: toolId,
-        name: resolvedName,
+        callId: stableId,
+        name: nextTool.name,
         status: toolStatus,
         kind: nextTool.kind,
         ...(nextTool.detail ? { detail: nextTool.detail } : {}),
@@ -1019,6 +1195,7 @@ export async function runQueuedJob(job: AgentJob) {
         ...(nextTool.diff ? { diff: nextTool.diff } : {}),
         ...(nextTool.input ? { input: nextTool.input } : {}),
         ...(nextTool.result ? { result: nextTool.result } : {}),
+        ...(nextTool.todos?.length ? { todos: nextTool.todos } : {}),
         ...(nextTool.subagent ? { subagent: nextTool.subagent } : {}),
         ...(providedAttachment ? { attachment: providedAttachment } : {}),
       });
@@ -1031,6 +1208,7 @@ export async function runQueuedJob(job: AgentJob) {
       status?: string;
       message?: string;
       toolCall?: { type?: string; args?: unknown; result?: unknown };
+      [key: string]: unknown;
     }) => {
       if (cancellationRequested) return;
       markSendProgress();
@@ -1038,12 +1216,16 @@ export async function runQueuedJob(job: AgentJob) {
         const delta = String(update.text || "");
         if (!delta) return;
         receivedTextDelta = true;
-        text += delta;
+        const nextText = stripTranscriptDump(text + delta);
+        if (nextText === text) return;
+        const applied = nextText.startsWith(text) ? nextText.slice(text.length) : "";
+        text = nextText;
         const lastPart = parts.at(-1);
-        if (lastPart?.type === "text") lastPart.content += delta;
-        else parts.push({ type: "text", content: delta });
+        if (!applied && lastPart?.type === "text") lastPart.content = nextText;
+        else if (lastPart?.type === "text") lastPart.content += applied;
+        else parts.push({ type: "text", content: applied || nextText });
         checkpoint();
-        emit("text", { text: delta });
+        if (applied) emit("text", { text: applied });
         return;
       }
       if (update.type === "thinking-delta") {
@@ -1063,11 +1245,12 @@ export async function runQueuedJob(job: AgentJob) {
         update.type === "partial-tool-call" ||
         update.type === "tool-call-completed"
       ) {
-        const toolCall = update.toolCall || {};
+        const toolCall = normalizedToolDelta(update);
         ingestTool({
-          callId: update.callId,
-          name: toolNameFromDelta(update),
-          status: update.type === "tool-call-completed" ? "completed" : "running",
+          ...update,
+          callId: toolCall.callId ?? update.callId,
+          name: toolCall.name ?? toolNameFromDelta(update),
+          status: update.type === "tool-call-completed" ? "completed" : update.status || "running",
           args: toolCall.args,
           result: toolCall.result,
         }, update.type);
@@ -1078,14 +1261,21 @@ export async function runQueuedJob(job: AgentJob) {
       }
     };
     const cancellationWatcher = setInterval(() => {
-      if (getJob(job.id)?.status === "cancelled") {
+      const currentJob = getJob(job.id);
+      const pendingModelId = currentJob?.pendingModelId?.trim();
+      if (pendingModelId && pendingModelId !== requestedModelId) {
+        modelSwitchTarget = { modelId: pendingModelId, modelParams: currentJob?.pendingModelParams };
+        void activeRun?.cancel().catch(() => undefined);
+        return;
+      }
+      if (currentJob?.status === "cancelled") {
         cancellationRequested = true;
         void activeRun?.cancel().catch(() => undefined);
       }
     }, 250);
-    try {
-      run = await Promise.race([
-        agent.send(prompt, {
+    const startAgentRun = async () => {
+      return await Promise.race([
+        agent!.send(prompt, {
           mcpServers: getMcpServers(mcpContext),
           onDelta: ({ update }) => {
             handleDelta(update as {
@@ -1107,12 +1297,67 @@ export async function runQueuedJob(job: AgentJob) {
         }),
       ]).finally(() => {
         if (sendTimeout) clearTimeout(sendTimeout);
+        sendTimeout = undefined;
       });
+    };
+    try {
+      let recoveredSend = false;
+      try {
+        run = await startAgentRun();
+      } catch (sendError) {
+        if (!canRecoverCursorSend({
+          error: sendError,
+          receivedTextDelta,
+          toolCount: tools.length,
+          alreadyRetried: recoveredSend,
+        })) throw sendError;
+
+        recoveredSend = true;
+        const failure = cursorSessionFailureKind(sendError);
+        const staleAgentId = agent?.agentId || job.agentId || chat.agentId || undefined;
+        appendAgentTrace(job, "session_recovery", {
+          failure,
+          staleAgentId,
+          phase: "send",
+        });
+        emit("status", {
+          status: "running",
+          message: failure === "active_run"
+            ? "Previous agent session was still busy; continuing in a fresh session."
+            : "Previous agent session expired; continuing in a fresh session.",
+        });
+
+        // Cursor can report a stale/active session only when send() starts, even
+        // though Agent.resume() itself succeeded. Dispose that local SDK handle,
+        // clear the persisted stale id, and retry this exact prompt once on a
+        // fresh session. Because no text/tool progress is allowed before this
+        // recovery, the retry cannot duplicate visible agent work.
+        await agent?.[Symbol.asyncDispose]().catch(() => undefined);
+        updateChat(job.chatId, { agentId: null }, job.userId);
+        agent = await withTimeout(Agent.create({
+          apiKey,
+          model,
+          local: { cwd: agentCwd, settingSources: ["project"] },
+          ...(nativeTools ? { tools: nativeTools } : {}),
+          mcpServers: getMcpServers(mcpContext),
+          ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
+        }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be recreated within 90 seconds.");
+        updateJob(job.id, { agentId: agent.agentId, runId: job.id });
+        updateChat(job.chatId, { agentId: agent.agentId }, job.userId);
+        run = await startAgentRun();
+      }
       activeRun = run;
       resetInactivityTimer();
       for await (const event of run.stream()) {
         resetInactivityTimer();
-        if (getJob(job.id)?.status === "cancelled") {
+        const currentJob = getJob(job.id);
+        const pendingModelId = currentJob?.pendingModelId?.trim();
+        if (pendingModelId && pendingModelId !== requestedModelId) {
+          modelSwitchTarget = { modelId: pendingModelId, modelParams: currentJob?.pendingModelParams };
+          await run.cancel().catch(() => undefined);
+          break;
+        }
+        if (currentJob?.status === "cancelled") {
           cancellationRequested = true;
           await run.cancel().catch(() => undefined);
           break;
@@ -1140,29 +1385,83 @@ export async function runQueuedJob(job: AgentJob) {
         for (const block of content || []) {
           if (block.type === "text" && block.text) {
             receivedTextDelta = true;
-            text += block.text;
+            text = stripTranscriptDump(text + block.text);
           }
         }
         checkpoint(true);
         emit("text", { text });
+        } else {
+          appendAgentTrace(job, "sdk_event", {
+            type: String((event as { type?: unknown }).type || "unknown"),
+          });
         }
       }
     } finally {
       clearInterval(cancellationWatcher);
       if (inactivityTimer) clearTimeout(inactivityTimer);
     }
-    if (inactivityTimedOut) {
-      throw new Error("The agent stopped producing progress for 5 minutes.");
-    }
     const result = await withTimeout(
       run.wait(),
       AGENT_WAIT_TIMEOUT_MS,
       "The agent did not finish within 90 seconds after its stream ended.",
     );
+    if (modelSwitchTarget) {
+      closeRunningTools(tools, "cancelled");
+      checkpoint(true);
+      for (const tool of tools) {
+        emit("tool", {
+          callId: tool.id,
+          name: tool.name,
+          status: tool.status,
+          kind: tool.kind,
+          ...(tool.path ? { path: tool.path } : {}),
+          ...(tool.diff ? { diff: tool.diff } : {}),
+          ...(tool.input ? { input: tool.input } : {}),
+          ...(tool.result ? { result: tool.result } : {}),
+          ...(tool.todos?.length ? { todos: tool.todos } : {}),
+          ...(tool.subagent ? { subagent: tool.subagent } : {}),
+        });
+      }
+      const target = modelSwitchTarget;
+      const switchedAt = new Date().toISOString();
+      const keepCursorSession = parseModelKey(target.modelId).providerKey === "cursor";
+      const nextAgentId = keepCursorSession ? agent.agentId : undefined;
+      updateJob(job.id, {
+        status: "switching",
+        error: undefined,
+        agentId: nextAgentId,
+        modelId: target.modelId,
+        modelParams: target.modelParams,
+        pendingModelId: undefined,
+        pendingModelParams: undefined,
+        modelSwitchRequestedAt: undefined,
+        resumePrompt: `The user switched the active model to ${target.modelId}. Continue the in-progress task from the saved agent/chat/tool/browser state. Do not repeat completed tool calls or user-facing work.`,
+        resumeRequestedAt: switchedAt,
+      });
+      updateChat(job.chatId, {
+        modelId: target.modelId,
+        modelParams: target.modelParams || [],
+        agentId: nextAgentId || null,
+        runStatus: "running",
+        runUpdatedAt: switchedAt,
+        queueMessage: null,
+        badge: null,
+      }, job.userId);
+      emit("status", { status: "switching_model", modelId: target.modelId });
+      return;
+    }
+
     const wasCancelled =
       cancellationRequested ||
       getJob(job.id)?.status === "cancelled" ||
       result.status === "cancelled";
+    const durableStatus = getJob(job.id)?.status;
+    if (durableStatus === "interrupted") {
+      closeRunningTools(tools, "cancelled");
+      checkpoint(true);
+      emit("status", { status: "interrupted", message: "Run was interrupted before the provider finished." });
+      return;
+    }
     if (wasCancelled) {
       closeRunningTools(tools, "cancelled");
       checkpoint();
@@ -1176,6 +1475,7 @@ export async function runQueuedJob(job: AgentJob) {
           ...(tool.diff ? { diff: tool.diff } : {}),
           ...(tool.input ? { input: tool.input } : {}),
           ...(tool.result ? { result: tool.result } : {}),
+          ...(tool.todos?.length ? { todos: tool.todos } : {}),
           ...(tool.subagent ? { subagent: tool.subagent } : {}),
         });
       }
@@ -1203,6 +1503,7 @@ export async function runQueuedJob(job: AgentJob) {
         ...(tool.diff ? { diff: tool.diff } : {}),
         ...(tool.input ? { input: tool.input } : {}),
         ...(tool.result ? { result: tool.result } : {}),
+        ...(tool.todos?.length ? { todos: tool.todos } : {}),
         ...(tool.subagent ? { subagent: tool.subagent } : {}),
       });
     }
@@ -1251,13 +1552,23 @@ export async function runQueuedJob(job: AgentJob) {
         text = text.replace(/```chat(?:\s+title=(?:"([^"]+)"|'([^']+)'|([^\s]+)))?\s*\n([\s\S]*?)```/gi, "").trim();
       }
       const fenced = text.match(/```plan(?:\s+name=(?:"([^"]+)"|'([^']+)'|(\S+)))?\s*\n([\s\S]*?)```/i);
-      const plan = fenced
+      let plan = fenced
         ? persistWorkspace("plan", fenced[4], fenced[1] || fenced[2] || fenced[3] || "Plan")
         : null;
       const canvasFence = text.match(/```canvas(?:\s+name=(?:"([^"]+)"|'([^']+)'|(\S+)))?\s*\n([\s\S]*?)```/i);
       const canvas = canvasFence
         ? persistWorkspace("canvas", canvasFence[4], canvasFence[1] || canvasFence[2] || canvasFence[3] || "Canvas")
         : null;
+      if (activeMode.id === "plan" && !resultError && !plan && !createdWorkspaces.some((item) => item.type === "plan")) {
+        const existingPlan = getChat(job.chatId, job.userId)?.workspaces?.find((item) => item.type === "plan");
+        if (!existingPlan && text.trim()) {
+          plan = persistWorkspace("plan", text, "Plan");
+          appendAgentTrace(job, "plan_fallback", {
+            reason: "No plan workspace tool result was received; persisted the final plan response.",
+            workspaceId: plan?.id,
+          });
+        }
+      }
       const links = [...createdWorkspaces, plan, canvas].filter((item, index, items): item is WorkspaceItem =>
         Boolean(item) && items.findIndex((candidate) => candidate?.id === item?.id) === index,
       )
@@ -1299,6 +1610,17 @@ export async function runQueuedJob(job: AgentJob) {
     }
     const completedAt = new Date().toISOString();
     const usage = result.usage;
+    recordSignal({
+      modelId: result.model?.id || job.modelId || chat.modelId || "unknown",
+      category: telemetryCategory(job.message),
+      success: result.status !== "error",
+      totalLatencyMs: Math.max(0, Date.now() - runStartedAt),
+      inputTokens: usage?.inputTokens,
+      outputTokens: usage?.outputTokens,
+      toolCallCount: tools.length,
+      toolFailures: tools.some((tool) => tool.status === "error"),
+      createdAt: completedAt,
+    });
     upsertMessage(job.chatId, {
       id: assistantMessageId,
       role: "assistant",
@@ -1307,8 +1629,8 @@ export async function runQueuedJob(job: AgentJob) {
       ...(extractedSuggestions.suggestions.length
         ? { suggestions: extractedSuggestions.suggestions }
         : {}),
-      ...(tools.length ? { tools } : {}),
-      ...(parts.length ? { parts: [...parts] } : {}),
+      ...(tools.length ? { tools: persistToolsForMessage(job.chatId, assistantMessageId, tools) } : {}),
+      ...(parts.length ? { parts: compactMessagePartsForPersistence(parts) } : {}),
       ...(providedAttachments.length ? { attachments: providedAttachments } : {}),
       ...(result.status === "finished"
         ? {
@@ -1347,15 +1669,33 @@ export async function runQueuedJob(job: AgentJob) {
     else emit("done", { status: result.status, agentId: agent.agentId });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Agent run failed.";
+    recordSignal({
+      modelId: job.modelId || chat.modelId || "unknown",
+      category: telemetryCategory(job.message),
+      success: false,
+      totalLatencyMs: Math.max(0, Date.now() - runStartedAt),
+      toolCallCount: tools.length,
+      toolFailures: true,
+      createdAt: new Date().toISOString(),
+    });
     const finalJob = getJob(job.id);
     if (finalJob?.status !== "cancelled" && finalJob?.status !== "interrupted") {
+      void logError({
+        level: "error",
+        source: "worker",
+        chatId: job.chatId,
+        userId: job.userId || undefined,
+        message: `Agent run failed: ${message}`,
+        stack: error instanceof Error ? error.stack : undefined,
+        context: { jobId: job.id, runId: job.runId },
+      });
       upsertMessage(job.chatId, {
         id: assistantMessageId,
         role: "assistant",
         content: text,
         errorMessage: message,
-        ...(tools.length ? { tools } : {}),
-        ...(parts.length ? { parts: [...parts] } : {}),
+        ...(tools.length ? { tools: persistToolsForMessage(job.chatId, assistantMessageId, tools) } : {}),
+        ...(parts.length ? { parts: compactMessagePartsForPersistence(parts) } : {}),
       });
       updateChat(job.chatId, {
         runStatus: "error",
@@ -1374,6 +1714,7 @@ export async function runQueuedJob(job: AgentJob) {
       });
       emit("error", { message });
     } else if (finalJob?.status === "interrupted") {
+      snapshotInterruptedJob(finalJob);
       emit("status", { status: "interrupted", message });
     }
   } finally {

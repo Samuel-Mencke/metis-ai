@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { decryptSecret, encryptSecret, maskSecret } from "../lib/secrets";
 import { listProviderDefinitions } from "../lib/providers/registry";
+import { codexTool } from "../lib/providers/runner";
+import { antigravitySupportsEffort } from "../lib/providers/official-antigravity";
 import { modelKey, parseModelKey } from "../lib/providers/types";
 
 process.env.AI_CHAT_SECRETS_KEY = "00".repeat(32);
@@ -47,9 +49,50 @@ test("registry includes native and generic provider paths", () => {
   }
 });
 
-test("agent providers use OAuth exclusively", () => {
-  for (const key of ["codex", "claude-code", "antigravity"]) {
-    const provider = listProviderDefinitions().find((item) => item.key === key);
-    assert.deepEqual(provider?.authTypes, ["oauth"], `${key} should only allow OAuth`);
-  }
+test("Codex exposes the supported credential paths and official model IDs", () => {
+  const provider = listProviderDefinitions().find((item) => item.key === "codex");
+  assert.deepEqual(provider?.authTypes, ["oauth", "account", "api_key"]);
+  assert.deepEqual(provider?.models.map((model) => model.id), [
+    "gpt-5.4",
+    "gpt-5.6",
+    "gpt-5.3-codex",
+    "gpt-5.2",
+  ]);
+});
+
+test("Codex tool events preserve command and MCP results", () => {
+  assert.deepEqual(
+    codexTool({
+      id: "cmd-1",
+      type: "command_execution",
+      command: "pwd",
+      aggregated_output: "/workspace\n",
+      status: "completed",
+    }),
+    {
+      id: "cmd-1",
+      name: "Codex command",
+      status: "completed",
+      kind: "shell",
+      input: JSON.stringify("pwd"),
+      result: "/workspace\n",
+    },
+  );
+  assert.match(
+    codexTool({
+      id: "mcp-1",
+      type: "mcp_tool_call",
+      server: "metis",
+      tool: "read_file",
+      arguments: { path: "README.md" },
+      result: { structured_content: { content: "ok" } },
+    })?.result || "",
+    /structured_content/,
+  );
+});
+
+test("Antigravity does not send effort for Claude models", () => {
+  assert.equal(antigravitySupportsEffort("gemini-3.6-flash"), true);
+  assert.equal(antigravitySupportsEffort("gpt-oss-120b-medium"), true);
+  assert.equal(antigravitySupportsEffort("claude-opus-4-6-thinking"), false);
 });

@@ -11,7 +11,7 @@ import {
   getProviderConnectionSecret,
   updateProviderConnection,
 } from "@/lib/provider-connections";
-import { refreshProviderModels } from "@/lib/providers/discovery";
+import { readCodexOAuthCredentials, refreshProviderModels } from "@/lib/providers/discovery";
 
 export type OAuthProviderKey = "codex" | "claude-code" | "antigravity";
 
@@ -131,6 +131,7 @@ async function runAntigravityOAuthLogin(
 
 const CLOUD_CODE_ENDPOINTS = [
   "https://cloudcode-pa.googleapis.com",
+  "https://daily-cloudcode-pa.googleapis.com",
   "https://daily-cloudcode-pa.sandbox.googleapis.com",
   "https://autopush-cloudcode-pa.sandbox.googleapis.com",
 ];
@@ -251,9 +252,22 @@ export async function ensureAntigravityProjectId(authFile: string, configuredPro
   }
   const projectId = await resolveCloudCodeProject(access, configuredProjectId);
   if (!projectId) {
-    throw new Error(
-      "This Google account requires a Google Cloud project for Cloud Code Assist. Add the project ID to the Antigravity OAuth connection and reconnect.",
-    );
+    if (configuredProjectId?.trim()) {
+      const next = {
+        ...data,
+        "google-gemini-cli": {
+          ...record,
+          projectId: configuredProjectId.trim(),
+        },
+      };
+      const serialized = `${JSON.stringify(next, null, 2)}\n`;
+      await writeFile(authFile, serialized, { encoding: "utf8", mode: 0o600 });
+      return serialized;
+    }
+    // Project discovery is optional for the free Antigravity/Gemini CLI path.
+    // Leave the OAuth token usable when Cloud Code Assist does not return a
+    // managed project; the provider can still operate without one.
+    return content;
   }
   const next = {
     ...data,
@@ -394,8 +408,29 @@ export async function runOAuthFlow(input: {
         "Antigravity OAuth did not return a usable Cloud Code project.",
       );
     }
+    let persistedAuth = authData;
+    if (input.providerKey === "codex") {
+      const parsed = JSON.parse(authData) as Record<string, unknown>;
+      const raw = parsed["openai-codex"];
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        const record = raw as Record<string, unknown>;
+        // The Codex OAuth exchange exposes the access JWT as its identity JWT.
+        // Keep an explicit idToken when the provider supplies one.
+        const normalized = {
+          ...parsed,
+          "openai-codex": {
+            ...record,
+            ...(typeof record.idToken === "string" && record.idToken.trim()
+              ? {}
+              : typeof record.access === "string" ? { idToken: record.access } : {}),
+          },
+        };
+        persistedAuth = `${JSON.stringify(normalized, null, 2)}\n`;
+      }
+      readCodexOAuthCredentials(persistedAuth);
+    }
     updateProviderConnection(input.connectionId, input.ownerId, {
-      secret: authData,
+      secret: persistedAuth,
       enabled: true,
       config: typeof credential.config.project === "string"
         ? { project: credential.config.project }
@@ -415,6 +450,13 @@ export async function runOAuthFlow(input: {
       status: "error",
       error: message.slice(0, 500),
     });
+    const current = getProviderConnectionSecret(input.connectionId, input.ownerId);
+    if (current) {
+      updateProviderConnection(input.connectionId, input.ownerId, {
+        config: { ...current.config, pendingOAuthFlow: false },
+        enabled: current.enabled,
+      });
+    }
   } finally {
     await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   }

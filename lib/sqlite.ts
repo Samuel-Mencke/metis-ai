@@ -157,13 +157,15 @@ function migrateLegacy(db: DatabaseSync) {
 export function getDatabase(): DatabaseSync {
   if (database) return database;
   mkdirSync(path.dirname(databasePath), { recursive: true });
-  database = new DatabaseSync(databasePath);
+  database = new DatabaseSync(databasePath, { timeout: 10_000 });
   database.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
     PRAGMA temp_store = MEMORY;
     PRAGMA cache_size = -32768;
     PRAGMA busy_timeout = 10000;
+    PRAGMA wal_autocheckpoint = 1000;
+    PRAGMA journal_size_limit = 67108864;
     PRAGMA foreign_keys = ON;
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS users (
@@ -250,6 +252,19 @@ export function getDatabase(): DatabaseSync {
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS chats_owner_updated ON chats(owner_id, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS tool_revert_snapshots (
+      chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+      message_id TEXT NOT NULL,
+      tool_id TEXT NOT NULL,
+      path TEXT,
+      before_text TEXT,
+      after_text TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (chat_id, message_id, tool_id)
+    );
+    CREATE INDEX IF NOT EXISTS tool_revert_snapshots_chat
+      ON tool_revert_snapshots(chat_id, message_id);
     CREATE TABLE IF NOT EXISTS memories (
       id TEXT PRIMARY KEY,
       owner_id TEXT REFERENCES users(id) ON DELETE CASCADE,
@@ -270,6 +285,26 @@ export function getDatabase(): DatabaseSync {
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS jobs_status_created ON jobs(status, updated_at);
+    CREATE TABLE IF NOT EXISTS job_leases (
+      job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+      worker_id TEXT NOT NULL,
+      lease_token TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS job_leases_expiry
+      ON job_leases(expires_at);
+    CREATE TABLE IF NOT EXISTS capability_manifests (
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      run_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      manifest_json TEXT NOT NULL,
+      manifest_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (owner_id, run_id, attempt_id)
+    );
+    CREATE INDEX IF NOT EXISTS capability_manifests_run
+      ON capability_manifests(owner_id, run_id, created_at DESC);
     CREATE TABLE IF NOT EXISTS automations (
       id TEXT PRIMARY KEY,
       owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -279,6 +314,9 @@ export function getDatabase(): DatabaseSync {
       mode_id TEXT,
       model_id TEXT,
       extended_model_id TEXT,
+      creator TEXT NOT NULL DEFAULT 'user' CHECK (creator IN ('user', 'agent')),
+      max_run_minutes INTEGER NOT NULL DEFAULT 1440,
+      graph_json TEXT,
       schedule_kind TEXT NOT NULL CHECK (schedule_kind IN ('once', 'interval')),
       schedule_value TEXT NOT NULL,
       timezone TEXT NOT NULL DEFAULT 'UTC',
@@ -300,6 +338,7 @@ export function getDatabase(): DatabaseSync {
       job_id TEXT,
       chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
       status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'error', 'cancelled')),
+      trigger_type TEXT NOT NULL DEFAULT 'scheduled' CHECK (trigger_type IN ('scheduled', 'manual')),
       started_at TEXT,
       completed_at TEXT,
       result_preview TEXT,
@@ -396,7 +435,7 @@ export function getDatabase(): DatabaseSync {
       hostname TEXT,
       address TEXT,
       capabilities TEXT NOT NULL DEFAULT '[]',
-      policy TEXT NOT NULL DEFAULT '{"mode":"approval_required","allowlist":[]}',
+      policy TEXT NOT NULL DEFAULT '{"mode":"full_access","allowlist":[]}',
       last_seen_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
@@ -436,6 +475,35 @@ export function getDatabase(): DatabaseSync {
     );
     CREATE INDEX IF NOT EXISTS remote_audit_owner
       ON remote_audit(owner_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS remote_approval_requests (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      client_id TEXT NOT NULL REFERENCES remote_clients(id) ON DELETE CASCADE,
+      action TEXT NOT NULL,
+      args_hash TEXT NOT NULL,
+      request_data TEXT NOT NULL DEFAULT '{}',
+      source TEXT NOT NULL,
+      run_id TEXT,
+      tool_call_id TEXT,
+      expires_at TEXT NOT NULL,
+      approved_at TEXT,
+      consumed_at TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS remote_approval_requests_owner
+      ON remote_approval_requests(owner_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS remote_approval_requests_lookup
+      ON remote_approval_requests(owner_id, client_id, action, args_hash, expires_at);
+    CREATE TABLE IF NOT EXISTS browser_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      owner_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      url TEXT NOT NULL,
+      title TEXT,
+      ts INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS browser_history_chat
+      ON browser_history(owner_id, chat_id, ts DESC);
   `);
   for (const statement of [
     "ALTER TABLE memories ADD COLUMN owner_id TEXT REFERENCES users(id) ON DELETE CASCADE",
@@ -450,6 +518,11 @@ export function getDatabase(): DatabaseSync {
     "ALTER TABLE automations ADD COLUMN mode_id TEXT",
     "ALTER TABLE automations ADD COLUMN model_id TEXT",
     "ALTER TABLE automations ADD COLUMN extended_model_id TEXT",
+    "ALTER TABLE automations ADD COLUMN creator TEXT NOT NULL DEFAULT 'user'",
+    "ALTER TABLE automations ADD COLUMN max_run_minutes INTEGER NOT NULL DEFAULT 1440",
+    "ALTER TABLE automations ADD COLUMN graph_json TEXT",
+    "ALTER TABLE automation_runs ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'scheduled'",
+    "ALTER TABLE provider_models ADD COLUMN context_window INTEGER",
     "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE automation_runs ADD COLUMN manual INTEGER NOT NULL DEFAULT 0",
   ]) {
@@ -462,6 +535,15 @@ export function getDatabase(): DatabaseSync {
   database.exec(
     "CREATE INDEX IF NOT EXISTS pending_questions_status_expiry ON pending_questions(status, expires_at)",
   );
+  try {
+    database.prepare(
+      `UPDATE remote_clients
+       SET policy = json_set(policy, '$.mode', 'full_access')
+       WHERE json_extract(policy, '$.mode') = 'approval_required'`,
+    ).run();
+  } catch {
+    // JSON1 is always present on supported Node SQLite builds; ignore if the table is mid-migration.
+  }
   migrateLegacy(database);
   database.prepare(
     "INSERT OR IGNORE INTO meta (key, value) VALUES ('provider_connections_schema', '1')",
@@ -491,17 +573,47 @@ export function getDatabase(): DatabaseSync {
   return database;
 }
 
-export function transaction<T>(fn: () => T): T {
-  const db = getDatabase();
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const result = fn();
-    db.exec("COMMIT");
-    return result;
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
+export function isSqliteBusyError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /database is locked|SQLITE_BUSY|SQLITE_LOCKED/i.test(message);
+}
+
+export function isSqliteForeignKeyError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /FOREIGN KEY constraint failed/i.test(message);
+}
+
+export function withSqliteRetry<T>(fn: () => T, attempts = 8): T {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return fn();
+    } catch (error) {
+      lastError = error;
+      if (!isSqliteBusyError(error) || attempt === attempts) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(250, 20 * attempt));
+    }
   }
+  throw lastError;
+}
+
+export function transaction<T>(fn: () => T): T {
+  return withSqliteRetry(() => {
+    const db = getDatabase();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = fn();
+      db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // The connection may already have rolled back after a busy lock.
+      }
+      throw error;
+    }
+  });
 }
 
 export function parseData<T>(row: unknown): T | null {

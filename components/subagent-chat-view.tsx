@@ -1,12 +1,14 @@
 "use client";
 
 import { ArrowLeft, Bot, CircleStop, Clock3, LoaderCircle } from "lucide-react";
-import type { CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import type { ToolPart } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Markdown } from "@/components/markdown";
 import { ToolCallGroup } from "@/components/tool-call-chip";
+import { ThinkingBlock } from "@/components/thinking-block";
+import { stripTranscriptDump, transcriptFromToolPart } from "@/lib/agent-transcript";
 
 type Props = {
   tool: ToolPart;
@@ -16,70 +18,87 @@ type Props = {
   sidebarWidth?: number;
 };
 
-function readableSubagentText(value: unknown): string {
-  if (value == null) return "";
-  if (typeof value !== "string") {
-    if (Array.isArray(value)) return value.map(readableSubagentText).filter(Boolean).join("\n");
-    if (typeof value === "object") {
-      const record = value as Record<string, unknown>;
-      for (const key of ["text", "content", "message", "answer", "response", "value"]) {
-        const result = readableSubagentText(record[key]);
-        if (result) return result;
-      }
-      return Object.entries(record)
-        .map(([key, item]) => {
-          const result = readableSubagentText(item);
-          return result ? `${key}: ${result}` : "";
-        })
-        .filter(Boolean)
-        .join("\n");
-    }
-    return String(value);
-  }
-  const trimmed = value.trim();
-  if (!trimmed) return "";
-  try {
-    const parsed: unknown = JSON.parse(trimmed);
-    if (typeof parsed === "string") return parsed;
-    if (Array.isArray(parsed)) {
-      return parsed.map(readableSubagentText).filter(Boolean).join("\n");
-    }
-    if (parsed && typeof parsed === "object") {
-      const record = parsed as Record<string, unknown>;
-      if (Array.isArray(record.conversationSteps)) {
-        return record.conversationSteps
-          .map((step) => {
-            if (!step || typeof step !== "object") return "";
-            const item = step as Record<string, unknown>;
-            return readableSubagentText(
-              item.response ?? item.answer ?? item.text ?? item.content ?? item.message ?? item.result,
-            );
-          })
-          .filter(Boolean)
-          .join("\n\n");
-      }
-      for (const key of ["text", "content", "message", "answer", "response", "value"]) {
-        const result = readableSubagentText(record[key]);
-        if (result) return result;
-      }
-      return Object.entries(record)
-        .map(([key, item]) => {
-          const result = readableSubagentText(item);
-          return result ? `${key}: ${result}` : "";
-        })
-        .filter(Boolean)
-        .join("\n");
-    }
-  } catch {
-    // Normal markdown/text, not JSON.
-  }
-  return value;
+function promptText(tool: ToolPart): string {
+  const raw = tool.subagent?.prompt || tool.input || "";
+  return stripTranscriptDump(typeof raw === "string" ? raw : "");
 }
 
 export function SubagentChatView({ tool, onBack, onCancel, cancelling = false, sidebarWidth = 0 }: Props) {
-  const title = tool.subagent?.title || tool.subagent?.prompt || "Subagent chat";
-  const messages = tool.subagent?.messages ?? [];
-  const status = tool.status === "running" ? "Running" : tool.status;
+  const [liveTool, setLiveTool] = useState<ToolPart | null>(null);
+
+  useEffect(() => {
+    const childChatId = tool.subagent?.chatId;
+    if (!childChatId) {
+      setLiveTool(null);
+      return;
+    }
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/chats/${encodeURIComponent(childChatId)}?messageLimit=50`, { cache: "no-store" });
+        if (!response.ok || cancelled) return;
+        const data = await response.json() as {
+          chat?: {
+            runStatus?: string;
+            messages?: Array<{ role?: string; content?: string; createdAt?: string; tools?: ToolPart[] }>;
+          };
+        };
+        const chat = data.chat;
+        if (!chat || cancelled) return;
+        const active = ["running", "paused", "waiting_for_user", "waiting_input"].includes(chat.runStatus || "");
+        const childMessages = (chat.messages || []).flatMap((message, index) => {
+          const role = message.role || "assistant";
+          const text = message.content || "";
+          if (!text || (index === 0 && role === "user")) return [];
+          return [{ role, text, ...(message.createdAt ? { timestamp: message.createdAt } : {}) }];
+        });
+        const childTools = (chat.messages || []).flatMap((message) => message.tools || []);
+        setLiveTool({
+          ...tool,
+          status: active ? "running" : chat.runStatus || tool.status,
+          subagent: {
+            ...tool.subagent,
+            ...(childMessages.length ? { messages: childMessages } : {}),
+            ...(childTools.length ? { tools: childTools } : {}),
+          },
+        });
+        if (active) timer = window.setTimeout(() => void poll(), 800);
+      } catch {
+        if (!cancelled) timer = window.setTimeout(() => void poll(), 1600);
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [tool.id, tool.status, tool.subagent?.chatId]);
+
+  const displayedTool = liveTool || tool;
+  const title = displayedTool.subagent?.title || displayedTool.subagent?.prompt || "Subagent chat";
+  const transcript = transcriptFromToolPart(displayedTool as Parameters<typeof transcriptFromToolPart>[0]);
+  const prompt = promptText(displayedTool);
+  const status = displayedTool.status === "running" ? "Running" : displayedTool.status;
+
+  const viewBlocks: Array<
+    | { type: "thinking"; text: string }
+    | { type: "message"; role: string; text: string }
+    | { type: "tools"; tools: NonNullable<ToolPart["subagent"]>["tools"] }
+  > = [];
+  for (const part of transcript.parts) {
+    if (part.type === "thinking") {
+      viewBlocks.push({ type: "thinking", text: part.text });
+      continue;
+    }
+    if (part.type === "message") {
+      viewBlocks.push({ type: "message", role: part.role, text: stripTranscriptDump(part.text) });
+      continue;
+    }
+    const last = viewBlocks.at(-1);
+    if (last?.type === "tools") last.tools = [...(last.tools || []), part.tool];
+    else viewBlocks.push({ type: "tools", tools: [part.tool] });
+  }
 
   return (
     <section
@@ -93,10 +112,10 @@ export function SubagentChatView({ tool, onBack, onCancel, cancelling = false, s
         </Button>
         <p className="min-w-0 flex-1 truncate text-sm font-medium text-foreground" title={title}>{title}</p>
         <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
-          {tool.status === "running" ? <LoaderCircle className="size-3 animate-spin" /> : <Bot className="size-3" />}
+          {displayedTool.status === "running" ? <LoaderCircle className="size-3 animate-spin" /> : <Bot className="size-3" />}
           {status}
         </span>
-        {tool.status === "running" && onCancel ? (
+        {displayedTool.status === "running" && onCancel ? (
           <Button type="button" variant="destructive" size="sm" onClick={onCancel} disabled={cancelling}>
             <CircleStop className="mr-1.5 size-3.5" />
             {cancelling ? "Stopping…" : "Stop"}
@@ -104,57 +123,64 @@ export function SubagentChatView({ tool, onBack, onCancel, cancelling = false, s
         ) : null}
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="messages-composer-mask min-h-0 flex-1 overflow-y-auto" style={{ ["--composer-mask-size" as string]: "9rem" }}>
         <div className="mx-auto w-full max-w-2xl space-y-6 px-4 pt-6 sm:px-6" style={{ paddingBottom: 144 }}>
-          {tool.subagent?.prompt || tool.input ? (
+          {prompt ? (
             <div className="flex flex-col items-end gap-1">
               <div className="max-w-[85%] space-y-2 rounded-3xl bg-secondary/80 px-4 py-2.5 text-[15px] leading-relaxed">
-                <p className="whitespace-pre-wrap break-words">{readableSubagentText(tool.subagent?.prompt || tool.input)}</p>
+                <p className="whitespace-pre-wrap break-words">{prompt}</p>
               </div>
             </div>
           ) : null}
-          {tool.subagent?.thinking || tool.subagent?.tools?.length ? (
-            <ToolCallGroup
-              thinking={tool.subagent?.thinking ? [{
-                text: tool.subagent.thinking,
-                done: tool.status !== "running",
-              }] : []}
-              tools={tool.subagent?.tools ?? []}
-            />
-          ) : null}
-          {messages.map((message, index) => (
-            <div
-              key={`${message.timestamp ?? "message"}-${index}`}
-              className={cn(
-                "w-full",
-                message.role === "user"
-                  ? "flex flex-col items-end gap-1"
-                  : "text-[15px] leading-relaxed text-foreground/95",
-              )}
-            >
-              {message.role.toLowerCase().includes("assistant") ? (
-                <div className="block w-full">
-                  <Markdown content={readableSubagentText(message.text)} />
-                </div>
-              ) : (
-                <div className="max-w-[85%] space-y-2 rounded-3xl bg-secondary/80 px-4 py-2.5 text-[15px] leading-relaxed">
-                  <p className="whitespace-pre-wrap break-words">{readableSubagentText(message.text)}</p>
-                </div>
-              )}
-            </div>
-          ))}
-          {!messages.length && tool.result ? (
-            <div className="text-[15px] leading-relaxed text-foreground/95">
-              <Markdown content={readableSubagentText(tool.result)} />
-            </div>
-          ) : null}
-          {!messages.length && !tool.result ? (
+          {viewBlocks.map((block, index) => {
+            if (block.type === "thinking") {
+              return (
+                <ThinkingBlock
+                  key={`thinking-${index}`}
+                  text={block.text}
+                  done={displayedTool.status !== "running" || index < viewBlocks.length - 1}
+                />
+              );
+            }
+            if (block.type === "tools") {
+              return (
+                <ToolCallGroup
+                  key={`tools-${block.tools?.[0]?.id ?? index}`}
+                  tools={block.tools || []}
+                  autoExpand={false}
+                />
+              );
+            }
+            if (!block.text) return null;
+            return (
+              <div
+                key={`message-${index}`}
+                className={cn(
+                  "w-full",
+                  block.role === "user"
+                    ? "flex flex-col items-end gap-1"
+                    : "text-[15px] leading-relaxed text-foreground/95",
+                )}
+              >
+                {block.role.toLowerCase().includes("assistant") ? (
+                  <div className="block w-full">
+                    <Markdown content={block.text} />
+                  </div>
+                ) : (
+                  <div className="max-w-[85%] space-y-2 rounded-3xl bg-secondary/80 px-4 py-2.5 text-[15px] leading-relaxed">
+                    <p className="whitespace-pre-wrap break-words">{block.text}</p>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {!viewBlocks.length ? (
             <p className="text-sm text-muted-foreground">{tool.detail || "Waiting for the subagent to respond…"}</p>
           ) : null}
         </div>
       </div>
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20">
-        <div className="pointer-events-none bg-gradient-to-t from-background via-background/90 to-transparent pb-4 pt-16">
+        <div className="pointer-events-none pb-4 pt-3">
           <div className="pointer-events-auto relative mx-auto w-full max-w-2xl px-4 sm:px-6">
             <div className="relative flex w-full items-center gap-2 rounded-3xl border border-border/50 bg-card/80 p-2 text-sm text-muted-foreground shadow-[0_8px_40px_-12px_rgba(0,0,0,0.4)] backdrop-blur-xl">
               <div className="flex min-h-10 min-w-0 flex-1 items-center gap-3 rounded-2xl px-3 py-2">

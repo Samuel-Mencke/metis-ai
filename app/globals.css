@@ -1,4 +1,8 @@
-@import "tailwindcss";
+@import "tailwindcss" source(none);
+@source ".";
+@source "../components";
+@source "../lib";
+@source "../hooks";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
@@ -556,6 +560,32 @@
   }
 }
 
+/* Fade the content itself instead of painting a second fill color over bubbles. */
+.messages-composer-mask {
+  --composer-mask-size: 4.5rem;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    #000 0%,
+    #000 calc(100% - var(--composer-mask-size)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    #000 0%,
+    #000 calc(100% - var(--composer-mask-size)),
+    transparent 100%
+  );
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+}
+
+.user-message-collapse-mask {
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 calc(100% - 3.25rem), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0%, #000 calc(100% - 3.25rem), transparent 100%);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .streaming-token-fade,
   .sidebar-panel-enter,
@@ -563,5 +593,94 @@
   .workspace-panel-enter,
   .workspace-panel-exit {
     animation: none;
+  }
+}
+
+/* Browser agent pointer: restrained dark glass arrow inspired by the reference image. */
+.metis-browser-agent-cursor {
+  position: absolute;
+  z-index: 30;
+  width: 46px;
+  height: 43px;
+  pointer-events: none;
+  transform: translate(-95%, -29%);
+  transition: left 120ms cubic-bezier(.22,.75,.26,1), top 120ms cubic-bezier(.22,.75,.26,1);
+  will-change: left, top;
+  filter: drop-shadow(0 8px 12px rgb(0 0 0 / .42));
+}
+
+.metis-browser-agent-cursor-shape {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.metis-browser-agent-cursor-shape > svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  filter: drop-shadow(0 0 1px rgb(219 247 255 / .38));
+}
+
+.metis-browser-agent-cursor-click {
+  position: absolute;
+  left: 95%;
+  top: 29%;
+  width: 13px;
+  height: 13px;
+  border: 1px solid rgb(220 248 255 / .72);
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / .16), 0 0 10px rgb(175 232 244 / .22);
+  animation: metis-browser-cursor-click 360ms cubic-bezier(.2,.8,.2,1) both;
+}
+
+.metis-browser-agent-cursor-scroll {
+  position: absolute;
+  left: 57%;
+  top: 45%;
+  width: 8px;
+  height: 15px;
+  border: 1px solid rgb(255 255 255 / .38);
+  border-radius: 999px;
+  background: rgb(8 14 18 / .46);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .16), 0 0 7px rgb(177 232 244 / .12);
+  backdrop-filter: blur(4px);
+}
+
+.metis-browser-agent-cursor-scroll > span {
+  position: absolute;
+  left: 50%;
+  top: 3px;
+  width: 2px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / .74);
+  transform: translateX(-50%);
+  animation: metis-browser-cursor-scroll 780ms ease-in-out infinite;
+}
+
+@keyframes metis-browser-cursor-click {
+  from { opacity: .8; transform: translate(-50%, -50%) scale(.35); }
+  to { opacity: 0; transform: translate(-50%, -50%) scale(1.55); }
+}
+
+@keyframes metis-browser-cursor-scroll {
+  0%, 100% { opacity: .35; transform: translate(-50%, 0); }
+  50% { opacity: 1; transform: translate(-50%, 5px); }
+}
+
+/* The embedded browser is a touch surface, not an image viewer. */
+.metis-browser-page-surface {
+  touch-action: none;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+@media (max-width: 1279px) {
+  .metis-browser-agent-cursor {
+    width: 41px;
+    height: 38px;
   }
 }

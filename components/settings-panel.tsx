@@ -20,6 +20,7 @@ import {
   PlugZap,
   Plus,
   RefreshCw,
+  RotateCcw,
   Server,
   Settings2,
   Trash2,
@@ -60,6 +61,8 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { AdminUsersPanel } from "@/components/admin-users-panel";
 import type { AgentMode, ToolPermissionCategory } from "@/lib/store";
 import { TOOL_PERMISSION_CATEGORIES } from "@/lib/modes";
+import { PlanUsagePanel } from "@/components/quota-gauges";
+import type { UsageSnapshot } from "@/lib/usage-display";
 
 type ProviderDefinition = {
   key: string;
@@ -88,8 +91,9 @@ type ProviderConnection = {
 };
 
 function preferredAuthType(provider: ProviderDefinition) {
+  const priority = ["oauth", "account", "api_key", "local", "vertex_adc"];
   return (
-    provider.authTypes.find((authType) => authType === "api_key") ||
+    priority.find((authType) => provider.authTypes.includes(authType)) ||
     provider.authTypes[0] ||
     "api_key"
   );
@@ -298,11 +302,13 @@ type Props = {
     realtime?: boolean;
     endpoint?: string;
   }) => void;
+  browserEnabled: boolean;
   browserRealtime: boolean;
   browserFps: number;
   browserViewportWidth: number;
   browserViewportHeight: number;
   onBrowserSettingsChange: (settings: {
+    browserEnabled?: boolean;
     browserRealtime?: boolean;
     browserFps?: number;
     browserViewportWidth?: number;
@@ -337,9 +343,13 @@ type Props = {
   onMemoriesChanged: () => void;
   onMemoryDeleted: (id: string) => void;
   onChatsChanged: () => void;
+  usageSnapshot: UsageSnapshot | null;
+  onRefreshUsage: () => Promise<void>;
   onModelsChanged?: () => void;
   onModesChanged?: () => void;
   onLogout: () => void;
+  onResetMetis?: () => Promise<void>;
+  onUpdateMetis?: () => Promise<void>;
   isHostAdmin?: boolean;
 };
 
@@ -361,6 +371,7 @@ export function SettingsPanel({
   voiceEndpoint,
   onVoiceApiKeySave,
   onVoiceInputSettingsChange,
+  browserEnabled,
   browserRealtime,
   browserFps,
   browserViewportWidth,
@@ -390,9 +401,13 @@ export function SettingsPanel({
   onMemoriesChanged,
   onMemoryDeleted,
   onChatsChanged,
+  usageSnapshot,
+  onRefreshUsage,
   onModelsChanged,
   onModesChanged,
   onLogout,
+  onResetMetis,
+  onUpdateMetis,
   isHostAdmin = false,
 }: Props) {
   const [draft, setDraft] = useState("");
@@ -466,6 +481,8 @@ export function SettingsPanel({
   const [archivedChatsLoaded, setArchivedChatsLoaded] = useState(false);
   const [browserNotificationsAvailable, setBrowserNotificationsAvailable] =
     useState(false);
+  const [resetMetisOpen, setResetMetisOpen] = useState(false);
+  const [updateMetisOpen, setUpdateMetisOpen] = useState(false);
   const loadRemoteClients = useCallback(async () => {
     try {
       const response = await fetch("/api/remote-clients", { cache: "no-store" });
@@ -947,6 +964,10 @@ export function SettingsPanel({
       project: typeof connection.config?.project === "string" ? connection.config.project : "",
       location: typeof connection.config?.location === "string" ? connection.config.location : "",
     });
+    onSettingsTabChange("providers");
+    requestAnimationFrame(() => {
+      document.getElementById("provider-connection-form")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
   }
 
   async function saveProviderConnection() {
@@ -1223,6 +1244,7 @@ export function SettingsPanel({
                 { value: "voice", label: "Voice input" },
                 { value: "browser-storage", label: "Browser storage" },
                 { value: "compression", label: "Token compression" },
+                { value: "usage", label: "Usage" },
                 { value: "archived", label: "Chats" },
                 { value: "providers", label: "Providers" },
                 { value: "modes", label: "Agent modes" },
@@ -1250,6 +1272,10 @@ export function SettingsPanel({
             <TabsTrigger value="compression" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
               <Settings2 data-icon="inline-start" />
               Token compression
+            </TabsTrigger>
+            <TabsTrigger value="usage" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
+              <MessagesSquare data-icon="inline-start" />
+              Usage
             </TabsTrigger>
             <TabsTrigger value="archived" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
               <MessagesSquare data-icon="inline-start" />
@@ -1385,6 +1411,9 @@ export function SettingsPanel({
                 </p>
               </section>
             </TabsContent>
+            <TabsContent value="usage" className="mt-0 min-w-0 px-6 py-6 sm:px-8 sm:py-8">
+              <PlanUsagePanel snapshot={usageSnapshot} onRefresh={onRefreshUsage} />
+            </TabsContent>
             <TabsContent value="browser-storage" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-4">
                 <div className="flex items-start justify-between gap-3">
@@ -1506,7 +1535,31 @@ export function SettingsPanel({
                     : "No custom sound uploaded. The default chime will be used."}
                 </p>
                 <div className="border-t border-border/60 pt-4">
-                  <h3 className="text-sm font-medium">Browser stream</h3>
+                  <h3 className="text-sm font-medium">Browser</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Disable the in-app browser on weak machines. This hides the workspace tab, live preview, and browser tools.
+                  </p>
+                  <div className="mt-3 flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Browser workspace</p>
+                      <p className="mt-1 text-xs text-muted-foreground/70">
+                        When off, agents cannot use browser tools and the sidebar tab is removed.
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant={browserEnabled ? "default" : "outline"}
+                      aria-pressed={browserEnabled}
+                      onClick={() => onBrowserSettingsChange({
+                        browserEnabled: !browserEnabled,
+                        ...(!browserEnabled ? {} : {}),
+                      })}
+                      className="shrink-0"
+                    >
+                      {browserEnabled ? "On" : "Off"}
+                    </Button>
+                  </div>
+                  <h3 className="mt-4 text-sm font-medium">Browser stream</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
                     Configure the live browser preview, frame rate, and default viewport.
                   </p>
@@ -1855,7 +1908,29 @@ export function SettingsPanel({
                     Configure API keys, OAuth, SDK, CLI, and local connections together in one list.
                   </p>
                 </div>
-                <div className="grid gap-2 sm:grid-cols-2">
+                <div id="provider-connection-form" className={`space-y-3 rounded-xl border p-4 ${providerDraft.id ? "border-primary/40 bg-primary/5" : "border-border/60 bg-muted/20"}`}>
+                  {providerDraft.id ? (
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs font-medium text-primary">
+                        Editing existing connection · {providerDraft.id.slice(0, 8)}…
+                      </p>
+                      <Button
+                        type="button"
+                        size="xs"
+                        variant="ghost"
+                        onClick={() => setProviderDraft((current) => ({
+                          ...current,
+                          id: "",
+                          slug: `${current.providerKey}-main`,
+                          label: providerDefinitions.find((provider) => provider.key === current.providerKey)?.name || current.label,
+                          secret: "",
+                        }))}
+                      >
+                        New connection instead
+                      </Button>
+                    </div>
+                  ) : null}
+                  <div className="grid gap-2 sm:grid-cols-2">
                   <CustomSelect
                     value={providerDraft.providerKey}
                     onValueChange={selectProvider}
@@ -1951,11 +2026,11 @@ export function SettingsPanel({
                   </p>
                 ) : null}
                 <div className="flex flex-wrap gap-2">
-                  {providerDraft.authType === "oauth" ? (
-                    <Button type="button" onClick={() => void connectProviderOAuth()} disabled={providerBusy || !providersLoaded}>
-                      {providerBusy ? "Connecting…" : "Connect via OAuth"}
-                    </Button>
-                  ) : (
+                {providerDraft.authType === "oauth" ? (
+                  <Button type="button" onClick={() => void connectProviderOAuth()} disabled={providerBusy || !providersLoaded}>
+                    {providerBusy ? "Connecting…" : providerDraft.id ? `Reconnect ${providerDraft.label || "connection"}` : "Connect via OAuth"}
+                  </Button>
+                ) : (
                     <Button type="button" onClick={() => void saveProviderConnection()} disabled={providerBusy || !providersLoaded}>
                       {providerBusy ? "Saving…" : providerDraft.id ? "Update connection" : "Save connection"}
                     </Button>
@@ -1973,6 +2048,7 @@ export function SettingsPanel({
                   >
                     Clear
                   </Button>
+                </div>
                 </div>
                 {oauthFlow ? (
                   <div className="space-y-3 rounded-lg border border-border/60 bg-muted/20 p-3">
@@ -2242,7 +2318,7 @@ export function SettingsPanel({
                   <div>
                     <h3 className="text-sm font-medium">Remote Clients</h3>
                     <p className="mt-1 max-w-2xl text-xs text-muted-foreground">
-                      Clients use an outbound encrypted connection. New clients start in approval mode.
+                      Clients use an outbound encrypted connection. New clients start with full access.
                     </p>
                   </div>
                   <Button type="button" size="sm" onClick={() => setRemotePairStep("os")} disabled={remoteBusy}>
@@ -2276,9 +2352,7 @@ export function SettingsPanel({
                             >
                               {client.policy.mode === "full_access"
                                 ? "Full access enabled"
-                                : client.policy.mode === "approval_required"
-                                  ? "Approval required"
-                                  : "Restricted"}
+                                : "Restricted"}
                             </Badge>
                           </div>
                           </div>
@@ -2289,8 +2363,8 @@ export function SettingsPanel({
                             <DropdownMenuTrigger asChild><Button type="button" size="icon-xs" variant="ghost" aria-label={`Manage ${client.name}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
                             <DropdownMenuContent align="end">
                               <DropdownMenuItem onClick={() => void testRemoteConnection(client)}>Test connection</DropdownMenuItem>
-                              <DropdownMenuItem onClick={() => void updateRemotePolicy(client, client.policy.mode === "full_access" ? "approval_required" : "full_access")}>
-                                {client.policy.mode === "full_access" ? "Disable full access" : "Enable full access"}
+                              <DropdownMenuItem onClick={() => void updateRemotePolicy(client, client.policy.mode === "full_access" ? "restricted" : "full_access")}>
+                                {client.policy.mode === "full_access" ? "Switch to restricted" : "Enable full access"}
                               </DropdownMenuItem>
                               <DropdownMenuItem className="text-destructive" onClick={() => void revokeRemoteClient(client)}>Remove client</DropdownMenuItem>
                             </DropdownMenuContent>
@@ -2396,6 +2470,24 @@ export function SettingsPanel({
                   <Lock className="size-4" />
                   Lock screen
                 </Button>
+                {isHostAdmin ? (
+                  <div className="mt-3 border-t border-destructive/30 pt-4">
+                    <h3 className="text-sm font-medium">Metis maintenance</h3>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Prepare a production update or reset Metis to its clean initial state.
+                    </p>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                      <Button type="button" variant="outline" onClick={() => setUpdateMetisOpen(true)}>
+                        <RefreshCw data-icon="inline-start" />
+                        Update Metis
+                      </Button>
+                      <Button type="button" variant="destructive" onClick={() => setResetMetisOpen(true)}>
+                        <RotateCcw data-icon="inline-start" />
+                        Reset account
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
               </section>
             </TabsContent>
           </div>
@@ -2509,6 +2601,27 @@ export function SettingsPanel({
         onConfirm={async () => {
           await clearBrowserStorage();
           setBrowserStorageClearAll(false);
+        }}
+      />
+      <ConfirmDialog
+        open={updateMetisOpen}
+        onOpenChange={setUpdateMetisOpen}
+        title="Update Metis?"
+        description="Metis will install the locked dependencies and build the inactive production slot. The active service will not be restarted automatically."
+        confirmLabel="Prepare update"
+        destructive={false}
+        onConfirm={async () => {
+          if (onUpdateMetis) await onUpdateMetis();
+        }}
+      />
+      <ConfirmDialog
+        open={resetMetisOpen}
+        onOpenChange={setResetMetisOpen}
+        title="Reset all Metis data?"
+        description="This permanently removes chats, notes, memories, provider credentials, MCP servers, workflows, browser data, automations, remote clients, jobs and usage history. User accounts and the base installation remain. You will be signed out and must set up Metis again."
+        confirmLabel="Reset everything"
+        onConfirm={async () => {
+          if (onResetMetis) await onResetMetis();
         }}
       />
     </>

@@ -75,10 +75,6 @@ export function passwordMatches(provided: string | null | undefined): boolean {
 }
 
 export async function isAuthenticated(req?: Request): Promise<boolean> {
-  if (req) {
-    const header = req.headers.get("x-chat-password");
-    if (passwordMatches(header)) return true;
-  }
   return Boolean(await getAuthenticatedUser(req));
 }
 
@@ -87,7 +83,10 @@ export async function getAuthenticatedUser(req?: Request): Promise<User | null> 
   const legacyUser = req?.headers.get("x-chat-username")?.trim();
   const migrated = users();
   if (legacyPassword && passwordMatches(legacyPassword)) {
-    return migrated.find((user) => user.username === (legacyUser || user.username)) ?? migrated[0] ?? null;
+    // The legacy shared password is only a migration bridge. Without an
+    // explicit username it must not select an arbitrary account.
+    if (!legacyUser) return null;
+    return migrated.find((user) => user.username === legacyUser) ?? null;
   }
   const requestCookie = req?.headers.get("cookie")
     ?.split(";")

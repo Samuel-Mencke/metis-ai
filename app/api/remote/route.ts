@@ -139,6 +139,7 @@ export async function POST(req: Request) {
     sessionId?: string;
     clientId?: string;
     data?: string;
+    approvalId?: string;
     cols?: number;
     rows?: number;
   };
@@ -165,7 +166,7 @@ export async function POST(req: Request) {
           clientId,
           ownerId,
           action: "pty_open",
-          approved: true,
+          ...(body.approvalId ? { approvalId: body.approvalId } : {}),
           params: { cwd },
         });
         return Response.json(result);
@@ -175,7 +176,7 @@ export async function POST(req: Request) {
           clientId,
           ownerId,
           action: "pty_input",
-          approved: true,
+          ...(body.approvalId ? { approvalId: body.approvalId } : {}),
           params: { sessionId: body.sessionId, data: body.data || "" },
         });
         return Response.json({ result });
@@ -185,7 +186,7 @@ export async function POST(req: Request) {
           clientId,
           ownerId,
           action: "pty_close",
-          approved: true,
+          ...(body.approvalId ? { approvalId: body.approvalId } : {}),
           params: { sessionId: body.sessionId },
         });
         return Response.json(result);
@@ -336,6 +337,12 @@ export async function POST(req: Request) {
     }
     return Response.json({ error: "Unknown remote action" }, { status: 400 });
   } catch (error) {
+    if (error && typeof error === "object" && "approvalId" in error) {
+      return Response.json({
+        error: error instanceof Error ? error.message : "Remote action requires explicit user approval",
+        approvalId: String((error as { approvalId: unknown }).approvalId),
+      }, { status: 409 });
+    }
     return Response.json(
       { error: error instanceof Error ? error.message : "Remote action failed" },
       { status: 502 },

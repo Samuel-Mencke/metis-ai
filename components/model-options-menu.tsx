@@ -9,6 +9,10 @@ import {
 } from "@/components/ui/popover";
 import { JailbreakPromptPicker } from "@/components/jailbreak-prompt-picker";
 import { cn } from "@/lib/utils";
+import {
+  defaultParamsForModel,
+  modelParametersForModel,
+} from "@/lib/model-params";
 import type {
   ModelInfo,
   ModelParamSelection,
@@ -38,10 +42,13 @@ export function ModelOptionsMenu({
   onInsertPrompt,
   className,
 }: Props) {
-  const parameters = model.parameters ?? [];
+  const parameters = modelParametersForModel(model);
+  const defaults = defaultParamsForModel({ ...model, parameters });
 
   function paramValue(id: string): string {
-    return modelParams.find((p) => p.id === id)?.value ?? "";
+    return modelParams.find((p) => p.id === id)?.value
+      ?? defaults.find((p) => p.id === id)?.value
+      ?? "";
   }
 
   function setParam(id: string, value: string) {
@@ -145,13 +152,13 @@ export function ModelOptionsMenu({
           })}
         </div>
 
-        {model.defaultParams && model.defaultParams.length > 0 ? (
+        {defaults.length > 0 ? (
           <Button
             type="button"
             variant="ghost"
             size="sm"
             className="h-7 px-0 text-xs text-muted-foreground"
-            onClick={() => onModelParamsChange(model.defaultParams || [])}
+            onClick={() => onModelParamsChange(defaults)}
           >
             Reset defaults
           </Button>

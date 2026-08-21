@@ -22,6 +22,7 @@ export type ToolPart = {
   todos?: Array<{ id?: string; content: string; status?: string }>;
   subagent?: {
     agentId?: string;
+    chatId?: string;
     title?: string;
     mode?: string;
     model?: string;
@@ -71,6 +72,7 @@ export type ChatMessage = {
     connectionId?: string;
     outputTokens?: number;
     inputTokens?: number;
+    inputTokensEstimated?: boolean;
     totalTokens?: number;
     costUsd?: number;
     completedAt: string;
@@ -108,14 +110,25 @@ export type NoteSize = {
   height: number;
 };
 
+export type NoteKind = "note" | "project";
+
+export type NoteTodo = {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+  chatIds?: string[];
+};
+
 export type SharedNote = {
   id: string;
   ownerId?: string;
   chatId?: string;
   workspaceId?: string;
   scope: NoteScope;
+  kind?: NoteKind;
   title: string;
   content: string;
+  todos?: NoteTodo[];
   color: string;
   position: NotePosition;
   size: NoteSize;
@@ -336,10 +349,19 @@ export type Chat = {
   /** Cursor model params, e.g. [{ id: "fast", value: "true" }] */
   modelParams?: Array<{ id: string; value: string }>;
   messages: ChatMessage[];
-  queuedMessages?: Array<{ id: string; text: string }>;
+  queuedMessages?: Array<{
+    id: string;
+    text: string;
+    referenceText?: string;
+    references?: ChatMessage["references"];
+  }>;
   canvas?: string;
   workspaces?: WorkspaceItem[];
   browserContext?: BrowserContext;
+  /** Hidden from the regular chat list; opened from the owning automation run history. */
+  automationId?: string;
+  automationRunId?: string;
+  automationName?: string;
   sessionState?: ChatSessionState;
   runStatus?: ChatRunStatus;
   runUpdatedAt?: string;
@@ -415,6 +437,7 @@ export type GlobalModelSettings = {
     recovery?: boolean;
     askUserTimeout?: boolean;
     voiceInput?: boolean;
+    browser?: boolean;
   };
   customModes?: AgentMode[];
 };
@@ -581,7 +604,12 @@ export function updateChat(
     agentId?: string | null;
     modelId?: string | null;
     modelParams?: Array<{ id: string; value: string }> | null;
-    queuedMessages?: Array<{ id: string; text: string }> | null;
+    queuedMessages?: Array<{
+      id: string;
+      text: string;
+      referenceText?: string;
+      references?: ChatMessage["references"];
+    }> | null;
     canvas?: string | null;
     workspaces?: WorkspaceItem[] | null;
     browserContext?: BrowserContext | null;
@@ -634,6 +662,25 @@ export function updateChat(
       .map((item) => ({
         id: item.id.slice(0, 200),
         text: item.text.slice(0, 100_000),
+        ...(typeof item.referenceText === "string" && item.referenceText.trim()
+          ? { referenceText: item.referenceText.slice(0, 100_000) }
+          : {}),
+        ...(Array.isArray(item.references)
+          ? {
+              references: item.references
+                .filter((reference) => reference && typeof reference.id === "string" && typeof reference.kind === "string" && typeof reference.label === "string")
+                .slice(0, 20)
+                .map((reference) => ({
+                  kind: reference.kind.slice(0, 40),
+                  id: reference.id.slice(0, 300),
+                  label: reference.label.slice(0, 300),
+                  ...(reference.source === "explicit" || reference.source === "pinned" ? { source: reference.source } : {}),
+                  ...(typeof reference.detail === "string" ? { detail: reference.detail.slice(0, 500) } : {}),
+                  ...(typeof reference.path === "string" ? { path: reference.path.slice(0, 4_000) } : {}),
+                  ...(typeof reference.content === "string" ? { content: reference.content.slice(0, 8_000) } : {}),
+                })),
+            }
+          : {}),
       }))
       .filter((item) => item.text.trim())
       .slice(0, 50);
