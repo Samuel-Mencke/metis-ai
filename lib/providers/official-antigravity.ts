@@ -32,11 +32,9 @@ export function antigravityMcpConfig(mcp: McpServerMap) {
     mcpServers: Object.fromEntries(
       Object.entries(mcp).map(([id, server]) => [
         id,
-        {
-          command: server.command,
-          args: server.args,
-          env: server.env,
-        },
+        server.type === "http"
+          ? { command: "npx", args: ["-y", "mcp-remote", server.url], env: {} as Record<string, string> }
+          : { command: server.command, args: server.args, env: server.env },
       ]),
     ),
   };

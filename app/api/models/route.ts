@@ -4,7 +4,9 @@ import { filterAllowedModels } from "@/lib/model-access";
 import {
   defaultParamsForModel,
   modelParametersForModel,
+  UNCENSORED_PARAMETER,
 } from "@/lib/model-params";
+import { isUncensoredEnabled } from "@/lib/feature-flags";
 import {
   findActiveConnection,
   getProviderConnectionSecret,
@@ -60,6 +62,13 @@ export type ModelInfo = {
   defaultParams?: ModelParamSelection[];
   contextWindow?: number;
 };
+
+function withUncensoredParameter(parameters: ModelParameter[] = []) {
+  const without = parameters.filter((parameter) => parameter.id !== "uncensored");
+  if (!isUncensoredEnabled()) return without;
+  if (parameters.some((parameter) => parameter.id === "uncensored")) return parameters;
+  return [...without, UNCENSORED_PARAMETER];
+}
 
 function modelContextWindow(value: unknown, id?: string, displayName?: string) {
   const record = value && typeof value === "object" ? value as { id?: unknown; displayName?: unknown } : null;
@@ -143,7 +152,7 @@ export async function GET(req: Request) {
           source: "cursor",
           description: m.description,
           capabilities: getVerifiedProviderCapabilities("cursor", m.id)?.verified,
-          parameters,
+          parameters: withUncensoredParameter(parameters),
           defaultParams,
         };
       });
@@ -237,7 +246,7 @@ export async function GET(req: Request) {
           tags: "tags" in model && Array.isArray(model.tags) ? model.tags : undefined,
           ...(contextWindow ? { contextWindow } : {}),
           capabilities: model.capabilities as Record<string, boolean> | undefined,
-          ...(parameters.length ? { parameters } : {}),
+          ...(parameters.length ? { parameters: withUncensoredParameter(parameters) } : {}),
           defaultParams,
         };
       }),

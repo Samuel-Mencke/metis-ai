@@ -43,6 +43,9 @@ import { canRecoverCursorSend, cursorSessionFailureKind } from "@/lib/cursor-ses
 import { providerNativeParams } from "@/lib/model-params";
 import { uncensoredInstructions } from "@/lib/uncensored";
 import { recordSignal, type TaskCategory } from "@/lib/model-telemetry";
+import { classifyTool, resolveMcpToolName, toolDetailFromArgs } from "@/lib/tool-kind";
+import { metisAgentIdentity } from "@/lib/agent-identity";
+import { sanitizeModelParams } from "@/lib/feature-flags";
 
 const AGENT_INIT_TIMEOUT_MS = 90_000;
 const AGENT_INACTIVITY_TIMEOUT_MS = 5 * 60_000;
@@ -90,8 +93,23 @@ function persistedConversationContext(
   return `[Earlier persisted messages truncated to fit the model context]\n${context.slice(-PERSISTED_CONTEXT_MAX_CHARS)}`;
 }
 
-function classifyTool(name: string, input?: unknown, result?: unknown): ToolPart["kind"] {
-  return classifyToolKind(name, input, result);
+function toolNameFromDelta(update: {
+  callId?: string;
+  toolCall?: { type?: string; args?: unknown; result?: unknown };
+}) {
+  const toolCall = update.toolCall || {};
+  const args = asRecord(toolCall.args);
+  const typeName = typeof toolCall.type === "string" ? toolCall.type : "";
+  if (typeName === "mcp") {
+    return resolveMcpToolName(
+      typeName,
+      args,
+      (typeof args.toolName === "string" && args.toolName) ||
+        (typeof args.providerIdentifier === "string" && args.providerIdentifier) ||
+        "mcp",
+    );
+  }
+  return resolveMcpToolName(typeName || "tool", args);
 }
 
 type ProvidedAttachment = {
@@ -373,6 +391,49 @@ function extractWorkspace(value: string) {
   return visit(value);
 }
 
+function extractAutomation(value: string) {
+  const visit = (candidate: unknown, depth = 0): { id: string; name: string } | null => {
+    if (depth > 8 || candidate == null) return null;
+    if (typeof candidate === "string") {
+      const plain = candidate.trim();
+      if (!plain) return null;
+      try {
+        return visit(JSON.parse(plain), depth + 1);
+      } catch {
+        const link = plain.match(/automation:\/\/([^/?#\s]+)/i);
+        return link ? { id: decodeURIComponent(link[1]), name: "Automation" } : null;
+      }
+    }
+    if (Array.isArray(candidate)) {
+      for (const item of candidate) {
+        const result = visit(item, depth + 1);
+        if (result) return result;
+      }
+      return null;
+    }
+    if (typeof candidate !== "object") return null;
+    const parsed = candidate as Record<string, unknown>;
+    const nested = parsed.automation && typeof parsed.automation === "object" && !Array.isArray(parsed.automation)
+      ? parsed.automation as Record<string, unknown>
+      : parsed.value && typeof parsed.value === "object" && !Array.isArray(parsed.value)
+        ? parsed.value as Record<string, unknown>
+        : {};
+    const id = [nested.id, parsed.id]
+      .find((item): item is string => typeof item === "string" && item.trim().length > 0);
+    if (!id) {
+      for (const key of ["automation", "value", "content", "text", "result"]) {
+        const result = visit(parsed[key], depth + 1);
+        if (result) return result;
+      }
+      return null;
+    }
+    const name = [nested.name, parsed.name]
+      .find((item): item is string => typeof item === "string" && item.trim().length > 0);
+    return { id: id.trim(), name: name?.trim() || "Automation" };
+  };
+  return visit(value);
+}
+
 function extractSuggestions(value: string) {
   const match = value.match(/```suggestions\s*\n([\s\S]*?)```/i);
   if (!match) return { text: value, suggestions: [] as string[] };
@@ -572,7 +633,7 @@ export async function runQueuedJob(job: AgentJob) {
     resumeMarker: { jobId: job.id, runId: job.runId || job.id, safe: false, reason: "Agent run was active at checkpoint." },
     availability: "available",
   });
-  emit("status", { status: "running" });
+  emit("status", { status: "running", message: "Starting agent session…" });
   let agent: Awaited<ReturnType<typeof Agent.create>> | undefined;
   let text = "";
   const tools: ToolPart[] = [];
@@ -580,6 +641,7 @@ export async function runQueuedJob(job: AgentJob) {
   const providedAttachments: ProvidedAttachment[] = [];
   const createdWorkspaces: WorkspaceItem[] = [];
   const createdChats: Array<{ id: string; title: string }> = [];
+  const createdAutomations: Array<{ id: string; name: string }> = [];
   const globalModelSettings = getGlobalModelSettings(job.userId);
   const compressionSettings = globalModelSettings.compression;
   const compressionEnabled = Boolean(compressionSettings?.enabled) && !job.incognito && !chat.incognito;
@@ -619,7 +681,7 @@ export async function runQueuedJob(job: AgentJob) {
   const configuredSubagentModel = job.extendedModelId ||
     (globalModelSettings.subagentModelEnabled ? globalModelSettings.subagentModelId : undefined);
   const configuredSubagentModelParams = configuredSubagentModel
-    ? globalModelSettings.modelParamsByModel?.[configuredSubagentModel] || []
+    ? sanitizeModelParams(globalModelSettings.modelParamsByModel?.[configuredSubagentModel] || []) || []
     : [];
   const customSubagentDefinitions = configuredSubagentModel
     ? Object.fromEntries(
@@ -733,9 +795,9 @@ export async function runQueuedJob(job: AgentJob) {
     return workspace;
   };
   try {
-    const modelParams = job.modelParams?.length
-      ? job.modelParams
-      : chat.modelParams;
+    const modelParams = sanitizeModelParams(
+      job.modelParams?.length ? job.modelParams : chat.modelParams,
+    );
     const model = {
       id: requestedModelId,
       ...(modelParams?.length
@@ -814,9 +876,11 @@ export async function runQueuedJob(job: AgentJob) {
           mcpServers: getMcpServers(mcpContext),
           ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
         }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be created within 90 seconds.");
+    emit("status", { status: "running", message: "Waiting for the model…" });
     updateJob(job.id, { agentId: agent.agentId, runId: job.id });
     updateChat(job.chatId, { agentId: agent.agentId }, job.userId);
     const prompt = [
+      metisAgentIdentity(),
       ...((job.modelParams?.length ? job.modelParams : chat.modelParams)
         ?.some((param) => param.id === "uncensored" && param.value === "true")
         ? [uncensoredInstructions()]
@@ -850,6 +914,7 @@ export async function runQueuedJob(job: AgentJob) {
       "When referring to an existing or newly created plan/canvas, include its exact Markdown link using workspace://plan/<id> or workspace://canvas/<id>.",
       "When referring to an existing or newly created note, include its exact Markdown link using note://<id>, for example [Note title](note://note-id). Notes must be clickable links, not only bold text.",
       "Use list_notes or search_notes when you need note IDs before linking them.",
+      "To create an automation, call create_automation with name, prompt, and schedule (kind: once | interval | days | monthly). Recurring minute schedules must be at least 60. Use list_automations, update_automation, pause_automation, resume_automation, and delete_automation for existing ones. Do not claim an automation was created without a completed tool call. When referring to an automation, include its exact Markdown link using automation://<id>, for example [Name](automation://id).",
       "When you use browser results, selected references, or other verifiable web sources, cite the exact URL immediately after the sentence it supports using the format [Source: Website title](URL). At the end, put every source used in exactly one fenced block starting with ```sources, with one Markdown link per line. Never invent URLs; if no verifiable source is available, do not create a sources block.",
       "Workspace rule: create or edit a plan/canvas only when the active mode and user request allow it. Never claim a workspace exists until the tool result or persisted workspace confirms it.",
       "For memories, use list_memories to retrieve the current user's entries, add_memory only for useful durable facts or preferences, and edit_memory with the exact memory id to change an existing entry. Never claim a memory was changed without a completed tool call.",
@@ -921,6 +986,255 @@ export async function runQueuedJob(job: AgentJob) {
         resetInactivityTimer();
       }, AGENT_INACTIVITY_TIMEOUT_MS);
     };
+    const markSendProgress = () => {
+      if (sendTimeout) {
+        clearTimeout(sendTimeout);
+        sendTimeout = undefined;
+      }
+      resetInactivityTimer();
+    };
+    const ingestThinking = (payload: {
+      text?: string;
+      replace?: boolean;
+      done?: boolean;
+      durationMs?: number;
+    }) => {
+      const delta = payload.text || "";
+      const lastPart = parts.at(-1);
+      if (delta) {
+        if (payload.replace || lastPart?.type !== "thinking" || lastPart.done) {
+          parts.push({
+            type: "thinking",
+            content: delta,
+            done: payload.done,
+            ...(typeof payload.durationMs === "number" ? { durationMs: payload.durationMs } : {}),
+          });
+        } else {
+          lastPart.content += delta;
+          if (payload.done) lastPart.done = true;
+          if (typeof payload.durationMs === "number") lastPart.durationMs = payload.durationMs;
+        }
+      } else if (lastPart?.type === "thinking") {
+        if (payload.done) lastPart.done = true;
+        if (typeof payload.durationMs === "number") lastPart.durationMs = payload.durationMs;
+      }
+      checkpoint();
+      emit("thinking", payload);
+    };
+    const ingestTool = (rawToolEvent: Record<string, unknown>, eventType: string) => {
+      const rawCallId =
+        rawToolEvent.call_id ||
+        rawToolEvent.callId ||
+        rawToolEvent.tool_call_id;
+      const toolId = normalizeToolId(typeof rawCallId === "string" ? rawCallId : crypto.randomUUID());
+      const existingTool = tools.find((tool) => tool.id === toolId)
+        || tools.find((tool) => tool.id === `todo-${job.id}`);
+      const toolName =
+        (typeof rawToolEvent.name === "string" && rawToolEvent.name) ||
+        (typeof rawToolEvent.tool_name === "string" && rawToolEvent.tool_name) ||
+        (typeof rawToolEvent.toolName === "string" && rawToolEvent.toolName) ||
+        existingTool?.name ||
+        "tool";
+      const toolStatus =
+        (typeof rawToolEvent.status === "string" && rawToolEvent.status) ||
+        (eventType === "tool_result" || eventType === "tool-call-completed" ? "completed" : "running");
+      const toolArgs = rawToolEvent.args ?? rawToolEvent.input ?? rawToolEvent.arguments;
+      const toolResult = rawToolEvent.result ?? rawToolEvent.output ?? rawToolEvent.content;
+      const detail = toolDetailFromArgs(toolArgs) || existingTool?.detail;
+      const subagent = extractSubagent(toolName, toolArgs, toolResult);
+      let editArgs = toolArgs;
+      if (editArgs === undefined && existingTool?.input) {
+        try {
+          editArgs = JSON.parse(existingTool.input);
+        } catch {
+          editArgs = undefined;
+        }
+      }
+      const editMetadata =
+        toolStatus === "running" || isFinishedToolStatus(toolStatus)
+          ? extractEditMetadata(
+              toolName,
+              editArgs,
+              agentCwd,
+              existingTool?.diff,
+              isFinishedToolStatus(toolStatus),
+            )
+          : {};
+      const resolvedName = resolveMcpToolName(toolName, toolArgs, existingTool?.input);
+      const displayName = innerToolName(resolvedName, editArgs, toolResult);
+      const inputText = editArgs !== undefined ? JSON.stringify(editArgs) : undefined;
+      const resultText = toolResult !== undefined && !subagent ? JSON.stringify(toolResult) : undefined;
+      const todos = todosFromToolPayload(inputText, resultText);
+      const kind = classifyToolKind(displayName || resolvedName, editArgs, toolResult);
+      const stableId = kind === "todo" ? `todo-${job.id}` : toolId;
+      const nextTool: ToolPart = {
+        id: stableId,
+        name: displayName || resolvedName,
+        status: toolStatus,
+        kind,
+        ...(detail ? { detail } : {}),
+        ...(editMetadata.path ? { path: editMetadata.path } : {}),
+        ...(editMetadata.diff ? { diff: editMetadata.diff } : {}),
+        ...(inputText ? { input: inputText } : {}),
+        ...(resultText ? { result: resultText } : {}),
+        ...(todos?.length ? { todos } : {}),
+        ...(subagent ? { subagent } : {}),
+      };
+      const existingToolIndex = tools.findIndex((tool) => tool.id === stableId);
+      if (existingToolIndex >= 0) {
+        tools[existingToolIndex] = { ...tools[existingToolIndex], ...nextTool };
+      } else {
+        tools.push(nextTool);
+      }
+      const existingPartIndex = parts.findIndex((part) => part.type === "tool" && part.id === stableId);
+      if (existingPartIndex >= 0) {
+        const previousPart = parts[existingPartIndex];
+        if (previousPart.type === "tool") parts[existingPartIndex] = { ...previousPart, ...nextTool };
+      } else {
+        parts.push({ type: "tool", ...nextTool });
+      }
+      checkpoint(true);
+      const toolResultText = typeof toolResult === "string"
+        ? toolResult
+        : toolResult ? JSON.stringify(toolResult) : "";
+      const providedAttachment =
+        toolName === "provide_file" && isFinishedToolStatus(toolStatus)
+          ? extractProvidedAttachment(toolResult)
+          : null;
+      if (providedAttachment && !providedAttachments.some((item) => item.id === providedAttachment.id)) {
+        providedAttachments.push(providedAttachment);
+      }
+      const parsedWorkspace =
+        extractWorkspace(toolResultText) ||
+        (toolArgs !== undefined ? extractWorkspace(JSON.stringify(toolArgs)) : null) ||
+        (existingTool?.input ? extractWorkspace(existingTool.input) : null);
+      if (isFinishedToolStatus(toolStatus) && (nextTool.kind === "plan" || nextTool.kind === "canvas") && parsedWorkspace) {
+        const workspaceType: WorkspaceItem["type"] = nextTool.kind === "canvas" ? "canvas" : "plan";
+        const workspace: WorkspaceItem | undefined = parsedWorkspace.id
+          ? {
+              id: parsedWorkspace.id,
+              type: workspaceType,
+              name: parsedWorkspace.title,
+              content: parsedWorkspace.content,
+              createdAt: parsedWorkspace.createdAt || new Date().toISOString(),
+              updatedAt: parsedWorkspace.updatedAt || new Date().toISOString(),
+              version: parsedWorkspace.version || 1,
+            }
+          : persistWorkspace(workspaceType, parsedWorkspace.content, parsedWorkspace.title);
+        if (workspace) {
+          if (parsedWorkspace.id && !createdWorkspaces.some((item) => item.id === workspace.id)) {
+            createdWorkspaces.push(workspace);
+          }
+          emit("workspace", { workspace });
+          nextTool.result = JSON.stringify({
+            ...parsedWorkspace,
+            id: workspace.id,
+            workspaceLink: `workspace://${workspace.type}/${workspace.id}`,
+          });
+        }
+      }
+      const parsedAutomation = extractAutomation(toolResultText)
+        || (toolArgs !== undefined ? extractAutomation(JSON.stringify(toolArgs)) : null);
+      if (
+        isFinishedToolStatus(toolStatus)
+        && nextTool.kind === "automation"
+        && /create_automation/i.test(resolvedName)
+        && parsedAutomation?.id
+      ) {
+        if (!createdAutomations.some((item) => item.id === parsedAutomation.id)) {
+          createdAutomations.push(parsedAutomation);
+        }
+        try {
+          const parsedResult = toolResultText ? JSON.parse(toolResultText) as Record<string, unknown> : {};
+          nextTool.result = JSON.stringify({
+            ...(parsedResult && typeof parsedResult === "object" && !Array.isArray(parsedResult) ? parsedResult : { automation: parsedAutomation }),
+            id: parsedAutomation.id,
+            automationLink: `automation://${parsedAutomation.id}`,
+          });
+        } catch {
+          nextTool.result = JSON.stringify({
+            automation: parsedAutomation,
+            automationLink: `automation://${parsedAutomation.id}`,
+          });
+        }
+        const storedTool = tools.find((tool) => tool.id === stableId);
+        if (storedTool) storedTool.result = nextTool.result;
+        const storedPart = parts.find((part) => part.type === "tool" && part.id === stableId);
+        if (storedPart?.type === "tool") storedPart.result = nextTool.result;
+      }
+      emit("tool", {
+        callId: stableId,
+        name: nextTool.name,
+        status: toolStatus,
+        kind: nextTool.kind,
+        ...(nextTool.detail ? { detail: nextTool.detail } : {}),
+        ...(nextTool.path ? { path: nextTool.path } : {}),
+        ...(nextTool.diff ? { diff: nextTool.diff } : {}),
+        ...(nextTool.input ? { input: nextTool.input } : {}),
+        ...(nextTool.result ? { result: nextTool.result } : {}),
+        ...(nextTool.todos?.length ? { todos: nextTool.todos } : {}),
+        ...(nextTool.subagent ? { subagent: nextTool.subagent } : {}),
+        ...(providedAttachment ? { attachment: providedAttachment } : {}),
+      });
+    };
+    const handleDelta = (update: {
+      type: string;
+      text?: string;
+      callId?: string;
+      thinkingDurationMs?: number;
+      status?: string;
+      message?: string;
+      toolCall?: { type?: string; args?: unknown; result?: unknown };
+    }) => {
+      if (cancellationRequested) return;
+      markSendProgress();
+      if (update.type === "text-delta") {
+        const delta = String(update.text || "");
+        if (!delta) return;
+        receivedTextDelta = true;
+        const nextText = stripTranscriptDump(text + delta);
+        if (nextText === text) return;
+        const applied = nextText.startsWith(text) ? nextText.slice(text.length) : "";
+        text = nextText;
+        const lastPart = parts.at(-1);
+        if (!applied && lastPart?.type === "text") lastPart.content = nextText;
+        else if (lastPart?.type === "text") lastPart.content += applied;
+        else parts.push({ type: "text", content: applied || nextText });
+        checkpoint();
+        if (applied) emit("text", { text: applied });
+        return;
+      }
+      if (update.type === "thinking-delta") {
+        ingestThinking({ text: String(update.text || ""), replace: false, done: false });
+        return;
+      }
+      if (update.type === "thinking-completed") {
+        ingestThinking({
+          done: true,
+          ...(typeof update.thinkingDurationMs === "number" ? { durationMs: update.thinkingDurationMs } : {}),
+        });
+        return;
+      }
+      if (
+        update.type === "tool-call-started" ||
+        update.type === "tool-call-delta" ||
+        update.type === "partial-tool-call" ||
+        update.type === "tool-call-completed"
+      ) {
+        const toolCall = update.toolCall || {};
+        ingestTool({
+          callId: update.callId,
+          name: toolNameFromDelta(update),
+          status: update.type === "tool-call-completed" ? "completed" : "running",
+          args: toolCall.args,
+          result: toolCall.result,
+        }, update.type);
+        return;
+      }
+      if (update.type === "step-started") {
+        emit("status", { status: "running", message: update.message || "Working…" });
+      }
+    };
     const cancellationWatcher = setInterval(() => {
       const currentJob = getJob(job.id);
       const pendingModelId = currentJob?.pendingModelId?.trim();
@@ -939,21 +1253,15 @@ export async function runQueuedJob(job: AgentJob) {
         agent!.send(prompt, {
           mcpServers: getMcpServers(mcpContext),
           onDelta: ({ update }) => {
-            if (cancellationRequested || update.type !== "text-delta") return;
-            resetInactivityTimer();
-            const delta = String((update as { text?: string }).text || "");
-            if (!delta) return;
-            receivedTextDelta = true;
-            const nextText = stripTranscriptDump(text + delta);
-            if (nextText === text) return;
-            const applied = nextText.startsWith(text) ? nextText.slice(text.length) : "";
-            text = nextText;
-            const lastPart = parts.at(-1);
-            if (!applied && lastPart?.type === "text") lastPart.content = nextText;
-            else if (lastPart?.type === "text") lastPart.content += applied;
-            else parts.push({ type: "text", content: applied || nextText });
-            checkpoint();
-            if (applied) emit("text", { text: applied });
+            handleDelta(update as {
+              type: string;
+              text?: string;
+              callId?: string;
+              thinkingDurationMs?: number;
+              status?: string;
+              message?: string;
+              toolCall?: { type?: string; args?: unknown; result?: unknown };
+            });
           },
         }),
         new Promise<never>((_, reject) => {
@@ -1034,130 +1342,18 @@ export async function runQueuedJob(job: AgentJob) {
           status: String((event as { status?: string }).status || "running"),
           message: (event as { message?: string }).message,
         });
+        } else if (event.type === "thinking") {
+          const thinkingEvent = event as { text?: string; thinking_duration_ms?: number };
+          ingestThinking({
+            text: thinkingEvent.text || "",
+            replace: false,
+            done: typeof thinkingEvent.thinking_duration_ms === "number",
+            ...(typeof thinkingEvent.thinking_duration_ms === "number"
+              ? { durationMs: thinkingEvent.thinking_duration_ms }
+              : {}),
+          });
         } else if (["tool_call", "tool_use", "tool_result"].includes(String((event as { type?: unknown }).type))) {
-        const eventType = String((event as { type?: unknown }).type);
-        const rawToolEvent = event as unknown as Record<string, unknown>;
-        const rawCallId =
-          rawToolEvent.call_id ||
-          rawToolEvent.callId ||
-          rawToolEvent.tool_call_id;
-        const toolId = normalizeToolId(typeof rawCallId === "string" ? rawCallId : crypto.randomUUID());
-        const existingTool = tools.find((tool) => tool.id === toolId)
-          || tools.find((tool) => tool.id === `todo-${job.id}`);
-        const toolName =
-          (typeof rawToolEvent.name === "string" && rawToolEvent.name) ||
-          (typeof rawToolEvent.tool_name === "string" && rawToolEvent.tool_name) ||
-          (typeof rawToolEvent.toolName === "string" && rawToolEvent.toolName) ||
-          existingTool?.name ||
-          "tool";
-        const toolStatus =
-          (typeof rawToolEvent.status === "string" && rawToolEvent.status) ||
-          (eventType === "tool_result" ? "completed" : "running");
-        const toolArgs = rawToolEvent.args ?? rawToolEvent.input ?? rawToolEvent.arguments;
-        const toolResult = rawToolEvent.result ?? rawToolEvent.output ?? rawToolEvent.content;
-        const subagent = extractSubagent(toolName, toolArgs, toolResult);
-        let editArgs = toolArgs;
-        if (editArgs === undefined && existingTool?.input) {
-          try {
-            editArgs = JSON.parse(existingTool.input);
-          } catch {
-            editArgs = undefined;
-          }
-        }
-        const editMetadata =
-          toolStatus === "running" || isFinishedToolStatus(toolStatus)
-            ? extractEditMetadata(
-                toolName,
-                editArgs,
-                agentCwd,
-                existingTool?.diff,
-                isFinishedToolStatus(toolStatus),
-              )
-            : {};
-        const displayName = innerToolName(toolName, editArgs, toolResult);
-        const inputText = editArgs !== undefined ? JSON.stringify(editArgs) : undefined;
-        const resultText = toolResult !== undefined && !subagent ? JSON.stringify(toolResult) : undefined;
-        const todos = todosFromToolPayload(inputText, resultText);
-        const kind = classifyTool(displayName || toolName, editArgs, toolResult);
-        const stableId = kind === "todo" ? `todo-${job.id}` : toolId;
-        const nextTool: ToolPart = {
-          id: stableId,
-          name: displayName || toolName,
-          status: toolStatus,
-          kind,
-          ...(editMetadata.path ? { path: editMetadata.path } : {}),
-          ...(editMetadata.diff ? { diff: editMetadata.diff } : {}),
-        ...(inputText ? { input: inputText } : {}),
-        ...(resultText ? { result: resultText } : {}),
-        ...(todos?.length ? { todos } : {}),
-        ...(subagent ? { subagent } : {}),
-        };
-        const existingToolIndex = tools.findIndex((tool) => tool.id === stableId);
-        if (existingToolIndex >= 0) {
-          tools[existingToolIndex] = { ...tools[existingToolIndex], ...nextTool };
-        } else {
-          tools.push(nextTool);
-        }
-        const existingPartIndex = parts.findIndex((part) => part.type === "tool" && part.id === stableId);
-        if (existingPartIndex >= 0) {
-          const previousPart = parts[existingPartIndex];
-          if (previousPart.type === "tool") parts[existingPartIndex] = { ...previousPart, ...nextTool };
-        } else {
-          parts.push({ type: "tool", ...nextTool });
-        }
-        checkpoint(true);
-        const toolResultText = typeof toolResult === "string"
-          ? toolResult
-          : toolResult ? JSON.stringify(toolResult) : "";
-        const providedAttachment =
-          (toolName === "provide_file" || displayName === "provide_file") && isFinishedToolStatus(toolStatus)
-            ? extractProvidedAttachment(toolResult)
-            : null;
-        if (providedAttachment && !providedAttachments.some((item) => item.id === providedAttachment.id)) {
-          providedAttachments.push(providedAttachment);
-        }
-        const parsedWorkspace =
-          extractWorkspace(toolResultText) ||
-          (toolArgs !== undefined ? extractWorkspace(JSON.stringify(toolArgs)) : null) ||
-          (existingTool?.input ? extractWorkspace(existingTool.input) : null);
-        if (isFinishedToolStatus(toolStatus) && (nextTool.kind === "plan" || nextTool.kind === "canvas") && parsedWorkspace) {
-          const workspaceType: WorkspaceItem["type"] = nextTool.kind === "canvas" ? "canvas" : "plan";
-          const workspace: WorkspaceItem | undefined = parsedWorkspace.id
-            ? {
-                id: parsedWorkspace.id,
-                type: workspaceType,
-                name: parsedWorkspace.title,
-                content: parsedWorkspace.content,
-                createdAt: parsedWorkspace.createdAt || new Date().toISOString(),
-                updatedAt: parsedWorkspace.updatedAt || new Date().toISOString(),
-                version: parsedWorkspace.version || 1,
-              }
-            : persistWorkspace(workspaceType, parsedWorkspace.content, parsedWorkspace.title);
-          if (workspace) {
-            if (parsedWorkspace.id && !createdWorkspaces.some((item) => item.id === workspace.id)) {
-              createdWorkspaces.push(workspace);
-            }
-            emit("workspace", { workspace });
-            nextTool.result = JSON.stringify({
-              ...parsedWorkspace,
-              id: workspace.id,
-              workspaceLink: `workspace://${workspace.type}/${workspace.id}`,
-            });
-          }
-        }
-        emit("tool", {
-          callId: stableId,
-          name: nextTool.name,
-          status: toolStatus,
-          kind: nextTool.kind,
-          ...(nextTool.path ? { path: nextTool.path } : {}),
-          ...(nextTool.diff ? { diff: nextTool.diff } : {}),
-          ...(nextTool.input ? { input: nextTool.input } : {}),
-          ...(nextTool.result ? { result: nextTool.result } : {}),
-          ...(nextTool.todos?.length ? { todos: nextTool.todos } : {}),
-          ...(nextTool.subagent ? { subagent: nextTool.subagent } : {}),
-          ...(providedAttachment ? { attachment: providedAttachment } : {}),
-        });
+        ingestTool(event as unknown as Record<string, unknown>, String((event as { type?: unknown }).type));
         } else if (event.type === "assistant") {
         if (receivedTextDelta) continue;
         const content = (event as { message?: { content?: Array<{ type: string; text?: string }> } }).message?.content;
@@ -1318,7 +1514,7 @@ export async function runQueuedJob(job: AgentJob) {
           modeId: job.modeId,
           modelId: job.modelId,
           extendedModelId: job.extendedModelId,
-          modelParams: job.modelParams,
+          modelParams: sanitizeModelParams(job.modelParams),
         });
         createdChats.push({ id: child.id, title: child.title });
         emit("chat", {
@@ -1359,15 +1555,23 @@ export async function runQueuedJob(job: AgentJob) {
       if (allLinks.length && !/(workspace:\/\/(plan|canvas)\/|\/\?c=)/i.test(text)) {
         text = `${text.trim()}\n\n${allLinks.join(" · ")}`;
       }
+      if (createdAutomations.length && !/automation:\/\//i.test(text)) {
+        text = `${text.trim()}\n\n${createdAutomations
+          .map((item) => `[${item.name}](automation://${item.id})`)
+          .join(" · ")}`;
+      }
     }
-    if (!text && (createdWorkspaces.length || createdChats.length)) {
+    if (!text && (createdWorkspaces.length || createdChats.length || createdAutomations.length)) {
       const workspaceLinks = createdWorkspaces
         .map((item) => `${item.type === "plan" ? "Plan" : "Canvas"} created: [${item.name}](workspace://${item.type}/${item.id})`)
         .join("\n");
       const chatLinks = createdChats
         .map((chat) => `Chat created: [${chat.title}](/?c=${encodeURIComponent(chat.id)})`)
         .join("\n");
-      text = [workspaceLinks, chatLinks].filter(Boolean).join("\n");
+      const automationLinks = createdAutomations
+        .map((item) => `Automation created: [${item.name}](automation://${item.id})`)
+        .join("\n");
+      text = [workspaceLinks, chatLinks, automationLinks].filter(Boolean).join("\n");
     }
     const extractedSuggestions = extractSuggestions(ensureRecommendationSuggestions(text));
     text = extractedSuggestions.text;

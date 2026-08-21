@@ -108,7 +108,7 @@ import {
   estimateContextTokens,
   resolveContextTotal,
 } from "@/lib/context-window";
-import { ToolCallGroup, type ToolCallData } from "@/components/tool-call-chip";
+import { PlanToolCallCard, ToolCallGroup, type ActivityEntry, type ToolCallData } from "@/components/tool-call-chip";
 import { classifyToolKind, layoutAssistantParts, remoteClientHostnameMap, todosFromToolPayload } from "@/lib/tool-call-display";
 import { stripTranscriptDump } from "@/lib/agent-transcript";
 import { planLooksParallelizable } from "@/lib/modes";
@@ -715,6 +715,8 @@ const SIDEBAR_MAX_WIDTH = 420;
 const WORKSPACE_WIDTH_STORAGE_KEY = `${clientConfig.storagePrefix}_workspace_width_compact`;
 const WORKSPACE_MIN_WIDTH = 280;
 const WORKSPACE_MAX_WIDTH = 1120;
+const CHAT_MIN_WIDTH = 640;
+const WORKSPACE_SQUEEZE_MIN_WIDTH = 200;
 const NOTIFICATIONS_STORAGE_KEY = `${clientConfig.storagePrefix}_notifications_enabled`;
 const SOUND_CUES_STORAGE_KEY = `${clientConfig.storagePrefix}_sound_cues_enabled`;
 const FINISH_SOUND_STORAGE_KEY = `${clientConfig.storagePrefix}_finish_sound`;
@@ -1017,8 +1019,8 @@ type ChatRuntime = {
 };
 
 type ActiveDiff = { name: string; path?: string; detail?: string; input?: string; diff?: ToolPart["diff"] };
-type ActiveSubagent = ToolPart;
-type ActiveRawTool = ToolPart;
+type ActiveSubagent = ToolPart | ToolCallData;
+type ActiveRawTool = ToolPart | ToolCallData;
 type BrowserTab = { id: string; title: string; url: string; favicon?: string };
 type BrowserContext = {
   tabs: BrowserTab[];
@@ -2000,6 +2002,24 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       ? Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, saved))
       : 240;
   });
+  const [viewportWidth, setViewportWidth] = useState(() =>
+    typeof window === "undefined" ? 1280 : window.innerWidth,
+  );
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth);
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  const layoutSidebarWidth =
+    viewportWidth >= 768 && desktopSidebarOpen ? sidebarWidth : 0;
+  const displayedWorkspaceWidth = (() => {
+    if (!workspaceOpen || workspaceFullscreen) return workspaceWidth;
+    const remaining = viewportWidth - layoutSidebarWidth - CHAT_MIN_WIDTH;
+    if (remaining >= workspaceWidth) return workspaceWidth;
+    return Math.max(WORKSPACE_SQUEEZE_MIN_WIDTH, remaining);
+  })();
 
   useEffect(() => {
     if (typeof window === "undefined" || window.innerWidth < 768) return;

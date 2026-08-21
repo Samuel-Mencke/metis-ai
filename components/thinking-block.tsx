@@ -2,16 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { ChevronRight } from "lucide-react";
-import { Markdown } from "@/components/markdown";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 
-function formatDuration(ms?: number): string | null {
-  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
+export function formatThinkingDuration(ms?: number): string | null {
+  if (ms == null || !Number.isFinite(ms) || ms <= 0) return null;
   if (ms < 1000) return `${Math.round(ms)}ms`;
   const s = ms / 1000;
   return s < 10 ? `${s.toFixed(1)}s` : `${Math.round(s)}s`;
@@ -21,53 +15,48 @@ export function ThinkingBlock({
   text,
   done = false,
   durationMs,
+  embedded = false,
 }: {
   text: string;
   done?: boolean;
   durationMs?: number;
+  embedded?: boolean;
 }) {
-  const [open, setOpen] = useState(!done);
+  const [expanded, setExpanded] = useState(!done);
 
   useEffect(() => {
-    if (done) setOpen(false);
+    if (done) setExpanded(false);
   }, [done]);
 
   if (!text) return null;
 
-  const durationLabel = formatDuration(durationMs);
-  const durationMsValue = durationMs ?? 0;
-  const thoughtLabel = done
-    ? durationLabel && durationMsValue >= 2500
-      ? `Thought ${durationLabel}`
-      : "Thought briefly"
-    : "Thinking";
+  const durationLabel = formatThinkingDuration(durationMs);
 
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="mb-2">
-      <CollapsibleTrigger
+    <div className={cn("w-full min-w-0", embedded ? "my-0.5" : "my-2")}>
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
         className={cn(
-          "group flex w-full items-center gap-1 rounded-md py-0.5 text-left",
-          "text-[11px] font-light text-muted-foreground/70 transition-colors hover:text-muted-foreground",
+          "group flex w-full cursor-pointer items-center gap-2 px-1 py-0.5 text-left text-xs text-muted-foreground",
+          "transition-colors hover:text-foreground",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         )}
       >
-        <ChevronRight
-          className={cn(
-            "size-3 shrink-0 transition-transform",
-            open && "rotate-90",
-          )}
-        />
-        <span>{thoughtLabel}</span>
-        {!done ? (
-          <span className="text-muted-foreground/60">…</span>
+        <ChevronRight className={cn("size-3 shrink-0 text-current opacity-50 transition-[opacity,transform] group-hover:opacity-100", expanded && "rotate-90")} />
+        <span className="truncate font-medium text-muted-foreground">{done ? "Thought" : "Thinking"}</span>
+        {durationLabel ? (
+          <span className="shrink-0 text-muted-foreground/70">· {durationLabel}</span>
+        ) : !done ? (
+          <span className="shrink-0 text-muted-foreground/60">…</span>
         ) : null}
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        <div className="mt-1 pl-4 text-xs font-light leading-relaxed text-muted-foreground/70 sm:text-sm">
-          <div className="[&_.markdown-body]:text-[inherit] [&_.markdown-body]:text-muted-foreground/70">
-            <Markdown content={text} />
-          </div>
+      </button>
+      {expanded ? (
+        <div className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap pl-7 pr-1 text-sm italic leading-relaxed text-muted-foreground">
+          {text}
         </div>
-      </CollapsibleContent>
-    </Collapsible>
+      ) : null}
+    </div>
   );
 }

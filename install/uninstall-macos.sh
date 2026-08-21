@@ -18,10 +18,10 @@ done
 [[ -n "$INSTALL_DIR" ]] || { echo "--install-dir is required." >&2; exit 2; }
 MANIFEST="$INSTALL_DIR/.metis-ai-install.json"
 [[ -f "$MANIFEST" ]] || { echo "Install manifest not found: $MANIFEST" >&2; exit 1; }
-IFS=$'\t' read -r SERVICE DATA_DIR < <(python3 - "$MANIFEST" <<'PY'
+IFS=$'\t' read -r SERVICE DATA_DIR INSTALL_METHOD < <(python3 - "$MANIFEST" <<'PY'
 import json, sys
 data=json.load(open(sys.argv[1]))
-print(data.get("serviceName", "metis-ai"), data.get("dataDir", ""), sep="\t")
+print(data.get("serviceName", "metis-ai"), data.get("dataDir", ""), data.get("installMethod", "native"), sep="\t")
 PY
 )
 [[ "$INSTALL_DIR" != "/" && "$INSTALL_DIR" != "$HOME" ]] || { echo "Refusing to remove unsafe install directory." >&2; exit 1; }
@@ -30,10 +30,16 @@ if [[ "$YES" != true ]]; then
   [[ "$answer" == "yes" ]] || { echo "Aborted."; exit 0; }
 fi
 run() { if [[ "$DRY_RUN" == true ]]; then printf '+ %s\n' "$*"; else "$@"; fi; }
+if [[ "$INSTALL_METHOD" == "docker" ]]; then
+  if command -v docker >/dev/null 2>&1; then
+    (cd "$INSTALL_DIR" && { docker compose down >/dev/null 2>&1 || docker-compose down >/dev/null 2>&1 || true; })
+  fi
+else
 for suffix in app worker mcp; do
   run launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/$SERVICE-$suffix.plist" >/dev/null 2>&1 || true
   run rm -f "$HOME/Library/LaunchAgents/$SERVICE-$suffix.plist"
 done
+fi
 if [[ "$KEEP_DATA" != true && -n "$DATA_DIR" && "$DATA_DIR" != "/" && "$DATA_DIR" != "$INSTALL_DIR" ]]; then
   run rm -rf -- "$DATA_DIR"
 fi

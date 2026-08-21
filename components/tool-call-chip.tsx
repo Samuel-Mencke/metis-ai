@@ -4,6 +4,8 @@ import {
   BookOpen,
   Bot,
   Brain,
+  Cable,
+  CalendarClock,
   ChevronRight,
   Code2,
   FilePenLine,
@@ -20,9 +22,11 @@ import {
 } from "lucide-react";
 import { memo, useState } from "react";
 import { cn } from "@/lib/utils";
+import { AutomationCard } from "@/components/automation-card";
 import { PlanWorkspaceCard } from "@/components/plan-workspace-card";
 import { planLooksParallelizable } from "@/lib/modes";
 import { CanvasWorkspaceCard } from "@/components/canvas-workspace-card";
+
 import {
   compactFileDiff,
   enrichToolDisplay,
@@ -38,13 +42,15 @@ import { looksLikeTranscriptDump } from "@/lib/agent-transcript";
 
 const toolCallTriggerClass =
   "inline-flex max-w-full cursor-pointer items-center gap-1 appearance-none rounded-none border-0 bg-transparent p-0 text-left text-[11px] font-light text-muted-foreground/70 shadow-none ring-0 outline-none transition-colors hover:bg-transparent hover:text-muted-foreground focus-visible:ring-0";
+import { parseAutomationCard } from "@/lib/tool-kind";
+import { ThinkingBlock, formatThinkingDuration } from "@/components/thinking-block";
 
 export type ToolCallData = {
   id: string;
   name: string;
   status: string;
   detail?: string;
-  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "other";
+  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "automation" | "other";
   path?: string;
   diff?: { before?: string; after?: string; additions?: number; deletions?: number };
   input?: string;
@@ -248,6 +254,97 @@ function toolReactKey(tool: ToolCallData, index: number): string {
   return `tool-${fingerprint || "unknown"}-${index}`;
 }
 
+function automationInfo(name: string, input?: string, result?: string, detail?: string) {
+  return parseAutomationCard(name, result, input, detail);
+}
+
+function isAutomationCardTool(tool: ToolCallData) {
+  if (["running", "in_progress", "pending", "started", "executing", "queued"].includes(tool.status.toLowerCase())) {
+    return false;
+  }
+  return Boolean(automationInfo(tool.name, tool.input, tool.result, tool.detail));
+}
+
+function mcpDisplayInfo(name: string, input?: string, detail?: string) {
+  const source = input || detail;
+  let values: Record<string, unknown> = {};
+  try {
+    const parsed = source ? JSON.parse(source) : null;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      values = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // MCP arguments may be plain text.
+  }
+  const nested = values.arguments && typeof values.arguments === "object"
+    ? values.arguments as Record<string, unknown>
+    : {};
+  const server = typeof values.server === "string" ? values.server : undefined;
+  const tool = typeof values.tool === "string"
+    ? values.tool
+    : typeof values.toolName === "string"
+      ? values.toolName
+      : undefined;
+  const nestedServer = typeof nested.server === "string" ? nested.server : undefined;
+  const nestedTool = typeof nested.tool === "string"
+    ? nested.tool
+    : typeof nested.toolName === "string"
+      ? nested.toolName
+      : undefined;
+  const action = [nestedServer || server, nestedTool || tool].filter(Boolean).join(" · ") || name.replaceAll("_", " ");
+  const description = [
+    values.description,
+    values.command,
+    values.query,
+    values.path,
+    nested.description,
+    nested.command,
+    nested.query,
+    nested.path,
+  ].find((value): value is string => typeof value === "string" && value.trim().length > 0);
+  return {
+    label: action,
+    detail: description?.replace(/\s+/g, " ").trim(),
+  };
+}
+
+function toolDisplayInfo(kind: ToolCallData["kind"], name: string, input?: string, detail?: string, path?: string) {
+  let values: Record<string, unknown> = {};
+  try {
+    const parsed = input ? JSON.parse(input) : null;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) values = parsed as Record<string, unknown>;
+  } catch {
+    // Keep the compact fallback for streamed or plain-text arguments.
+  }
+  const command = [values.command, values.cmd, values.script]
+    .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+  const inputPath = path || [values.path, values.file, values.filePath, values.filename]
+    .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+  const readableName = name
+    .replaceAll("_", " ")
+    .replace(/^(shell|read|edit|write)\s*/i, "")
+    .trim();
+  const primary = kind === "shell"
+    ? command || readableName
+    : kind === "read" || kind === "edit"
+      ? inputPath || readableName
+      : readableName;
+  const output = detail?.replace(/\s+/g, " ").trim();
+  const extra = command && primary !== command ? command : output;
+  return {
+    label: primary || kind || name.replaceAll("_", " "),
+    detail: extra && !isSameCompactText(primary, extra) ? extra : undefined,
+  };
+}
+
+function isSameCompactText(left?: string, right?: string) {
+  if (!left || !right) return false;
+  const a = left.replace(/\s+/g, " ").trim().toLowerCase();
+  const b = right.replace(/\s+/g, " ").trim().replace(/…$/u, "").trim().toLowerCase();
+  if (!a || !b) return false;
+  return a === b || a.startsWith(b) || b.startsWith(a);
+}
+
 export const ToolCallChip = memo(function ToolCallChip({
   name,
   status,
@@ -288,7 +385,7 @@ export const ToolCallChip = memo(function ToolCallChip({
   if (todoItems?.length) {
     const completed = todoItems.filter((todo) => /^(completed|done)$/i.test(todo.status || "")).length;
     return (
-      <div className="my-2 w-full rounded-md border border-border/50 bg-muted/15 px-2.5 py-2">
+      <div className="my-2 w-full px-1 py-0.5">
         <div className="mb-1.5 flex items-center gap-2 text-xs">
           <ListTodo className="size-3.5 text-blue-400" />
           <span className="font-medium text-foreground/80">Tasks</span>
@@ -323,7 +420,7 @@ export const ToolCallChip = memo(function ToolCallChip({
   if (resolvedKind === "memory") {
     const memoryOutput = formatToolOutput(result || detail || input) || "Memory updated";
     return (
-      <div className="my-2 flex w-full items-start gap-2 rounded-md border border-violet-400/30 bg-violet-400/10 px-2.5 py-2 text-xs">
+      <div className="my-1 flex w-full items-start gap-2 px-1 py-0.5 text-xs">
         <Brain className="mt-0.5 size-3.5 shrink-0 text-violet-400" />
         <div className="min-w-0">
           <p className="font-medium text-violet-300">Memory update</p>
@@ -334,6 +431,7 @@ export const ToolCallChip = memo(function ToolCallChip({
   }
   const plan = resolvedKind === "plan" ? planFromToolPayload(input, result, detail) : null;
   const previewText = headline.preview;
+  const automation = !running ? automationInfo(name, input, result, detail) : null;
   const diffStats = displayedDiffStats(diff, input);
   if (resolvedKind === "plan" && !running && plan) {
     return (
@@ -414,6 +512,20 @@ export const ToolCallChip = memo(function ToolCallChip({
           </a>
         </div>
       </section>
+    );
+  }
+  if (automation) {
+    return (
+      <AutomationCard
+        actionLabel={automation.actionLabel}
+        title={automation.title}
+        prompt={automation.prompt}
+        scheduleLabel={automation.scheduleLabel}
+        automationLink={automation.automationLink}
+        onOpen={() => {
+          window.dispatchEvent(new CustomEvent("ai-chat:open-automations", { detail: { id: automation.id } }));
+        }}
+      />
     );
   }
   return (
@@ -573,8 +685,20 @@ export function PlanToolCallCard({
   );
 }
 
+export type ActivityThinking = {
+  text: string;
+  done?: boolean;
+  durationMs?: number;
+};
+
+export type ActivityEntry =
+  | { type: "thinking"; thinking: ActivityThinking }
+  | { type: "tool"; tool: ToolCallData };
+
 export const ToolCallGroup = memo(function ToolCallGroup({
-  tools,
+  tools = [],
+  thinking = [],
+  activity,
   onOpenDiff,
   onOpenSubagent,
   onOpenWorkspace,
@@ -587,6 +711,8 @@ export const ToolCallGroup = memo(function ToolCallGroup({
   hostnames,
 }: {
   tools: ToolCallData[];
+  thinking?: ActivityThinking[];
+  activity?: ActivityEntry[];
   onOpenDiff?: (tool: ToolCallData) => void;
   onOpenSubagent?: (tool: ToolCallData) => void;
   onOpenWorkspace?: (tool: ToolCallData) => void;
@@ -612,7 +738,9 @@ export const ToolCallGroup = memo(function ToolCallGroup({
       tool.kind !== "plan" &&
       !isTodoTool(tool),
   );
-  const groupTitle = toolGroupLabel(regularTools);
+  const automationTools = tools.filter((tool) => isAutomationCardTool(tool));
+  const regularEntries = regularTools.filter((tool) => !isAutomationCardTool(tool));
+  const groupTitle = toolGroupLabel(regularEntries);
   const groupOpen = userOpen || Boolean(live) || Boolean(autoExpand);
   const lastToolId = regularTools[regularTools.length - 1]?.id;
   const renderTool = (tool: ToolCallData, nested = false) => (
@@ -630,7 +758,23 @@ export const ToolCallGroup = memo(function ToolCallGroup({
       locked={!nested && Boolean(live)}
     />
   );
-  if (regularTools.length === 0) {
+  const renderEntry = (entry: ActivityEntry, index: number) => {
+    if (entry.type === "thinking") {
+      if (!entry.thinking.text?.trim() && entry.thinking.done !== false) return null;
+      return (
+        <ThinkingBlock
+          key={`thinking-${index}`}
+          text={entry.thinking.text || "…"}
+          done={entry.thinking.done !== false}
+          durationMs={entry.thinking.durationMs}
+          embedded
+        />
+      );
+    }
+    return <div key={entry.tool.id}>{renderTool(entry.tool)}</div>;
+  };
+
+  if (regularEntries.length === 0) {
     return (
       <>
         {planTools.map((tool, index) => (
@@ -641,6 +785,9 @@ export const ToolCallGroup = memo(function ToolCallGroup({
         ))}
         {todoTools.map((tool, index) => (
           <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
+        ))}
+        {automationTools.map((tool) => (
+          <div key={tool.id}>{renderTool(tool)}</div>
         ))}
       </>
     );
@@ -656,9 +803,9 @@ export const ToolCallGroup = memo(function ToolCallGroup({
       {todoTools.map((tool, index) => (
         <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
       ))}
-      {regularTools.length === 1 ? (
+      {regularEntries.length === 1 ? (
         <div className="flex flex-col">
-          {regularTools.map((tool, index) => (
+          {regularEntries.map((tool, index) => (
             <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
           ))}
         </div>
@@ -669,7 +816,7 @@ export const ToolCallGroup = memo(function ToolCallGroup({
             className={toolCallTriggerClass}
             onClick={() => setUserOpen((open) => !open)}
           >
-            {regularTools.some((tool) => isToolRunning(tool.status)) ? (
+            {regularEntries.some((tool) => isToolRunning(tool.status)) ? (
               <LoaderCircle className="size-3 shrink-0 animate-spin" />
             ) : (
               <ChevronRight className={cn("size-3 shrink-0 transition-transform", groupOpen && "rotate-90")} />
@@ -678,7 +825,7 @@ export const ToolCallGroup = memo(function ToolCallGroup({
           </button>
           {groupOpen ? (
             <div className="mt-0.5 space-y-0 pl-4">
-              {regularTools.map((tool, index) => (
+              {regularEntries.map((tool, index) => (
                 <div key={toolReactKey(tool, index)}>{renderTool(tool, true)}</div>
               ))}
             </div>

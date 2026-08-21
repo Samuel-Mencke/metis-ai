@@ -39,8 +39,10 @@ import {
 } from "@/lib/providers/oauth";
 import { antigravitySupportsEffort, runOfficialAntigravityJob } from "@/lib/providers/official-antigravity";
 import type { AgentJob } from "@/lib/jobs";
-import { modeById } from "@/lib/modes";
+import { allModes, modeById } from "@/lib/modes";
 import { classifyToolKind, innerToolName, todosFromToolPayload } from "@/lib/tool-call-display";
+import { classifyTool, resolveMcpToolName, toolDetailFromArgs } from "@/lib/tool-kind";
+import { metisAgentIdentity } from "@/lib/agent-identity";
 import { compress } from "@/lib/compression";
 import {
   contextModeOf,
@@ -79,6 +81,7 @@ type ProviderContext = {
   signal: AbortSignal;
   onText: (value: string) => void;
   onTool: (tool: ToolPart) => void;
+  onThinking: (data: { text?: string; replace?: boolean; done?: boolean; durationMs?: number }) => void;
   onStream: (data: Record<string, unknown>) => void;
 };
 
@@ -182,6 +185,18 @@ function providerRemoteTools(context: ProviderContext): ToolSet {
   return tools;
 }
 
+function providerLanguageTools(context: ProviderContext): ToolSet {
+  const tools: ToolSet = { ...providerRemoteTools(context) };
+  if (context.connection.providerKey !== "xai") return tools;
+  const client = createXai({
+    apiKey: context.connection.secret,
+    ...(context.connection.baseUrl ? { baseURL: context.connection.baseUrl } : {}),
+  });
+  tools.web_search = client.tools.webSearch() as never;
+  tools.x_search = client.tools.xSearch() as never;
+  return tools;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -218,9 +233,10 @@ function providerPrompt(
       ].filter(Boolean).join("\n")).join("\n")
     : "";
   const prompt = [
-    "You are a provider inside a private AI chat application.",
+    metisAgentIdentity(),
     "Working style: precise, technically fluent, proactive. Act with your tools instead of describing steps. Reply in the user's language — German in, German out. No filler phrases. On clear orders decide and act yourself; ask back only when genuinely ambiguous or destructive.",
     "Answer the user directly and do not claim to have used tools you were not given.",
+    "If web_search or x_search are available, use them for current documentation or facts instead of narrating that you are researching.",
     METIS_SHARED_AGENT_CONTROL,
     toolContractPrompt({
       modeId: job.modeId || "agent",
@@ -239,7 +255,7 @@ function providerPrompt(
   ].filter(Boolean).join("\n\n");
   const uncensored = modelParams?.some((param) => param.id === "uncensored" && param.value === "true");
   return uncensored
-    ? `${uncensoredInstructions()}\n\n${prompt}`
+    ? `${metisAgentIdentity()}\n\n${uncensoredInstructions()}\n\n${prompt}`
     : prompt;
 }
 
@@ -574,7 +590,7 @@ function aiModel(
     return createGoogle({ apiKey: secret, ...(baseURL ? { baseURL } : {}) }).chat(modelId);
   }
   if (providerKey === "xai") {
-    return createXai({ apiKey: secret, ...(baseURL ? { baseURL } : {}) }).chat(modelId);
+    return createXai({ apiKey: secret, ...(baseURL ? { baseURL } : {}) }).responses(modelId);
   }
   if (providerKey === "openrouter") {
     return createOpenRouter({
@@ -970,8 +986,17 @@ function providerMcpContext(context: ProviderContext) {
   });
 }
 
+
+function stdioGatewayConfig(gateway: { type: "stdio"; command: string; args: string[]; cwd: string; env: Record<string, string> } | { type: "http"; url: string; headers?: Record<string, string> | undefined }) {
+  if (gateway.type === "http") {
+    return { command: "npx", args: ["-y", "mcp-remote", gateway.url], env: {} as Record<string, string> };
+  }
+  return { command: gateway.command, args: gateway.args, env: gateway.env };
+}
+
 function modeMcpEnv(context: ProviderContext): Record<string, string> {
-  return getMcpServers(providerMcpContext(context)).gateway.env;
+  const gateway = getMcpServers(providerMcpContext(context)).gateway;
+  return gateway.type === "http" ? {} : gateway.env;
 }
 
 async function agentToolsFor(context: ProviderContext): Promise<ToolSet> {
@@ -1249,11 +1274,7 @@ async function runCodex(context: ProviderContext): Promise<ProviderResult> {
     config: {
       ...(codexHome ? { cli_auth_credentials_store: "file" as const } : {}),
       mcp_servers: {
-        metis_ai: {
-          command: mcp.command,
-          args: mcp.args,
-          env: mcp.env,
-        },
+        metis_ai: stdioGatewayConfig(mcp),
       },
     },
     env,
@@ -1665,10 +1686,16 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       ...(normalizedTool.subagent ? { subagent: normalizedTool.subagent } : {}),
     });
   };
+  const onThinking = (data: { text?: string; replace?: boolean; done?: boolean; durationMs?: number }) => {
+    emit("thinking", data);
+    if (data.done !== true) {
+      emit("status", { status: "running", message: "Thinking…" });
+    }
+  };
 
   appendMessage(job.chatId, { id: assistantMessageId, role: "assistant", content: "" });
   emit("assistantId", { messageId: assistantMessageId });
-  emit("status", { status: "running", provider: definition.key });
+  emit("status", { status: "running", message: "Starting model…" });
   updateChat(job.chatId, {
     runStatus: "running",
     runUpdatedAt: new Date().toISOString(),
@@ -1684,6 +1711,7 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       signal: controller.signal,
       onText,
       onTool,
+      onThinking: (data) => emit("thinking", data),
       onStream: (data) => emit(data.type === "compaction" ? "compaction" : "stream", data),
     });
     if (modelSwitchTarget && handoffModelSwitch()) return true;

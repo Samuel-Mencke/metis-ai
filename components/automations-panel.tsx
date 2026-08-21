@@ -5,9 +5,12 @@ import {
   ArrowLeft,
   Bot,
   CalendarClock,
+  CheckCircle2,
   ChevronRight,
   Clock3,
   Globe2,
+  LoaderCircle,
+  MoreHorizontal,
   Network,
   Pause,
   Pencil,
@@ -17,6 +20,7 @@ import {
   Trash2,
   UserRound,
   Wrench,
+  XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -24,8 +28,16 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import type { ModelInfo } from "@/components/settings-panel";
 import type { AgentMode } from "@/lib/store";
+import { cn } from "@/lib/utils";
 
 type AutomationGraphNode = {
   id: string;
@@ -53,6 +65,7 @@ type AutomationRun = {
   completedAt?: string;
   resultPreview?: string;
   error?: string;
+  manual?: boolean;
 };
 
 type Automation = {
@@ -86,6 +99,7 @@ type AutomationsPanelProps = {
   models: ModelInfo[];
   modes: AgentMode[];
   selectedModelId?: string;
+  highlightId?: string | null;
 };
 
 function dateText(value?: string) {
@@ -235,7 +249,7 @@ function AutomationGraphView({ automation }: { automation: Automation }) {
   );
 }
 
-export function AutomationsPanel({ activeChatId, onOpenChat, models, modes, selectedModelId }: AutomationsPanelProps) {
+export function AutomationsPanel({ activeChatId, onOpenChat, models, modes, selectedModelId, highlightId }: AutomationsPanelProps) {
   const [automations, setAutomations] = useState<Automation[]>([]);
   const [detailAutomation, setDetailAutomation] = useState<Automation | null>(null);
   const [loading, setLoading] = useState(true);
@@ -299,6 +313,15 @@ export function AutomationsPanel({ activeChatId, onOpenChat, models, modes, sele
     // detail id is intentionally the only changing dependency for polling.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detailAutomation?.id]);
+
+  useEffect(() => {
+    if (!highlightId) return;
+    void load(true).then(() => {
+      window.requestAnimationFrame(() => {
+        document.getElementById(`automation-${highlightId}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      });
+    });
+  }, [highlightId]);
 
   const latestCompleted = useMemo(
     () => automations.flatMap((automation) => (automation.runs || []).map((run) => ({ automation, run })))
@@ -410,7 +433,7 @@ export function AutomationsPanel({ activeChatId, onOpenChat, models, modes, sele
       headers: body ? { "Content-Type": "application/json" } : undefined,
       body: body ? JSON.stringify(body) : undefined,
     });
-    const data = (await response.json().catch(() => ({}))) as { error?: string };
+    const data = (await response.json().catch(() => ({}))) as { error?: string; chatId?: string };
     if (!response.ok) throw new Error(data.error || "Automation action failed");
     await load(true);
     if (method === "DELETE") {
@@ -418,15 +441,17 @@ export function AutomationsPanel({ activeChatId, onOpenChat, models, modes, sele
     } else if (detailAutomation?.id === id) {
       await loadDetail(id, true);
     }
+    return data;
   }
 
-  async function runNow(id: string) {
-    setRunningId(id);
+  async function runNow(automation: Automation) {
+    setRunningId(automation.id);
     try {
-      await action(id, "PATCH", { action: "run" });
-      toast.success("Automation run started");
+      const data = await action(automation.id, "PATCH", { action: "run" });
+      toast.success(`Running “${automation.name}”`);
+      if (data.chatId) onOpenChat(data.chatId);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not start automation");
+      toast.error(error instanceof Error ? error.message : "Could not run automation");
     } finally {
       setRunningId(null);
     }
@@ -553,7 +578,7 @@ export function AutomationsPanel({ activeChatId, onOpenChat, models, modes, sele
               <div className="rounded-lg border border-border/35 bg-background/35 p-2"><span className="block text-muted-foreground">Next run</span><span className="mt-0.5 block truncate text-foreground">{dateText(currentDetail.nextRunAt)}</span></div>
             </div>
             <div className="mt-3 flex flex-wrap gap-1.5">
-              <Button type="button" size="sm" className="h-7 gap-1.5 text-[10px]" disabled={runningId === currentDetail.id || currentDetail.runs?.some((run) => run.status === "running" || run.status === "queued")} onClick={() => void runNow(currentDetail.id)}><Play className="size-3" />{runningId === currentDetail.id ? "Starting…" : "Run now"}</Button>
+              <Button type="button" size="sm" className="h-7 gap-1.5 text-[10px]" disabled={runningId === currentDetail.id || currentDetail.runs?.some((run) => run.status === "running" || run.status === "queued")} onClick={() => void runNow(currentDetail)}><Play className="size-3" />{runningId === currentDetail.id ? "Starting…" : "Run now"}</Button>
               <Button type="button" size="sm" variant="outline" className="h-7 gap-1.5 text-[10px]" onClick={() => editAutomation(currentDetail)}><Pencil className="size-3" />Edit</Button>
               {currentDetail.status === "active" ? (
                 <Button type="button" size="sm" variant="outline" className="h-7 gap-1.5 text-[10px]" onClick={() => void action(currentDetail.id, "PATCH", { action: "pause" }).catch((error) => toast.error(error instanceof Error ? error.message : "Pause failed"))}><Pause className="size-3" />Pause</Button>

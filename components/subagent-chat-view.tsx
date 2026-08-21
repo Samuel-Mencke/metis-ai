@@ -77,7 +77,7 @@ export function SubagentChatView({ tool, onBack, onCancel, cancelling = false, s
 
   const displayedTool = liveTool || tool;
   const title = displayedTool.subagent?.title || displayedTool.subagent?.prompt || "Subagent chat";
-  const transcript = transcriptFromToolPart(displayedTool);
+  const transcript = transcriptFromToolPart(displayedTool as Parameters<typeof transcriptFromToolPart>[0]);
   const prompt = promptText(displayedTool);
   const status = displayedTool.status === "running" ? "Running" : displayedTool.status;
 

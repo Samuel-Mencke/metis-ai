@@ -3,6 +3,7 @@ import { checkGatewayHealth } from "@/lib/mcp";
 import { listProviderConnections } from "@/lib/provider-connections";
 import { getUserAgentCwd } from "@/lib/mcp";
 import { readWorkerHeartbeat } from "@/lib/worker-health";
+import { isHostAdmin } from "@/lib/user-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,6 +22,7 @@ export async function GET(req: Request) {
     authenticated: authed,
     agentCwd: ownerId ? getUserAgentCwd(ownerId) : undefined,
     cursorSdkConfigured: hasCursorSdkConnection,
+    isHostAdmin: Boolean(ownerId && isHostAdmin(ownerId)),
     providers: connections.map((connection) => ({
       id: connection.id,
       providerKey: connection.providerKey,

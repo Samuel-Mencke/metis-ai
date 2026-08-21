@@ -1,11 +1,12 @@
 export async function callRemoteGatewayTool(
   name: string,
   args: Record<string, unknown>,
+  context: Record<string, unknown> = {},
 ) {
   // The shared gateway core is intentionally kept as an ESM runtime module.
   // @ts-expect-error The runtime module has no generated TypeScript declarations.
   const { dispatchGatewayTool } = await import("../packages/mcp-gateway/index.mjs");
-  const result = (await dispatchGatewayTool(name, args)) as {
+  const result = (await dispatchGatewayTool(name, args, { context })) as {
     content?: Array<{ type?: string; text?: string }>;
     isError?: boolean;
   };

@@ -20,6 +20,8 @@ and connected desktop devices. Treat a deployment as privileged infrastructure.
    working tree.
 8. Keep the application-level login and share-password rate limits enabled, and
    add a distributed proxy/WAF rate limit for multi-instance deployments.
+9. Leave `METIS_ENABLE_UNCENSORED` unset or false unless you explicitly enable
+   it on a private self-hosted instance. It is not a documented product feature.
 
 Authentication failures use generic responses and are rate-limited by client
 address and username. Share passwords are accepted only in request bodies;

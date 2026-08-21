@@ -48,10 +48,21 @@ export async function PATCH(req: Request, { params }: Params) {
   try {
     const action = typeof body.action === "string" ? body.action : "";
     if (action === "run") {
-      const queued = runAutomationNow(id, ownerId);
-      return queued
-        ? Response.json(queued, { status: 202 })
-        : Response.json({ error: "Automation not found" }, { status: 404 });
+      try {
+        const result = runAutomationNow(id, ownerId);
+        return result
+          ? Response.json({
+              automation: result.automation,
+              jobId: result.run.jobId,
+              chatId: result.run.chatId,
+            }, { status: 202 })
+          : Response.json({ error: "Automation not found" }, { status: 404 });
+      } catch (error) {
+        if (error instanceof Error && (error.name === "ActiveChatRun" || error.name === "ActiveAutomationRun")) {
+          return Response.json({ error: error.message }, { status: 409 });
+        }
+        throw error;
+      }
     }
     const automation = action === "pause" || action === "resume"
       ? setAutomationStatus(id, ownerId, action === "resume" ? "active" : "paused")

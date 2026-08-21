@@ -74,6 +74,7 @@ export type AutomationRun = {
   resultPreview?: string;
   error?: string;
   createdAt: string;
+  manual?: boolean;
 };
 
 type AutomationRow = {
@@ -247,19 +248,24 @@ export function listAutomationRuns(automationId: string, ownerId: string, limit 
   const rows = getDatabase().prepare(
     `SELECT r.id, r.automation_id as automationId, r.job_id as jobId, r.chat_id as chatId,
             r.trigger_type as trigger, r.status, r.started_at as startedAt, r.completed_at as completedAt,
-            r.result_preview as resultPreview, r.error, r.created_at as createdAt
+            r.result_preview as resultPreview, r.error, r.created_at as createdAt, r.manual as manual
      FROM automation_runs r
      JOIN automations a ON a.id = r.automation_id
      WHERE r.automation_id = ? AND a.owner_id = ?
      ORDER BY r.created_at DESC LIMIT ?`,
-  ).all(automationId, ownerId, Math.max(1, Math.min(limit, 250))) as AutomationRun[];
-  return rows.map((run) => ({
-    ...run,
-    trigger: run.trigger === "manual" ? "manual" : "scheduled",
-    ...(run.jobId ? { jobId: String(run.jobId) } : {}),
-    ...(run.resultPreview ? { resultPreview: String(run.resultPreview) } : {}),
-    ...(run.error ? { error: String(run.error) } : {}),
-  }));
+  ).all(automationId, ownerId, Math.max(1, Math.min(limit, 250))) as unknown as Array<AutomationRun & { manual?: number | boolean }>;
+  return rows.map((run) => {
+    const { manual: manualFlag, ...rest } = run;
+    const trigger = rest.trigger === "manual" ? "manual" : "scheduled";
+    return {
+      ...rest,
+      trigger,
+      ...(rest.jobId ? { jobId: String(rest.jobId) } : {}),
+      ...(rest.resultPreview ? { resultPreview: String(rest.resultPreview) } : {}),
+      ...(rest.error ? { error: String(rest.error) } : {}),
+      ...(trigger === "manual" || Number(manualFlag) === 1 ? { manual: true } : {}),
+    };
+  });
 }
 
 function validateSchedule(schedule: AutomationSchedule): AutomationSchedule {
@@ -549,9 +555,9 @@ export function startAutomationRun(automation: Automation, trigger: AutomationRu
     content: automation.prompt,
   }, automation.ownerId);
   getDatabase().prepare(
-    `INSERT INTO automation_runs (id, automation_id, chat_id, trigger_type, status, created_at)
-     VALUES (?, ?, ?, ?, 'queued', ?)`,
-  ).run(id, automation.id, runChat.id, trigger, now);
+    `INSERT INTO automation_runs (id, automation_id, chat_id, trigger_type, status, created_at, manual)
+     VALUES (?, ?, ?, ?, 'queued', ?, ?)`,
+  ).run(id, automation.id, runChat.id, trigger, now, trigger === "manual" ? 1 : 0);
   return { id, chatId: runChat.id, messageId };
 }
 

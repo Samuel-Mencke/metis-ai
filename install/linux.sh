@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Metis AI Linux installer. Run as a file, not via `curl | bash`.
+# Prefer: /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install.sh)"
 set -Eeuo pipefail
 
 APP_NAME="Metis AI"
@@ -7,13 +9,58 @@ NODE_VERSION="${METIS_NODE_VERSION:-22.16.0}"
 DEFAULT_DIR="${METIS_AI_INSTALL_DIR:-$HOME/metis-ai}"
 
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+
+can_prompt() {
+  [[ -t 0 || -t 1 ]]
+}
+
+ask() {
+  local prompt="$1" default="${2:-}" value
+  if (( non_interactive )); then
+    printf '%s' "$default"
+    return 0
+  fi
+  can_prompt || die "Interactive installation needs a terminal. Use --non-interactive with --password."
+  if [[ -t 0 ]]; then
+    if [[ -n "$default" ]]; then
+      IFS= read -r -p "$prompt [$default]: " value
+    else
+      IFS= read -r -p "$prompt: " value
+    fi
+  else
+    if [[ -n "$default" ]]; then
+      IFS= read -r -p "$prompt [$default]: " value < /dev/tty
+    else
+      IFS= read -r -p "$prompt: " value < /dev/tty
+    fi
+  fi
+  printf '%s' "${value:-$default}"
+}
+
+ask_secret() {
+  local prompt="$1" value
+  can_prompt || die "Interactive installation needs a terminal. Use --non-interactive with --password."
+  if [[ -t 0 ]]; then
+    IFS= read -r -s -p "$prompt" value
+  else
+    IFS= read -r -s -p "$prompt" value < /dev/tty
+  fi
+  printf '\n' >&2
+  printf '%s' "$value"
+}
+
 confirm_install() {
   local name="$1" answer
   (( non_interactive )) && return 0
-  [[ -r /dev/tty ]] || die "Interactive installation needs a terminal. Use --non-interactive with --password."
-  read -r -p "$name is missing or too old. Install/update it automatically? [Y/n] " answer < /dev/tty
+  can_prompt || die "Interactive installation needs a terminal. Use --non-interactive with --password."
+  if [[ -t 0 ]]; then
+    IFS= read -r -p "$name is missing or too old. Install/update it automatically? [Y/n] " answer
+  else
+    IFS= read -r -p "$name is missing or too old. Install/update it automatically? [Y/n] " answer < /dev/tty
+  fi
   [[ -z "$answer" || "$answer" =~ ^([Yy][Ee][Ss]|[Yy])$ ]]
 }
+
 install_system_package() {
   local package="$1"
   if command -v apt-get >/dev/null 2>&1; then
@@ -26,16 +73,58 @@ install_system_package() {
     return 1
   fi
 }
-ask() {
-  local prompt="$1" default="${2:-}" value
-  if [[ -n "$default" ]]; then
-    read -r -p "$prompt [$default]: " value < /dev/tty
-    printf '%s' "${value:-$default}"
+
+write_env_line() {
+  local key="$1" value="$2"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//\$/\\$}"
+  printf '%s="%s"\n' "$key" "$value"
+}
+
+json_str() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+
+wait_for_health() {
+  local url="$1" attempt
+  for attempt in $(seq 1 30); do
+    if curl --fail --silent --max-time 2 "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+port_in_use() {
+  local p="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | grep -qE ":${p}[[:space:]]"
   else
-    read -r -p "$prompt: " value < /dev/tty
-    printf '%s' "$value"
+    (echo >/dev/tcp/127.0.0.1/"$p") >/dev/null 2>&1
   fi
 }
+
+pick_free_port() {
+  local p="$1"
+  if ! port_in_use "$p"; then printf '%s' "$p"; return; fi
+  local candidate
+  for candidate in 8798 8799 8800 8801 8802 8788 8789; do
+    if ! port_in_use "$candidate"; then printf '%s' "$candidate"; return; fi
+  done
+  printf '%s' "$p"
+}
+
+compose() {
+  if docker compose version >/dev/null 2>&1; then docker compose "$@"
+  else docker-compose "$@"
+  fi
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -54,11 +143,15 @@ Options:
   --password-file FILE    Read the initial password from a file
   --service-name NAME     systemd service prefix (default: metis-ai)
   --public-url URL        URL shown to users
+  --native                Force Node.js + systemd instead of Docker
   --non-interactive       Never read prompts; all values come from arguments/defaults
+  --dry-run               Collect configuration and print the plan, then exit
   -h, --help              Show this help
 EOF
 }
+
 non_interactive=0
+dry_run=0
 install_dir="$DEFAULT_DIR"
 data_dir=""
 agent_cwd="$HOME"
@@ -70,6 +163,7 @@ password=""
 password_file=""
 service_name="metis-ai"
 public_url=""
+force_native=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --install-dir) [[ $# -ge 2 ]] || die "--install-dir requires a value"; install_dir="$2"; shift 2 ;;
@@ -83,40 +177,101 @@ while [[ $# -gt 0 ]]; do
     --password-file) [[ $# -ge 2 ]] || die "--password-file requires a value"; password_file="$2"; shift 2 ;;
     --service-name) [[ $# -ge 2 ]] || die "--service-name requires a value"; service_name="$2"; shift 2 ;;
     --public-url) [[ $# -ge 2 ]] || die "--public-url requires a value"; public_url="$2"; shift 2 ;;
+    --native) force_native=1; shift ;;
     --non-interactive) non_interactive=1; shift ;;
+    --dry-run) dry_run=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1 (use --help for usage)" ;;
   esac
 done
+
 install_dir="${install_dir/#\~/$HOME}"
-if (( non_interactive )); then
-  if [[ -n "$password_file" ]]; then
-    [[ -r "$password_file" ]] || die "--password-file is not readable: $password_file"
-    IFS= read -r password < "$password_file" || true
-  fi
-  [[ -n "$password" ]] || die "--password is required with --non-interactive."
-  ai_chat_host="${ai_chat_host:-127.0.0.1}"
-else
-  if ! { : < /dev/tty; } 2>/dev/null; then
-    die "Interactive installation needs a terminal. Use --non-interactive with --password."
-  fi
-  install_dir="$(ask "Installation directory" "$install_dir")"
-  install_dir="${install_dir/#\~/$HOME}"
+agent_cwd="${agent_cwd/#\~/$HOME}"
+data_dir="${data_dir/#\~/$HOME}"
+
+if [[ -n "$password_file" ]]; then
+  [[ -r "$password_file" ]] || die "--password-file is not readable: $password_file"
+  IFS= read -r password < "$password_file" || true
 fi
+
 default_public_host() {
   local host
   host="$(hostname -I 2>/dev/null | awk '{print $1}')"
   printf '%s' "${host:-127.0.0.1}"
 }
+
+if (( non_interactive )); then
+  [[ -n "$password" ]] || die "--password is required with --non-interactive."
+  ai_chat_host="${ai_chat_host:-127.0.0.1}"
+  data_dir="${data_dir:-$install_dir/data}"
+else
+  can_prompt || die "Interactive installation needs a terminal. Use --non-interactive with --password."
+  install_dir="$(ask "Installation directory" "$install_dir")"
+  install_dir="${install_dir/#\~/$HOME}"
+  data_dir="$(ask "Data directory" "${data_dir:-$install_dir/data}")"
+  data_dir="${data_dir/#\~/$HOME}"
+  agent_cwd="$(ask "Agent workspace directory" "$agent_cwd")"
+  agent_cwd="${agent_cwd/#\~/$HOME}"
+  port="$(ask "Web application port" "$port")"
+  if [[ "$(ask "Host web application on local network? (y/N)" "n")" =~ ^([Yy][Ee][Ss]|[Yy]|1|[Tt][Rr][Uu][Ee])$ ]]; then
+    ai_chat_host="0.0.0.0"
+    public_host="$(default_public_host)"
+  else
+    ai_chat_host="127.0.0.1"
+    public_host="127.0.0.1"
+  fi
+  mcp_port="$(ask "MCP gateway port" "$(pick_free_port "$mcp_port")")"
+  username="$(ask "Initial username" "$username")"
+  password="$(ask_secret "Initial password: ")"
+  [[ ${#password} -ge 8 ]] || die "Password must contain at least 8 characters."
+  password_confirm="$(ask_secret "Confirm password: ")"
+  [[ "$password" == "$password_confirm" ]] || die "Passwords do not match."
+  service_name="$(ask "Service name" "$service_name")"
+  public_url="$(ask "Public URL" "${public_url:-http://${public_host}:${port}}")"
+fi
+
+data_dir="${data_dir:-$install_dir/data}"
+if [[ "$ai_chat_host" == "0.0.0.0" ]]; then
+  public_host="$(default_public_host)"
+else
+  public_host="127.0.0.1"
+fi
+public_url="${public_url:-http://${public_host}:${port}}"
+
+[[ ${#password} -ge 8 ]] || die "Password must contain at least 8 characters."
+[[ "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]] || die "Web port must be a number between 1 and 65535."
+mcp_port="$(pick_free_port "$mcp_port")"
+[[ "$mcp_port" =~ ^[0-9]+$ && "$mcp_port" -ge 1 && "$mcp_port" -le 65535 ]] || die "MCP port must be a number between 1 and 65535."
+[[ "$service_name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || die "Service name may contain letters, numbers, underscores and hyphens."
+[[ "$username" =~ ^[A-Za-z0-9_.-]{3,64}$ ]] || die "Username must be 3-64 characters: letters, numbers, underscore, dot or hyphen."
+
+if (( dry_run )); then
+  cat <<EOF
+Dry run; no files or services will be changed.
+  os:            linux
+  install dir:   $install_dir
+  data dir:      $data_dir
+  agent cwd:     $agent_cwd
+  bind:          $ai_chat_host:$port
+  mcp port:      $mcp_port
+  service name:  $service_name
+  public url:    $public_url
+  username:      $username
+  native:        $force_native
+EOF
+  exit 0
+fi
+
 version_at_least_22() {
   command -v "$1" >/dev/null 2>&1 || return 1
-  [[ "$( "$1" -p 'process.versions.node.split(".")[0]' )" -ge 22 ]]
+  [[ "$("$1" -p 'process.versions.node.split(".")[0]')" -ge 22 ]]
 }
+
 install_node() {
   local dir="$1/.runtime" arch url archive
   if version_at_least_22 node; then
     printf '%s' "$(command -v node)"
-    return
+    return 0
   fi
   confirm_install "Node.js 22 or newer" || die "Node.js 22 or newer is required."
   mkdir -p "$dir"
@@ -134,6 +289,7 @@ install_node() {
   fi
   curl -fsSL "$url" -o "$archive"
   tar -xJf "$archive" -C "$dir"
+  rm -rf "$dir/node"
   mv "$dir/node-v${NODE_VERSION}-linux-${arch}" "$dir/node"
   rm -f "$archive"
   printf '%s' "$dir/node/bin/node"
@@ -152,95 +308,122 @@ else
   git clone "$REPO_URL" "$install_dir"
 fi
 
-node_bin="$(install_node "$install_dir")"
-node_home="$(dirname "$(dirname "$node_bin")")"
-export PATH="$node_home/bin:$install_dir/node_modules/.bin:$PATH"
-command -v corepack >/dev/null 2>&1 && corepack enable >/dev/null 2>&1 || true
-command -v pnpm >/dev/null 2>&1 || "$node_home/bin/npm" install --global pnpm@9
-
-if (( ! non_interactive )); then
-  data_dir="$(ask "Data directory" "$install_dir/data")"
-  agent_cwd="$(ask "Agent workspace directory" "$HOME")"
-  port="$(ask "Web application port" "3100")"
-  if [[ "$(ask "Host web application on local network? (y/N)" "n")" =~ ^([Yy][Ee][Ss]|[Yy]|1|[Tt][Rr][Uu][Ee])$ ]]; then
-    ai_chat_host="0.0.0.0"
-    public_host="$(default_public_host)"
-  else
-    ai_chat_host="127.0.0.1"
-    public_host="127.0.0.1"
+use_docker=0
+if (( force_native == 0 )) && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  if docker compose version >/dev/null 2>&1 || command -v docker-compose >/dev/null 2>&1; then
+    use_docker=1
   fi
-  mcp_port="$(ask "MCP gateway port" "8787")"
-  username="$(ask "Initial username" "admin")"
-  read -r -s -p "Initial password: " password < /dev/tty; printf '\n'
-  [[ ${#password} -ge 8 ]] || die "Password must contain at least 8 characters."
-  read -r -s -p "Confirm password: " password_confirm < /dev/tty; printf '\n'
-  [[ "$password" == "$password_confirm" ]] || die "Passwords do not match."
-else
-  data_dir="${data_dir:-$install_dir/data}"
-  agent_cwd="${agent_cwd:-$HOME}"
-  public_host="${ai_chat_host#0.0.0.0}"
-  public_host="${public_host:-127.0.0.1}"
-  public_url="${public_url:-http://${public_host}:${port}}"
 fi
-chat_password="$(openssl rand -hex 32 2>/dev/null || "$node_home/bin/node" -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))')"
-secrets_key="$(openssl rand -hex 32 2>/dev/null || "$node_home/bin/node" -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))')"
-if (( ! non_interactive )); then
-  service_name="$(ask "Service name" "$service_name")"
-  public_url="$(ask "Public URL" "${public_url:-http://${public_host}:${port}}")"
+
+node_bin=""
+node_home=""
+if (( use_docker == 0 )); then
+  node_bin="$(install_node "$install_dir")"
+  node_home="$(dirname "$(dirname "$node_bin")")"
+  export PATH="$node_home/bin:$install_dir/node_modules/.bin:$PATH"
+  command -v corepack >/dev/null 2>&1 && corepack enable >/dev/null 2>&1 || true
+  command -v pnpm >/dev/null 2>&1 || "$node_home/bin/npm" install --global pnpm@9
 fi
+
+rand_hex() {
+  openssl rand -hex 32 2>/dev/null || {
+    if [[ -n "$node_home" ]]; then
+      "$node_home/bin/node" -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))'
+    else
+      die "openssl is required to generate secrets when installing with Docker."
+    fi
+  }
+}
+chat_password="$(rand_hex)"
+secrets_key="$(rand_hex)"
+mcp_token="$(rand_hex)"
 
 mkdir -p "$data_dir" "$agent_cwd"
 {
-  printf 'APP_NAME=%q\n' 'Metis AI'
-  printf 'PORT=%q\n' "$port"
-  printf 'AI_CHAT_HOST=%q\n' "$ai_chat_host"
-  printf 'CHAT_USERNAME=%q\n' "$username"
-  printf 'CHAT_PASSWORD=%q\n' "$chat_password"
-  printf 'CHAT_DATA_DIR=%q\n' "$data_dir"
-  printf 'AGENT_CWD=%q\n' "$agent_cwd"
-  printf 'AI_CHAT_ROOT=%q\n' "$install_dir"
-  printf 'AI_CHAT_INSTALL_DIR=%q\n' "$install_dir"
-  printf 'AI_CHAT_PUBLIC_URL=%q\n' "$public_url"
-  printf 'AI_CHAT_INTERNAL_ORIGIN=%q\n' "http://127.0.0.1:$port"
-  printf 'AI_CHAT_SERVICE_NAME=%q\n' "$service_name"
-  printf 'AI_CHAT_MCP_STATE_DIR=%q\n' "$data_dir/mcp-state"
-  printf 'AI_CHAT_INTERNAL_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-question"
-  printf 'AI_CHAT_WORKSPACE_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-workspace"
-  printf 'AI_CHAT_CHAT_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-chat"
-  printf 'AI_CHAT_NOTES_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-notes"
-  printf 'AI_CHAT_MEMORY_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-memory"
-  printf 'AI_CHAT_BROWSER_URL=%q\n' "http://127.0.0.1:$port/api/internal/browser"
-  printf 'AI_CHAT_AGENT_STATE_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-agent-state"
-  printf 'AI_CHAT_SUBAGENT_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-subagent"
-  printf 'AI_CHAT_AUTOMATION_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-automation"
-  printf 'AI_CHAT_FILE_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-file"
-  printf 'AI_CHAT_SECRETS_KEY=%q\n' "$secrets_key"
-  printf 'MCP_PORT=%q\n' "$mcp_port"
-  printf 'MCP_PUBLIC_URL=%q\n' "http://127.0.0.1:$mcp_port"
-  printf 'MCP_BEARER_TOKEN=%q\n' "$(openssl rand -hex 32 2>/dev/null || "$node_home/bin/node" -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))')"
+  write_env_line APP_NAME "Metis AI"
+  write_env_line PORT "$port"
+  write_env_line AI_CHAT_HOST "$ai_chat_host"
+  write_env_line CHAT_USERNAME "$username"
+  write_env_line CHAT_PASSWORD "$chat_password"
+  write_env_line CHAT_DATA_DIR "$data_dir"
+  write_env_line AGENT_CWD "$agent_cwd"
+  write_env_line AI_CHAT_ROOT "$install_dir"
+  write_env_line AI_CHAT_INSTALL_DIR "$install_dir"
+  write_env_line AI_CHAT_PUBLIC_URL "$public_url"
+  write_env_line AI_CHAT_SERVICE_NAME "$service_name"
+  write_env_line AI_CHAT_WORKER_CONCURRENCY "25"
+  write_env_line AI_CHAT_MCP_STATE_DIR "$data_dir/mcp-state"
+  write_env_line AI_CHAT_INTERNAL_URL "http://127.0.0.1:$port/api/internal/mcp-question"
+  write_env_line AI_CHAT_SECRETS_KEY "$secrets_key"
+  write_env_line MCP_PORT "$mcp_port"
+  write_env_line MCP_PUBLIC_URL "http://127.0.0.1:$mcp_port"
+  write_env_line MCP_BEARER_TOKEN "$mcp_token"
   printf 'MCP_ALLOW_REMOTE_ADMIN=false\n'
   printf 'MCP_ENABLE_REMOTE_SERVERS=false\n'
   printf 'MCP_ENABLE_OPTIONAL_SERVERS=false\n'
+  write_env_line METIS_WORKSPACE "$agent_cwd"
+  write_env_line METIS_DATA_DIR "$data_dir"
+  write_env_line AI_CHAT_BIND "$ai_chat_host"
+  if (( use_docker )); then
+    printf 'METIS_DOCKER=1\n'
+    write_env_line AGENT_CWD "/workspace"
+    write_env_line CHAT_DATA_DIR "/data"
+    write_env_line METIS_AI_BOOTSTRAP_USERNAME "$username"
+    write_env_line METIS_AI_BOOTSTRAP_PASSWORD "$password"
+    printf 'METIS_AI_BOOTSTRAP_OPTIONAL=1\n'
+  else
+    write_env_line METIS_NODE_BIN "$node_bin"
+    write_env_line METIS_NODE_HOME "$node_home"
+  fi
 } > "$install_dir/.env"
 chmod 600 "$install_dir/.env"
 
+if (( use_docker )); then
+  (
+    cd "$install_dir"
+    compose up -d --build
+  )
+else
+cat > "$install_dir/run-service.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+set -a
+# shellcheck disable=SC1091
+. "$ROOT/.env"
+set +a
+export PATH="${METIS_NODE_HOME:+$METIS_NODE_HOME/bin:}$ROOT/node_modules/.bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"
+cd "$ROOT"
+exec "${METIS_NODE_BIN:?METIS_NODE_BIN is missing from .env}" "$@"
+EOF
+chmod 700 "$install_dir/run-service.sh"
+
 (
+  unset NODE_ENV
   set -a
-  source "$install_dir/.env"
+  # shellcheck disable=SC1091
+  . "$install_dir/.env"
   set +a
   cd "$install_dir"
   pnpm install --frozen-lockfile
   METIS_AI_BOOTSTRAP_USERNAME="$username" METIS_AI_BOOTSTRAP_PASSWORD="$password" METIS_AI_BOOTSTRAP_OPTIONAL=1 \
     pnpm exec tsx scripts/bootstrap-user.ts
-  pnpm run build:production
+  pnpm build
 )
 
-if command -v systemctl >/dev/null 2>&1; then
+if (( use_docker == 0 )) && command -v systemctl >/dev/null 2>&1; then
   command -v sudo >/dev/null 2>&1 || die "sudo is required to install system services."
   service_dir="/etc/systemd/system"
-  sudo tee "$service_dir/${service_name}.service" >/dev/null <<EOF
+  write_unit() {
+    local unit="$1" description="$2" exec_start arg
+    shift 2
+    exec_start="\"$install_dir/run-service.sh\""
+    for arg in "$@"; do
+      exec_start="$exec_start \"$arg\""
+    done
+    sudo tee "$service_dir/$unit" >/dev/null <<EOF
 [Unit]
-Description=Metis AI
+Description=$description
 After=network-online.target
 Wants=network-online.target
 
@@ -249,90 +432,49 @@ Type=simple
 User=$USER
 Group=$(id -gn)
 WorkingDirectory=$install_dir
-EnvironmentFile=$install_dir/.env
 Environment=HOME=$HOME
 Environment=NODE_ENV=production
-Environment=PATH=$node_home/bin:$install_dir/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
-Environment=NEXT_DIST_DIR=.next-a
-MemoryHigh=1536M
-MemoryMax=2G
-TasksMax=512
-KillMode=control-group
-ExecStartPre=$install_dir/scripts/ensure-production-build.sh
-ExecStart=$node_bin $install_dir/node_modules/tsx/dist/cli.mjs $install_dir/server.mjs
+ExecStart=$exec_start
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
-  sudo tee "$service_dir/${service_name}-worker.service" >/dev/null <<EOF
-[Unit]
-Description=Metis AI worker
-After=network-online.target
-
-[Service]
-Type=simple
-User=$USER
-Group=$(id -gn)
-WorkingDirectory=$install_dir
-EnvironmentFile=$install_dir/.env
-Environment=HOME=$HOME
-Environment=NODE_ENV=production
-Environment=PATH=$node_home/bin:$install_dir/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
-Environment=NODE_OPTIONS=--max-old-space-size=4096
-MemoryHigh=5G
-MemoryMax=6G
-CPUQuota=500%
-TasksMax=1024
-KillMode=control-group
-ExecStart=$node_bin $install_dir/node_modules/tsx/dist/cli.mjs $install_dir/worker.ts
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  sudo tee "$service_dir/${service_name}-mcp.service" >/dev/null <<EOF
-[Unit]
-Description=Metis AI MCP gateway
-After=network-online.target
-
-[Service]
-Type=simple
-User=$USER
-Group=$(id -gn)
-WorkingDirectory=$install_dir
-EnvironmentFile=$install_dir/.env
-Environment=HOME=$HOME
-Environment=NODE_ENV=production
-Environment=PATH=$node_home/bin:$install_dir/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
-MemoryHigh=768M
-MemoryMax=1G
-TasksMax=256
-KillMode=control-group
-ExecStart=$node_bin $install_dir/lib/mcp-core/gateway-core.mjs
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
+  }
+  write_unit "${service_name}.service" "Metis AI" "$install_dir/node_modules/tsx/dist/cli.mjs" "$install_dir/server.mjs"
+  write_unit "${service_name}-worker.service" "Metis AI worker" "$install_dir/node_modules/tsx/dist/cli.mjs" "$install_dir/worker.ts"
+  write_unit "${service_name}-mcp.service" "Metis AI MCP gateway" "$install_dir/lib/mcp-core/gateway-core.mjs"
   sudo systemctl daemon-reload
   sudo systemctl enable --now "${service_name}.service" "${service_name}-worker.service" "${service_name}-mcp.service"
 fi
+fi
 if command -v curl >/dev/null 2>&1; then
-  curl --fail --silent --show-error --retry 20 --retry-delay 1 --retry-connrefused --max-time 10 "http://127.0.0.1:$port/api/status" >/dev/null ||
-    die "The application did not become healthy. Check systemctl status ${service_name}.service."
+  wait_for_health "http://127.0.0.1:$port/api/status" ||
+    die "The application did not become healthy. Check systemctl status ${service_name}.service or docker compose logs."
+  wait_for_health "http://127.0.0.1:$mcp_port/health" ||
+    die "The MCP gateway did not become healthy on port $mcp_port."
 fi
 
-cat > "$install_dir/.metis-ai-install.json" <<EOF
-{"installDir":"$install_dir","dataDir":"$data_dir","agentCwd":"$agent_cwd","serviceName":"$service_name","host":"$ai_chat_host","os":"linux","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
-EOF
+install_method="native"
+if (( use_docker )); then install_method="docker"; fi
+{
+  printf '{'
+  printf '"installDir":%s,' "$(json_str "$install_dir")"
+  printf '"dataDir":%s,' "$(json_str "$data_dir")"
+  printf '"agentCwd":%s,' "$(json_str "$agent_cwd")"
+  printf '"serviceName":%s,' "$(json_str "$service_name")"
+  printf '"host":%s,' "$(json_str "$ai_chat_host")"
+  printf '"os":"linux",'
+  printf '"installMethod":%s,' "$(json_str "$install_method")"
+  printf '"createdAt":%s' "$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)")"
+  printf '}\n'
+} > "$install_dir/.metis-ai-install.json"
 chmod 600 "$install_dir/.metis-ai-install.json"
 cp "$install_dir/install/uninstall.sh" "$install_dir/uninstall.sh"
 chmod 700 "$install_dir/uninstall.sh"
 if [[ "$ai_chat_host" == "0.0.0.0" ]]; then
   printf 'Warning: the web application is reachable on the local network. Use strong credentials and a firewall or trusted TLS reverse proxy.\n'
 fi
-printf '\n%s installed successfully.\nOpen: %s\nUninstall: %s/install/uninstall.sh --install-dir %q --keep-data\n' "$APP_NAME" "$public_url" "$public_url" "$install_dir"
+printf '\n%s installed successfully.\nOpen: %s\nUninstall: %s --install-dir %q --keep-data\n' \
+  "$APP_NAME" "$public_url" "$install_dir/uninstall.sh" "$install_dir"

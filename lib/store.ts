@@ -15,7 +15,7 @@ export type ToolPart = {
   name: string;
   status: "running" | "completed" | "error" | string;
   detail?: string;
-  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "other";
+  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "automation" | "other";
   path?: string;
   input?: string;
   result?: string;

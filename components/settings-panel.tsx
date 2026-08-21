@@ -23,6 +23,7 @@ import {
   Server,
   Settings2,
   Trash2,
+  Users,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Apple as AppleLogo, Microsoft as MicrosoftLogo } from "@lobehub/icons";
@@ -56,6 +57,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { MemoryItem } from "@/components/memories-panel";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { AdminUsersPanel } from "@/components/admin-users-panel";
 import type { AgentMode, ToolPermissionCategory } from "@/lib/store";
 import { TOOL_PERMISSION_CATEGORIES } from "@/lib/modes";
 import { PlanUsagePanel } from "@/components/quota-gauges";
@@ -345,6 +347,7 @@ type Props = {
   onModelsChanged?: () => void;
   onModesChanged?: () => void;
   onLogout: () => void;
+  isHostAdmin?: boolean;
 };
 
 export function SettingsPanel({
@@ -400,6 +403,7 @@ export function SettingsPanel({
   onModelsChanged,
   onModesChanged,
   onLogout,
+  isHostAdmin = false,
 }: Props) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1239,6 +1243,7 @@ export function SettingsPanel({
                 { value: "modes", label: "Agent modes" },
                 { value: "mcp", label: "MCP Servers" },
                 { value: "remote-clients", label: "Remote Clients" },
+                ...(isHostAdmin ? [{ value: "users", label: "Users" }] : []),
                 { value: "memories", label: `Memories (${memories.length})` },
                 { value: "session", label: "Session" },
               ]}
@@ -1285,6 +1290,12 @@ export function SettingsPanel({
               <PlugZap data-icon="inline-start" />
               Remote Clients
             </TabsTrigger>
+            {isHostAdmin ? (
+              <TabsTrigger value="users" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
+                <Users data-icon="inline-start" />
+                Users
+              </TabsTrigger>
+            ) : null}
             <TabsTrigger value="memories" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
               <Brain data-icon="inline-start" />
               Memories
@@ -1299,6 +1310,11 @@ export function SettingsPanel({
           </TabsList>
 
           <div className="min-h-0 min-w-0 overflow-x-hidden overflow-y-auto">
+            {isHostAdmin ? (
+              <TabsContent value="users" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+                <AdminUsersPanel />
+              </TabsContent>
+            ) : null}
             <TabsContent value="compression" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-5">
                 <div>

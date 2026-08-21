@@ -228,6 +228,8 @@ export function parseAgentTranscript(value: unknown): AgentTranscript {
 
 export function transcriptFromToolPart(tool: {
   result?: unknown;
+  detail?: string;
+  input?: string;
   subagent?: {
     thinking?: string;
     messages?: TranscriptMessage[];

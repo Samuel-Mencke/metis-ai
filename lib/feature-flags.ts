@@ -33,3 +33,16 @@ export function publicFeatureFlags(settings?: GlobalModelSettings) {
     appName: config.appName,
   };
 }
+
+/** Server-only. Default off; not part of user-editable featureFlags. */
+export function isUncensoredEnabled() {
+  return envFlag("METIS_ENABLE_UNCENSORED", false);
+}
+
+export function sanitizeModelParams<T extends { id: string }>(
+  params?: T[] | null,
+): T[] | undefined {
+  if (!Array.isArray(params)) return undefined;
+  if (isUncensoredEnabled()) return params;
+  return params.filter((param) => param.id !== "uncensored");
+}

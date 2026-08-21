@@ -2,8 +2,7 @@
 
 The web service accepts durable jobs at `POST /api/runs`; jobs and checkpoints
 are stored below `CHAT_DATA_DIR` (default: `data/`). The worker processes up to
-eight jobs in parallel by default (`AI_CHAT_WORKER_CONCURRENCY`) so chats do
-not wait on each other, and recovers
+25 jobs in parallel by default (`AI_CHAT_WORKER_CONCURRENCY`) and recovers
 stale `running` jobs after a process restart.
 
 The worker uses the per-user Cursor SDK connections configured in Settings,

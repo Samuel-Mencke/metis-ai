@@ -38,6 +38,7 @@ export const FAST_PARAMETER: ModelParameter = {
   ],
 };
 
+/** Appended to models only when METIS_ENABLE_UNCENSORED is on. */
 export const UNCENSORED_PARAMETER: ModelParameter = {
   id: "uncensored",
   displayName: "Uncensored",

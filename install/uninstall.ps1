@@ -20,13 +20,36 @@ if (-not $Yes) {
 function Invoke-Step([scriptblock]$Action, [string]$Description) {
   if ($DryRun) { Write-Host "+ $Description" } else { & $Action }
 }
+$runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$rootNorm = [IO.Path]::GetFullPath($InstallDir).TrimEnd("\")
+if ($manifest.installMethod -eq "docker") {
+  Invoke-Step { Push-Location $InstallDir; docker compose down; Pop-Location } "docker compose down"
+} else {
 foreach ($suffix in @("app", "worker", "mcp")) {
   $task = "$($manifest.serviceName)-$suffix"
-  Invoke-Step { schtasks /Delete /TN $task /F 2>$null | Out-Null } "Delete scheduled task $task"
+  Invoke-Step { Remove-ItemProperty -LiteralPath $runKey -Name $task -ErrorAction SilentlyContinue } "Remove startup entry $task"
+  Invoke-Step { cmd.exe /c "schtasks /Delete /TN `"$task`" /F >nul 2>&1" } "Delete scheduled task $task"
+}
+Invoke-Step {
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -eq "node.exe" -and $_.CommandLine -and $_.CommandLine.IndexOf($rootNorm, [StringComparison]::OrdinalIgnoreCase) -ge 0 } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+} "Stop running Metis node processes"
+}
+function Remove-Tree([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  $target = $Path
+  if ($target -notlike "\\?\*") { $target = "\\?\$Path" }
+  for ($i = 0; $i -lt 8; $i++) {
+    cmd.exe /c "rmdir /s /q `"$target`"" | Out-Null
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    Start-Sleep -Seconds 2
+  }
+  throw "Failed to remove $Path"
 }
 $shouldKeepData = $KeepData -and -not $RemoveData
 if (-not $shouldKeepData -and $manifest.dataDir -and ([IO.Path]::GetFullPath($manifest.dataDir) -ne [IO.Path]::GetFullPath($InstallDir))) {
-  Invoke-Step { Remove-Item -LiteralPath $manifest.dataDir -Recurse -Force } "Remove data directory"
+  Invoke-Step { Remove-Tree ([IO.Path]::GetFullPath($manifest.dataDir)) } "Remove data directory"
 }
-Invoke-Step { Remove-Item -LiteralPath $InstallDir -Recurse -Force } "Remove installation directory"
+Invoke-Step { Start-Sleep -Seconds 1; Remove-Tree $rootNorm } "Remove installation directory"
 Write-Host "Metis AI uninstalled. Data kept: $shouldKeepData"

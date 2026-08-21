@@ -18,6 +18,8 @@ import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
 import { normalizeMath, splitStreamingMath } from "@/lib/math";
 import { LinkPreview } from "@/components/link-preview";
+import { MermaidDiagram } from "@/components/mermaid-diagram";
+import { isMermaidSource, wrapBareMermaid } from "@/lib/mermaid";
 import { ExternalLink, Link2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -49,6 +51,7 @@ function MarkdownLink({
   const isSubagentUrl = Boolean(href && /^subagent:\/\//i.test(href));
   const workspaceMatch = href?.match(/^workspace:\/\/(plan|canvas)\/([^/?#]+)(?:[?#].*)?$/i);
   const noteMatch = href?.match(/^note:\/\/([^/?#]+)(?:[?#].*)?$/i);
+  const automationMatch = href?.match(/^automation:\/\/([^/?#]+)(?:[?#].*)?$/i);
   const childText = typeof children === "string"
     ? children
     : Array.isArray(children)
@@ -58,7 +61,15 @@ function MarkdownLink({
   const link = (
     <a
       {...props}
-      href={workspaceMatch ? `#workspace-${workspaceMatch[2]}` : noteMatch ? `#note-${noteMatch[1]}` : href}
+      href={
+        workspaceMatch
+          ? `#workspace-${workspaceMatch[2]}`
+          : noteMatch
+            ? `#note-${noteMatch[1]}`
+            : automationMatch
+              ? `#automation-${automationMatch[1]}`
+              : href
+      }
       className={cn(
         props.className,
         sourceTitle && "inline-flex items-center gap-1 rounded-full border border-border/60 bg-secondary/60 px-1.5 py-0.5 text-[11px] font-medium no-underline hover:bg-secondary",
@@ -83,6 +94,16 @@ function MarkdownLink({
           window.dispatchEvent(
             new CustomEvent("ai-chat:open-note", {
               detail: { id: decodeURIComponent(noteMatch[1]) },
+            }),
+          );
+          return;
+        }
+        if (automationMatch) {
+          event.preventDefault();
+          event.stopPropagation();
+          window.dispatchEvent(
+            new CustomEvent("ai-chat:open-automations", {
+              detail: { id: decodeURIComponent(automationMatch[1]) },
             }),
           );
           return;
@@ -133,7 +154,7 @@ function MarkdownLink({
 const markdownComponents = { a: MarkdownLink };
 
 function transformMarkdownUrl(url: string) {
-  if (/^(workspace|note|subagent):\/\//i.test(url)) return url;
+  if (/^(workspace|note|subagent|automation):\/\//i.test(url)) return url;
   return defaultUrlTransform(url);
 }
 
@@ -154,6 +175,9 @@ function CodeBlock({
     );
   }
   const declaredLanguage = className?.match(/language-([\w-]+)/)?.[1];
+  if (isMermaidSource(declaredLanguage, code)) {
+    return <MermaidDiagram code={code} language={declaredLanguage} />;
+  }
   const detectedLanguage =
     declaredLanguage && hljs.getLanguage(declaredLanguage)
       ? declaredLanguage
@@ -249,7 +273,7 @@ export const Markdown = memo(function Markdown({
             urlTransform={transformMarkdownUrl}
             components={markdownComponentsWithCode}
           >
-            {ready}
+            {wrapBareMermaid(ready)}
           </ReactMarkdown>
         ) : null}
         {pending ? (
@@ -271,7 +295,7 @@ export const Markdown = memo(function Markdown({
         urlTransform={transformMarkdownUrl}
         components={markdownComponentsWithCode}
       >
-        {normalizeMath(content)}
+        {wrapBareMermaid(normalizeMath(content))}
       </ReactMarkdown>
     </div>
   );

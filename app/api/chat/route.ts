@@ -13,6 +13,7 @@ import {
   resolveReferences,
   type ContextReference,
 } from "@/lib/context";
+import { sanitizeModelParams } from "@/lib/feature-flags";
 import {
   MAX_ATTACHMENTS,
   resolveUploadPath,

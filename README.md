@@ -69,43 +69,41 @@ remote clients and memories:
 
 ### One-line installer
 
-For a guided installation with runtime detection, first-user creation, encrypted
-provider storage, native background services and an uninstall manifest, download
-the installer directly from GitHub:
+Docker is the recommended install path when `docker` and Compose are available.
+The installer mounts a workspace folder you choose (default: your home directory)
+and does not build Node on the host. Use `--native` / `-Native` to keep the
+previous Node.js + systemd/launchd/Task Scheduler flow. The one-liner downloads
+the platform installer to a temp file and executes that file — it does not run
+the installer from a pipe.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/linux.sh | bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install.sh)"
 ```
 
-On macOS:
+The same command works on macOS and Linux. Do not use `curl | bash` against
+`linux.sh` or `macos.sh` directly: piping the installer makes interactive
+prompts read the rest of the script as answers.
+
+For agents and CI, pass flags after `--` so they reach the installer, not Bash:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/macos.sh | bash
-```
-
-For agents and CI, Linux and macOS support a prompt-free argument mode. When
-piping a script to Bash, use `bash -s --` so the arguments are passed to the
-installer:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/linux.sh |
-  bash -s -- --non-interactive --password 'replace-with-a-strong-password'
-
-curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/macos.sh |
-  bash -s -- --non-interactive --password 'replace-with-a-strong-password'
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install.sh)" -- \
+  --non-interactive --password 'replace-with-a-strong-password'
 ```
 
 Use `--help` for all available options. Prefer `--password-file` or another
 secret manager when the password should not appear in process listings.
 
-On Windows, run:
+On Windows, the one-liner is a bootstrap without a `param()` block so
+`Invoke-Expression` is valid. It saves `windows.ps1` and invokes it with
+`-File`:
 
 ```powershell
-irm https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/windows.ps1 | iex
+irm https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install.ps1 | iex
 ```
 
-For a prompt-free Windows installation, download the script and pass named
-arguments:
+For a prompt-free Windows installation, download the platform script and pass
+named arguments:
 
 ```powershell
 irm https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/windows.ps1 -OutFile install.ps1
@@ -137,15 +135,18 @@ macOS use Bash options; Windows uses PowerShell named parameters.
 | Service/task name | `--service-name NAME` | `--service-name NAME` | `-ServiceName NAME` | `metis-ai` / `MetisAI` |
 | Public URL | `--public-url URL` | `--public-url URL` | `-PublicUrl URL` | `http://127.0.0.1:PORT` |
 | No prompts | `--non-interactive` | `--non-interactive` | `-NonInteractive` | off |
+| No prompts | `--non-interactive` | `--non-interactive` | `-NonInteractive` | off |
+| Native (no Docker) | `--native` | `--native` | `-Native` | off when Docker is available |
+| Dry run | `--dry-run` | `--dry-run` | `-DryRun` | off |
 | Skip runtime installation | — | — | `-SkipRuntimeInstall` | off |
 | Show help | `--help` or `-h` | `--help` or `-h` | `-Help` | — |
 
-For Linux and macOS, pass installer arguments after `bash -s --`. For
-PowerShell, download the script first and invoke it with the named parameters.
-`--password-file`/`-PasswordFile` is preferred in automation so a password does
-not appear in the process list. `-SkipRuntimeInstall` only skips Windows'
-automatic Git/Node.js installation; it still verifies that the required tools
-are available.
+For Linux and macOS, pass installer arguments after `--` to
+`/bin/bash -c "$(curl ...)"`. For PowerShell, download `install/windows.ps1`
+and invoke it with `-File`. `--password-file`/`-PasswordFile` is preferred in
+automation so a password does not appear in the process list.
+`-SkipRuntimeInstall` only skips Windows' automatic Git/Node.js installation;
+it still verifies that the required tools are available.
 
 The installer asks for all machine-specific values instead of assuming a user,
 home directory, port or public hostname. Review downloaded scripts before

@@ -13,6 +13,8 @@ param(
   [string]$PublicUrl = "",
   [switch]$NonInteractive,
   [switch]$SkipRuntimeInstall,
+  [switch]$Native,
+  [switch]$DryRun,
   [switch]$Help
 )
 
@@ -23,9 +25,12 @@ Usage:
   windows.ps1                         Guided installation
   windows.ps1 -NonInteractive -Password P
 
+This script must be invoked with powershell -File. Do not pipe it to iex;
+use install.ps1 for the one-line installer.
+
 Options: -InstallDir, -DataDir, -AgentCwd, -Port, -Host, -McpPort,
          -Username, -Password, -PasswordFile, -ServiceName, -PublicUrl
-         -NonInteractive, -SkipRuntimeInstall
+         -NonInteractive, -SkipRuntimeInstall, -Native, -DryRun
 "@ | Write-Host
   exit 0
 }
@@ -33,6 +38,7 @@ if (-not $RepoUrl) { $RepoUrl = "https://github.com/f1shyondrugs/metis-ai.git" }
 if (-not $InstallDir) {
   $InstallDir = if ($env:METIS_AI_INSTALL_DIR) { $env:METIS_AI_INSTALL_DIR } else { Join-Path $HOME "metis-ai" }
 }
+
 function Ask([string]$Prompt, [string]$Default) {
   if ($NonInteractive) { return $Default }
   $value = Read-Host "$Prompt [$Default]"
@@ -64,30 +70,100 @@ function Confirm-Install([string]$Name) {
   return [string]::IsNullOrWhiteSpace($answer) -or $answer -match "^(y|yes)$"
 }
 
+if ($PasswordFile) {
+  if (-not (Test-Path -LiteralPath $PasswordFile -PathType Leaf)) { throw "Password file is not readable: $PasswordFile" }
+  $Password = (Get-Content -LiteralPath $PasswordFile -Raw).TrimEnd("`r", "`n")
+}
+
+$port = $Port
+$mcpPort = $McpPort
+$username = $Username
+$serviceName = $ServiceName
+$dataDir = if ($DataDir) { $DataDir } else { Join-Path $InstallDir "data" }
+$agentCwd = if ($AgentCwd) { $AgentCwd } else { $HOME }
+
+if (-not $NonInteractive) {
+  $InstallDir = Ask "Installation directory" $InstallDir
+  $dataDir = if ($DataDir) { $DataDir } else { Join-Path $InstallDir "data" }
+  $dataDir = Ask "Data directory" $dataDir
+  $agentCwd = Ask "Agent workspace directory" $agentCwd
+  $port = Ask "Web application port" $port
+  $hostMode = (Ask "Host web application on local network? (y/N)" "n").Trim().ToLowerInvariant()
+  $aiChatHost = if (@("y", "yes", "1", "true") -contains $hostMode) { "0.0.0.0" } else { "127.0.0.1" }
+  $mcpPort = Ask "MCP gateway port" $mcpPort
+  $username = Ask "Initial username" $username
+  $passwordSecure = Read-Host "Initial password" -AsSecureString
+  $passwordAgain = Read-Host "Confirm password" -AsSecureString
+  $passwordPlain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($passwordSecure))
+  $passwordAgainPlain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($passwordAgain))
+  if ($passwordPlain.Length -lt 8 -or $passwordPlain -cne $passwordAgainPlain) { throw "Passwords must match and contain at least 8 characters." }
+  $serviceName = Ask "Task prefix" $serviceName
+} else {
+  $aiChatHost = if ($BindHost) { $BindHost } else { "127.0.0.1" }
+  $passwordPlain = $Password
+  if ([string]::IsNullOrEmpty($passwordPlain) -or $passwordPlain.Length -lt 8) {
+    throw "-Password is required and must contain at least 8 characters with -NonInteractive."
+  }
+}
+
+$publicHost = if ($aiChatHost -eq "0.0.0.0") { Get-DefaultPublicHost } else { "127.0.0.1" }
+$publicUrl = if ($PublicUrl) { $PublicUrl } else { "http://$publicHost`:$port" }
+
+$portNumber = 0
+$mcpPortNumber = 0
+if (-not [int]::TryParse($port, [ref]$portNumber) -or $portNumber -lt 1 -or $portNumber -gt 65535) {
+  throw "Web port must be a number between 1 and 65535."
+}
+if (-not [int]::TryParse($mcpPort, [ref]$mcpPortNumber) -or $mcpPortNumber -lt 1 -or $mcpPortNumber -gt 65535) {
+  throw "MCP port must be a number between 1 and 65535."
+}
+if ($serviceName -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]*$') {
+  throw "Service name may contain letters, numbers, underscores and hyphens."
+}
+
+if ($DryRun) {
+  Write-Host "Dry run; no files or services will be changed."
+  Write-Host "  os:            windows"
+  Write-Host "  install dir:   $InstallDir"
+  Write-Host "  data dir:      $dataDir"
+  Write-Host "  agent cwd:     $agentCwd"
+  Write-Host "  bind:          ${aiChatHost}:${port}"
+  Write-Host "  mcp port:      $mcpPort"
+  Write-Host "  service name:  $serviceName"
+  Write-Host "  public url:    $publicUrl"
+  Write-Host "  username:      $username"
+  Write-Host "  native:        $Native"
+  exit 0
+}
+
+$useDocker = $false
+if (-not $Native) {
+  $docker = Get-Command docker -ErrorAction SilentlyContinue
+  if ($docker) {
+    try {
+      & docker info | Out-Null
+      & docker compose version | Out-Null
+      if ($LASTEXITCODE -eq 0) { $useDocker = $true }
+    } catch { $useDocker = $false }
+  }
+}
+
 if (-not $SkipRuntimeInstall) {
   if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
     throw "winget is required to install Git and Node.js automatically."
   }
   if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    if (-not (Confirm-Install "Git")) { throw "git is required." }
     winget install --id Git.Git --accept-source-agreements --accept-package-agreements
   }
-  if ((Get-NodeMajor) -lt 22) {
+  if (-not $useDocker -and (Get-NodeMajor) -lt 22) {
     if (-not (Confirm-Install "Node.js 22 or newer")) { throw "Node.js 22 or newer is required." }
     winget install --id OpenJS.NodeJS.LTS --source winget --accept-source-agreements --accept-package-agreements
   }
   Refresh-Path
 }
 Require-Command git
-if ((Get-NodeMajor) -lt 22) { throw "Node.js 22 or newer is required." }
-$pnpmCommand = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
-if (-not $pnpmCommand) {
-  $corepackCommand = (Get-Command corepack.cmd -ErrorAction SilentlyContinue).Source
-  if (-not $corepackCommand) { throw "corepack is required to install pnpm." }
-  & $corepackCommand enable
-  & $corepackCommand prepare pnpm@9 --activate
-  $pnpmCommand = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
-}
-if (-not $pnpmCommand) { throw "pnpm is required." }
+if (-not $useDocker -and (Get-NodeMajor) -lt 22) { throw "Node.js 22 or newer is required." }
 
 if (Test-Path (Join-Path $InstallDir ".git")) {
   git -C $InstallDir pull --ff-only
@@ -98,46 +174,59 @@ if (Test-Path (Join-Path $InstallDir ".git")) {
   git clone $RepoUrl $InstallDir
 }
 
-$dataDir = if ($DataDir) { $DataDir } else { Join-Path $InstallDir "data" }
-$agentCwd = if ($AgentCwd) { $AgentCwd } else { $HOME }
-if (-not $NonInteractive) {
-  $dataDir = Ask "Data directory" $dataDir
-  $agentCwd = Ask "Agent workspace directory" $agentCwd
-  $port = Ask "Web application port" $Port
-  $hostMode = (Ask "Host web application on local network? (y/N)" "n").Trim().ToLowerInvariant()
-  $aiChatHost = if (@("y", "yes", "1", "true") -contains $hostMode) { "0.0.0.0" } else { "127.0.0.1" }
-} else {
-  $aiChatHost = $BindHost
-}
-$publicHost = if ($aiChatHost -eq "0.0.0.0") { Get-DefaultPublicHost } else { "127.0.0.1" }
-$mcpPort = if ($McpPort) { $McpPort } else { "8787" }
-if (-not $NonInteractive) {
-  $mcpPort = Ask "MCP gateway port" $mcpPort
-  $username = Ask "Initial username" $Username
-  $passwordSecure = Read-Host "Initial password" -AsSecureString
-  $passwordAgain = Read-Host "Confirm password" -AsSecureString
-  $passwordPlain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($passwordSecure))
-  $passwordAgainPlain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($passwordAgain))
-  if ($passwordPlain.Length -lt 8 -or $passwordPlain -cne $passwordAgainPlain) { throw "Passwords must match and contain at least 8 characters." }
-  $serviceName = Ask "Task prefix" $ServiceName
-  $publicUrl = Ask "Public URL" "http://$publicHost`:$port"
-} else {
-  if ($PasswordFile) {
-    if (-not (Test-Path -LiteralPath $PasswordFile -PathType Leaf)) { throw "Password file is not readable: $PasswordFile" }
-    $Password = (Get-Content -LiteralPath $PasswordFile -Raw).TrimEnd("`r", "`n")
+function Get-PnpmCommand {
+  $existing = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
+  if ($existing) { return [string]$existing }
+  $runtimePrefix = Join-Path $InstallDir ".runtime"
+  $candidates = @(
+    (Join-Path $runtimePrefix "pnpm.cmd"),
+    (Join-Path $runtimePrefix "node_modules\.bin\pnpm.cmd")
+  )
+  foreach ($candidate in $candidates) {
+    if (Test-Path -LiteralPath $candidate) { return [string]$candidate }
   }
-  $passwordPlain = $Password
-  if ([string]::IsNullOrEmpty($passwordPlain) -or $passwordPlain.Length -lt 8) { throw "-Password is required and must contain at least 8 characters with -NonInteractive." }
-  $serviceName = $ServiceName
-  $publicUrl = if ($PublicUrl) { $PublicUrl } else { "http://$publicHost`:$Port" }
+  $npmCommand = (Get-Command npm.cmd -ErrorAction SilentlyContinue).Source
+  if (-not $npmCommand) { throw "npm is required to install pnpm without Administrator access." }
+  New-Item -ItemType Directory -Force -Path $runtimePrefix | Out-Null
+  & $npmCommand install --global --prefix $runtimePrefix pnpm@9 | Out-Null
+  $env:Path = "$runtimePrefix;$runtimePrefix\node_modules\.bin;" + $env:Path
+  foreach ($candidate in $candidates) {
+    if (Test-Path -LiteralPath $candidate) { return [string]$candidate }
+  }
+  $refreshed = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
+  if ($refreshed) { return [string]$refreshed }
+  throw "pnpm is required."
 }
+$pnpmCommand = $null
+$nodeBin = $null
+if (-not $useDocker) {
+  $pnpmCommand = [string](Get-PnpmCommand)
+  $nodeBin = (Get-Command node).Source
+}
+
 $randomHex = { -join (1..32 | ForEach-Object { "{0:x2}" -f (Get-Random -Maximum 256) }) }
 $chatPassword = & $randomHex
 $secretsKey = & $randomHex
 $mcpToken = & $randomHex
 
 New-Item -ItemType Directory -Force -Path $dataDir, $agentCwd | Out-Null
-@"
+$dockerEnv = ""
+if ($useDocker) {
+  $dockerEnv = @"
+METIS_WORKSPACE=$agentCwd
+METIS_DATA_DIR=$dataDir
+AI_CHAT_BIND=$aiChatHost
+METIS_DOCKER=1
+AGENT_CWD=/workspace
+CHAT_DATA_DIR=/data
+METIS_AI_BOOTSTRAP_USERNAME=$username
+METIS_AI_BOOTSTRAP_PASSWORD=$passwordPlain
+METIS_AI_BOOTSTRAP_OPTIONAL=1
+"@
+} else {
+  $dockerEnv = "METIS_NODE_BIN=$nodeBin"
+}
+$envLines = @"
 APP_NAME=Metis AI
 PORT=$port
 AI_CHAT_HOST=$aiChatHost
@@ -150,6 +239,7 @@ AI_CHAT_INSTALL_DIR=$InstallDir
 AI_CHAT_PUBLIC_URL=$publicUrl
 AI_CHAT_INTERNAL_ORIGIN=http://127.0.0.1:$port
 AI_CHAT_SERVICE_NAME=$serviceName
+AI_CHAT_WORKER_CONCURRENCY=25
 AI_CHAT_MCP_STATE_DIR=$(Join-Path $dataDir "mcp-state")
 AI_CHAT_INTERNAL_URL=http://127.0.0.1:$port/api/internal/mcp-question
 AI_CHAT_WORKSPACE_URL=http://127.0.0.1:$port/api/internal/mcp-workspace
@@ -168,10 +258,23 @@ MCP_BEARER_TOKEN=$mcpToken
 MCP_ALLOW_REMOTE_ADMIN=false
 MCP_ENABLE_REMOTE_SERVERS=false
 MCP_ENABLE_OPTIONAL_SERVERS=false
-"@ | Set-Content -LiteralPath (Join-Path $InstallDir ".env") -Encoding utf8
+$dockerEnv
+"@
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+[System.IO.File]::WriteAllText((Join-Path $InstallDir ".env"), $envLines.Trim() + [Environment]::NewLine, $utf8NoBom)
 
+if ($useDocker) {
+  Push-Location $InstallDir
+  try {
+    docker compose up -d --build
+  } finally {
+    Pop-Location
+  }
+} else {
 Push-Location $InstallDir
 try {
+  $previousNodeEnv = $env:NODE_ENV
+  Remove-Item Env:NODE_ENV -ErrorAction SilentlyContinue
   & $pnpmCommand install --frozen-lockfile
   $env:METIS_AI_BOOTSTRAP_USERNAME = $username
   $env:METIS_AI_BOOTSTRAP_PASSWORD = $passwordPlain
@@ -179,6 +282,7 @@ try {
   & $pnpmCommand exec tsx scripts/bootstrap-user.ts
   & $pnpmCommand build
 } finally {
+  if ($null -ne $previousNodeEnv) { $env:NODE_ENV = $previousNodeEnv }
   Pop-Location
   Remove-Item Env:METIS_AI_BOOTSTRAP_USERNAME -ErrorAction SilentlyContinue
   Remove-Item Env:METIS_AI_BOOTSTRAP_PASSWORD -ErrorAction SilentlyContinue
@@ -188,40 +292,53 @@ try {
 $runner = Join-Path $InstallDir "run-service.ps1"
 @"
 `$ErrorActionPreference = "Stop"
-Get-Content (Join-Path `$PSScriptRoot ".env") | Where-Object { `$_ -and -not `$_.StartsWith("#") } | ForEach-Object {
+Get-Content -LiteralPath (Join-Path `$PSScriptRoot ".env") | Where-Object { `$_ -and -not `$_.StartsWith("#") } | ForEach-Object {
   `$pair = `$_ -split "=", 2
-  if (`$pair.Count -eq 2) { [Environment]::SetEnvironmentVariable(`$pair[0], `$pair[1], "Process") }
+  if (`$pair.Count -eq 2) { [Environment]::SetEnvironmentVariable(`$pair[0].Trim([char]0xFEFF), `$pair[1], "Process") }
 }
 Set-Location `$PSScriptRoot
-& (Get-Command node).Source @args
-"@ | Set-Content -LiteralPath $runner -Encoding utf8
+`$node = `$env:METIS_NODE_BIN
+if (-not `$node -or -not (Test-Path -LiteralPath `$node)) { `$node = (Get-Command node).Source }
+& `$node @args
+"@ | Set-Content -LiteralPath $runner -Encoding ascii
 
+$runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+New-Item -Path $runKey -Force | Out-Null
+$powershellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 foreach ($suffix in @("app", "worker", "mcp")) {
   $taskName = "$serviceName-$suffix"
-  try {
-    schtasks.exe /Query /TN $taskName 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-      schtasks.exe /Delete /TN $taskName /F 2>&1 | Out-Null
-    }
-  } catch {
-    # The task does not exist on a first installation.
-  }
   $targetArgs = switch ($suffix) {
     "app" { @("node_modules/tsx/dist/cli.mjs", "server.mjs") }
     "worker" { @("node_modules/tsx/dist/cli.mjs", "worker.ts") }
     default { @("lib/mcp-core/gateway-core.mjs") }
   }
-  $quotedTargetArgs = ($targetArgs | ForEach-Object { "`"$_`"" }) -join " "
-  $action = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$runner`" $quotedTargetArgs"
-  schtasks /Create /TN $taskName /SC ONLOGON /TR $action /F | Out-Null
-  schtasks /Run /TN $taskName | Out-Null
+  $cmdPath = Join-Path $InstallDir "run-$suffix.cmd"
+  $cmdArgs = ($targetArgs | ForEach-Object { "`"$_`"" }) -join " "
+  @(
+    "@echo off",
+    "cd /d `"%~dp0`"",
+    "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"%~dp0run-service.ps1`" $cmdArgs"
+  ) -join "`r`n" | Set-Content -LiteralPath $cmdPath -Encoding ascii
+  Set-ItemProperty -Path $runKey -Name $taskName -Value "`"$cmdPath`""
+  Start-Process -FilePath $powershellExe -WorkingDirectory $InstallDir -WindowStyle Hidden -ArgumentList (@("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runner) + $targetArgs)
 }
-for ($attempt = 0; $attempt -lt 20; $attempt++) {
+}
+
+for ($attempt = 0; $attempt -lt 45; $attempt++) {
   try {
     Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/api/status" -TimeoutSec 2 | Out-Null
     break
   } catch {
-    if ($attempt -eq 19) { throw "The application did not become healthy." }
+    if ($attempt -eq 44) { throw "The application did not become healthy." }
+    Start-Sleep -Seconds 1
+  }
+}
+for ($attempt = 0; $attempt -lt 20; $attempt++) {
+  try {
+    Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$mcpPort/health" -TimeoutSec 2 | Out-Null
+    break
+  } catch {
+    if ($attempt -eq 19) { throw "The MCP gateway did not become healthy on port $mcpPort." }
     Start-Sleep -Seconds 1
   }
 }
@@ -233,6 +350,7 @@ $manifest = @{
   serviceName = $serviceName
   host = $aiChatHost
   os = "windows"
+  installMethod = $(if ($useDocker) { "docker" } else { "native" })
   createdAt = [DateTime]::UtcNow.ToString("o")
 } | ConvertTo-Json -Compress
 Set-Content -LiteralPath (Join-Path $InstallDir ".metis-ai-install.json") -Value $manifest -Encoding utf8
@@ -242,4 +360,4 @@ if ($aiChatHost -eq "0.0.0.0") {
 }
 Write-Host "`nMetis AI installed successfully."
 Write-Host "Open: $publicUrl"
-Write-Host "Uninstall: $publicUrl/install/uninstall.ps1 -InstallDir `"$InstallDir`" -KeepData"
+Write-Host "Uninstall: $(Join-Path $InstallDir 'uninstall.ps1') -InstallDir `"$InstallDir`" -KeepData"

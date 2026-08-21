@@ -4,7 +4,7 @@ export function sleep(ms: number) {
   });
 }
 
-const DEFAULT_WORKER_CONCURRENCY = 8;
+const DEFAULT_WORKER_CONCURRENCY = 25;
 
 /** Invalid or missing configuration falls back to a bounded production default. */
 export function parseWorkerConcurrency(raw: string | undefined): number {

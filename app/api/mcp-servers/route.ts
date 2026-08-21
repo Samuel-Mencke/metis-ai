@@ -1,4 +1,5 @@
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
+import { isHostAdmin } from "@/lib/user-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,11 +10,12 @@ type GatewayResult = {
 };
 
 async function gatewayTool(req: Request, name: string, args: Record<string, unknown> = {}) {
+  const userId = (await getAuthenticatedUserId(req)) ?? undefined;
   // The gateway core is an ESM runtime module shared with the stdio MCP entrypoint.
   // @ts-expect-error The runtime module has no generated TypeScript declarations.
   const { dispatchGatewayTool } = await import("@/packages/mcp-gateway/index.mjs");
   const result = (await dispatchGatewayTool(name, args, {
-    context: { userId: (await getAuthenticatedUserId(req)) ?? undefined },
+    context: { userId, isHostAdmin: isHostAdmin(userId) },
   })) as GatewayResult;
   const text = result.content?.map((item) => item.text || "").join("\n") || "";
   if (result.isError) throw new Error(text || "MCP operation failed");
@@ -110,6 +112,9 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   if (!(await isAuthenticated(req))) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  if (!isHostAdmin(await getAuthenticatedUserId(req))) {
+    return Response.json({ error: "Only host administrators can change MCP servers." }, { status: 403 });
+  }
   try {
     const body = (await req.json()) as Record<string, unknown>;
     const server = await gatewayTool(req, "upsert_mcp_server", parseServer(body));

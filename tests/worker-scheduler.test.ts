@@ -47,12 +47,12 @@ test("waits for a running job only when the worker is at capacity", async () => 
 });
 
 test("parseWorkerConcurrency uses a bounded default for empty or invalid values", () => {
-  assert.equal(parseWorkerConcurrency(undefined), 8);
-  assert.equal(parseWorkerConcurrency(""), 8);
-  assert.equal(parseWorkerConcurrency("  "), 8);
-  assert.equal(parseWorkerConcurrency("0"), 8);
-  assert.equal(parseWorkerConcurrency("Infinity"), 8);
-  assert.equal(parseWorkerConcurrency("not-a-number"), 8);
+  assert.equal(parseWorkerConcurrency(undefined), 25);
+  assert.equal(parseWorkerConcurrency(""), 25);
+  assert.equal(parseWorkerConcurrency("  "), 25);
+  assert.equal(parseWorkerConcurrency("0"), 25);
+  assert.equal(parseWorkerConcurrency("Infinity"), 25);
+  assert.equal(parseWorkerConcurrency("not-a-number"), 25);
   assert.equal(parseWorkerConcurrency("4"), 4);
 });
 

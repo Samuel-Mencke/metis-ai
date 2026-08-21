@@ -15,6 +15,11 @@ function nodeToMarkdown(node: Node, listDepth = 0): string {
   if (node.nodeType !== Node.ELEMENT_NODE) return "";
 
   const element = node as HTMLElement;
+  const mermaid = element.getAttribute("data-mermaid-source")
+    || (element.getAttribute("data-editor-control") === "mermaid"
+      ? element.querySelector("[data-mermaid-source]")?.getAttribute("data-mermaid-source")
+      : "");
+  if (mermaid) return `\`\`\`mermaid\n${mermaid.replace(/\n$/, "")}\n\`\`\`\n\n`;
   if (element.closest("[data-editor-control]")) return "";
   const children = Array.from(element.childNodes)
     .map((child) => nodeToMarkdown(child, listDepth))

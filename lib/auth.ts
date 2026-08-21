@@ -7,6 +7,7 @@ import {
 } from "node:crypto";
 import { getDatabase } from "@/lib/sqlite";
 import { safeEqual } from "@/lib/security";
+import { provisionAccountAccess } from "@/lib/user-access";
 
 export const CHAT_COOKIE = "ai_chat_auth";
 export const CHAT_USER_COOKIE = "ai_chat_user";
@@ -59,6 +60,7 @@ export function createUser(username: string, password: string) {
   getDatabase().prepare(
     "INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)",
   ).run(user.id, user.username, user.passwordHash, user.createdAt);
+  provisionAccountAccess(user.id, user.username);
   return user;
 }
 

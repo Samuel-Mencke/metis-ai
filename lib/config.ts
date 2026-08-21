@@ -57,6 +57,9 @@ export const config = {
   mcpPublicUrl: env("MCP_PUBLIC_URL") || `http://127.0.0.1:${numberEnv("MCP_PORT", 8787)}`,
   mcpBearerToken: env("MCP_BEARER_TOKEN"),
   mcpAllowRemoteAdmin: booleanEnv("MCP_ALLOW_REMOTE_ADMIN"),
+  docker: booleanEnv("METIS_DOCKER"),
+  dockerWorkspace: "/workspace",
+  allowRootAgents: booleanEnv("AI_CHAT_ALLOW_ROOT_AGENTS"),
   enableOptionalMcp: booleanEnv("MCP_ENABLE_OPTIONAL_SERVERS"),
   enableRemoteMcp: booleanEnv("MCP_ENABLE_REMOTE_SERVERS"),
 } as const;

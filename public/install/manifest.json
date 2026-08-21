@@ -1,7 +1,11 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "repository": "https://github.com/f1shyondrugs/metis-ai.git",
   "source": "https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/",
+  "bootstrap": {
+    "unix": "https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install.sh",
+    "windows": "https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install.ps1"
+  },
   "installers": {
     "linux": "https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/linux.sh",
     "macos": "https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/macos.sh",

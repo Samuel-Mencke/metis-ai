@@ -3,6 +3,7 @@ node_modules
 .next-*
 tmp
 data
+public/prompts.json
 *.tsbuildinfo
 .env
 .env.local
@@ -11,6 +12,10 @@ data
 *.sqlite
 *.sqlite-*
 *.log
+.metis-ai-install.json
+.runtime/
+.ai-chat-uploads/
+workspaces/
 .DS_Store
 __pycache__/
 *.py[cod]

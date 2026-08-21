@@ -596,6 +596,10 @@ async function collectFormState(page: Page): Promise<{ text: string; controls: B
   return { text: textChunks.join('\n\n').slice(0, 60_000), controls };
 }
 
+async function screenshotPage(page: Page, options: { type: "png" } | { type: "jpeg"; quality: number }) {
+  return page.screenshot({ ...options, timeout: 15_000 });
+}
+
 async function pageInfo(state: BrowserContextState, tabId: string) {
   const page = state.tabs.get(tabId)!;
   const url = page.url();
@@ -659,11 +663,7 @@ export async function captureBrowserFrame(
     url: url === "about:blank" ? "" : url,
     title: info.title,
     viewport: page.viewportSize() || DEFAULT_VIEWPORT,
-    data: await page.screenshot({
-      type: "jpeg",
-      quality: Math.max(35, Math.min(90, quality)),
-      timeout: 30_000,
-    }),
+    data: await screenshotPage(page, { type: "jpeg", quality: Math.max(35, Math.min(90, quality)) }),
   };
 }
 
@@ -886,7 +886,7 @@ async function performBrowserActionUnlocked(ownerId: string, chatId: string, act
   // reasoning is actually needed, avoiding base64+JPEG work after every click.
   const SCREENSHOT_ACTIONS = ["screenshot", "navigate", "click", "type", "reload", "back", "forward", "select_tab", "scroll", "resize", "drag", "select_option", "upload_file"];
   if (SCREENSHOT_ACTIONS.includes(action.action) && action.includeScreenshot !== false) {
-    result.screenshot = (await page.screenshot({ type: "jpeg", quality: 60, timeout: 30_000 })).toString("base64");
+    result.screenshot = (await screenshotPage(page, { type: "jpeg", quality: 60 })).toString("base64");
   }
   if (action.action === "snapshot") {
     result.snapshot = await collectFrameText(page, "snapshot");
