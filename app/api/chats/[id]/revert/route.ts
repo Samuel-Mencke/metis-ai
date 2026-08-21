@@ -4,6 +4,7 @@ import { getAgentCwd } from "@/lib/mcp";
 import { revertMessages } from "@/lib/revert";
 import { getChat, saveChat } from "@/lib/db-store";
 import { revertChatNotes } from "@/lib/shared-context";
+import { hydrateToolsForRevert } from "@/lib/tool-persistence";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,7 +36,11 @@ export async function POST(req: Request, { params }: Params) {
   if (index < 0) return Response.json({ error: "Message not found" }, { status: 404 });
 
   const rollbackStart = body.keepMessage === true ? index + 1 : index;
-  const result = revertMessages(chat.messages, rollbackStart, getAgentCwd(ownerId));
+  const messagesForRevert = chat.messages.map((message) => ({
+    ...message,
+    tools: hydrateToolsForRevert(id, message.id, message.tools),
+  }));
+  const result = revertMessages(messagesForRevert, rollbackStart, getAgentCwd(ownerId));
   const revertedNotes = revertChatNotes(id, ownerId, chat.messages[index].createdAt);
   chat.messages = chat.messages.slice(0, body.keepMessage === true ? index + 1 : index);
   delete chat.agentId;

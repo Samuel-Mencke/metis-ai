@@ -9,6 +9,8 @@ import {
 } from "@/lib/db-store";
 import type { ChatSessionState } from "@/lib/store";
 import type { ChatBadge } from "@/lib/store";
+import { requestJobModelSwitch } from "@/lib/db-jobs";
+import { isModelAllowed } from "@/lib/model-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -84,6 +86,11 @@ export async function PATCH(req: Request, { params }: Params) {
     return Response.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
+  const requestedModelId = typeof body.modelId === "string" ? body.modelId.trim() : "";
+  if (requestedModelId && !isModelAllowed(ownerId, requestedModelId)) {
+    return Response.json({ error: "This model is not available for your account" }, { status: 403 });
+  }
+
   let chat;
   try {
     chat = updateChat(id, {
@@ -101,6 +108,9 @@ export async function PATCH(req: Request, { params }: Params) {
   if (!chat) {
     return Response.json({ error: "Not found" }, { status: 404 });
   }
+  const modelSwitch = requestedModelId
+    ? requestJobModelSwitch(id, ownerId, requestedModelId, body.modelParams || undefined)
+    : null;
   // Metadata/session PATCHes do not need to send the complete transcript back
   // to the browser. Large chats can contain several megabytes of messages,
   // and returning them here multiplies the cost of otherwise tiny autosaves.
@@ -109,6 +119,9 @@ export async function PATCH(req: Request, { params }: Params) {
       ...chat,
       messages: [],
     },
+    ...(modelSwitch?.pendingModelId
+      ? { modelSwitch: { requested: true, jobId: modelSwitch.id, modelId: modelSwitch.pendingModelId } }
+      : {}),
   });
 }
 

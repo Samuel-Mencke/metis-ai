@@ -58,6 +58,8 @@ import type { MemoryItem } from "@/components/memories-panel";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import type { AgentMode, ToolPermissionCategory } from "@/lib/store";
 import { TOOL_PERMISSION_CATEGORIES } from "@/lib/modes";
+import { PlanUsagePanel } from "@/components/quota-gauges";
+import type { UsageSnapshot } from "@/lib/usage-display";
 
 type ProviderDefinition = {
   key: string;
@@ -86,8 +88,9 @@ type ProviderConnection = {
 };
 
 function preferredAuthType(provider: ProviderDefinition) {
+  const priority = ["oauth", "account", "api_key", "local", "vertex_adc"];
   return (
-    provider.authTypes.find((authType) => authType === "api_key") ||
+    priority.find((authType) => provider.authTypes.includes(authType)) ||
     provider.authTypes[0] ||
     "api_key"
   );
@@ -296,11 +299,13 @@ type Props = {
     realtime?: boolean;
     endpoint?: string;
   }) => void;
+  browserEnabled: boolean;
   browserRealtime: boolean;
   browserFps: number;
   browserViewportWidth: number;
   browserViewportHeight: number;
   onBrowserSettingsChange: (settings: {
+    browserEnabled?: boolean;
     browserRealtime?: boolean;
     browserFps?: number;
     browserViewportWidth?: number;
@@ -335,6 +340,8 @@ type Props = {
   onMemoriesChanged: () => void;
   onMemoryDeleted: (id: string) => void;
   onChatsChanged: () => void;
+  usageSnapshot: UsageSnapshot | null;
+  onRefreshUsage: () => Promise<void>;
   onModelsChanged?: () => void;
   onModesChanged?: () => void;
   onLogout: () => void;
@@ -358,6 +365,7 @@ export function SettingsPanel({
   voiceEndpoint,
   onVoiceApiKeySave,
   onVoiceInputSettingsChange,
+  browserEnabled,
   browserRealtime,
   browserFps,
   browserViewportWidth,
@@ -387,6 +395,8 @@ export function SettingsPanel({
   onMemoriesChanged,
   onMemoryDeleted,
   onChatsChanged,
+  usageSnapshot,
+  onRefreshUsage,
   onModelsChanged,
   onModesChanged,
   onLogout,
@@ -1223,6 +1233,7 @@ export function SettingsPanel({
                 { value: "voice", label: "Voice input" },
                 { value: "browser-storage", label: "Browser storage" },
                 { value: "compression", label: "Token compression" },
+                { value: "usage", label: "Usage" },
                 { value: "archived", label: "Chats" },
                 { value: "providers", label: "Providers" },
                 { value: "modes", label: "Agent modes" },
@@ -1249,6 +1260,10 @@ export function SettingsPanel({
             <TabsTrigger value="compression" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
               <Settings2 data-icon="inline-start" />
               Token compression
+            </TabsTrigger>
+            <TabsTrigger value="usage" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
+              <MessagesSquare data-icon="inline-start" />
+              Usage
             </TabsTrigger>
             <TabsTrigger value="archived" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
               <MessagesSquare data-icon="inline-start" />
@@ -1373,6 +1388,9 @@ export function SettingsPanel({
                 </p>
               </section>
             </TabsContent>
+            <TabsContent value="usage" className="mt-0 min-w-0 px-6 py-6 sm:px-8 sm:py-8">
+              <PlanUsagePanel snapshot={usageSnapshot} onRefresh={onRefreshUsage} />
+            </TabsContent>
             <TabsContent value="browser-storage" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-4">
                 <div className="flex items-start justify-between gap-3">
@@ -1494,7 +1512,31 @@ export function SettingsPanel({
                     : "No custom sound uploaded. The default chime will be used."}
                 </p>
                 <div className="border-t border-border/60 pt-4">
-                  <h3 className="text-sm font-medium">Browser stream</h3>
+                  <h3 className="text-sm font-medium">Browser</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Disable the in-app browser on weak machines. This hides the workspace tab, live preview, and browser tools.
+                  </p>
+                  <div className="mt-3 flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Browser workspace</p>
+                      <p className="mt-1 text-xs text-muted-foreground/70">
+                        When off, agents cannot use browser tools and the sidebar tab is removed.
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant={browserEnabled ? "default" : "outline"}
+                      aria-pressed={browserEnabled}
+                      onClick={() => onBrowserSettingsChange({
+                        browserEnabled: !browserEnabled,
+                        ...(!browserEnabled ? {} : {}),
+                      })}
+                      className="shrink-0"
+                    >
+                      {browserEnabled ? "On" : "Off"}
+                    </Button>
+                  </div>
+                  <h3 className="mt-4 text-sm font-medium">Browser stream</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
                     Configure the live browser preview, frame rate, and default viewport.
                   </p>

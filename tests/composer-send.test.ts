@@ -4,6 +4,7 @@ import {
   composerLiveText,
   decideComposerSend,
   isDuplicateComposerSend,
+  shouldAutoDrainQueue,
   shouldIgnoreComposerEnter,
 } from "../lib/composer-send";
 
@@ -76,6 +77,43 @@ test("decideComposerSend queues follow-ups while a run is in flight instead of d
       duplicate: false,
     }),
     "queue",
+  );
+  assert.equal(
+    decideComposerSend({
+      force: true,
+      isOverride: true,
+      hasContent: true,
+      sendInFlight: true,
+      busy: false,
+      waitingForQuestion: false,
+      duplicate: false,
+    }),
+    "ignore",
+  );
+});
+
+test("shouldAutoDrainQueue waits for sendInFlight and the drain lock", () => {
+  assert.equal(
+    shouldAutoDrainQueue({
+      busy: false,
+      sendInFlight: true,
+      waitingForQuestion: false,
+      drainBlocked: false,
+      drainInProgress: false,
+      queueLength: 1,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldAutoDrainQueue({
+      busy: false,
+      sendInFlight: false,
+      waitingForQuestion: false,
+      drainBlocked: false,
+      drainInProgress: false,
+      queueLength: 1,
+    }),
+    true,
   );
 });
 

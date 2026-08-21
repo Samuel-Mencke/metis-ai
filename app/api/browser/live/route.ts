@@ -1,14 +1,15 @@
 import { getAuthenticatedUser, isAuthenticated } from "@/lib/auth";
 import { browserEvents, type BrowserEventPayload } from "@/lib/server-browser";
+import { matchesBrowserLiveEvent } from "@/lib/browser-live-filter";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // Server-Sent Events stream of live agent-browser activity. Clients subscribe
 // with their session cookie; events are filtered server-side to the
-// authenticated owner (and optionally a ?chatId=) before they leave the
-// process. Keepalive comments every 15s keep proxies from reaping the
-// connection; the listener is removed when the client disconnects.
+// authenticated owner (and optionally ?chatId= and ?tabId=) before they
+// leave the process. Keepalive comments every 15s keep proxies from reaping
+// the connection; the listener is removed when the client disconnects.
 export async function GET(req: Request) {
   if (!(await isAuthenticated(req))) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
@@ -19,6 +20,7 @@ export async function GET(req: Request) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
   const chatFilter = new URL(req.url).searchParams.get("chatId")?.trim() || null;
+  const tabFilter = new URL(req.url).searchParams.get("tabId")?.trim() || null;
 
   const encoder = new TextEncoder();
   let listener: ((event: BrowserEventPayload) => void) | null = null;
@@ -48,8 +50,7 @@ export async function GET(req: Request) {
       send(`retry: 3000\n\n`);
 
       listener = (event) => {
-        if (event.ownerId !== ownerId) return;
-        if (chatFilter && event.chatId !== chatFilter) return;
+        if (!matchesBrowserLiveEvent(event, ownerId, chatFilter, tabFilter)) return;
         send(`data: ${JSON.stringify(event)}\n\n`);
       };
       browserEvents.addListener("browser-event", listener);

@@ -1,26 +1,80 @@
 import { randomUUID } from "node:crypto";
-import { getDatabase, parseData, transaction } from "@/lib/sqlite";
+import { getDatabase, isSqliteBusyError, parseData, transaction, withSqliteRetry } from "@/lib/sqlite";
 import type { AgentJob, JobStatus } from "@/lib/jobs";
 import { updateChat } from "@/lib/db-store";
-import { describeQueueWait } from "@/lib/worker-scheduler";
+import { describeQueueWait, parseWorkerConcurrency } from "@/lib/worker-scheduler";
 
 const iso = () => new Date().toISOString();
 const RUN_EVENT_RETENTION = 10_000;
+const RUN_EVENT_MAX_BYTES = 128 * 1024;
 let lastRunEventCleanupAt = 0;
 
-export function enqueueJob(input: Omit<AgentJob, "id" | "status" | "attempts" | "createdAt" | "updatedAt">) {
+function truncateRunEventString(value: string, maxChars: number) {
+  if (value.length <= maxChars) return value;
+  const marker = `\n…[truncated ${value.length - maxChars} chars]…\n`;
+  const available = Math.max(0, maxChars - marker.length);
+  const head = Math.ceil(available * 0.6);
+  const tail = Math.floor(available * 0.4);
+  return `${value.slice(0, head)}${marker}${tail ? value.slice(-tail) : ""}`;
+}
+
+function compactRunEventValue(value: unknown, stringLimit: number, arrayLimit: number, depth = 0): unknown {
+  if (typeof value === "string") return truncateRunEventString(value, stringLimit);
+  if (value == null || typeof value === "number" || typeof value === "boolean") return value;
+  if (depth >= 8) return "[nested payload omitted]";
+  if (Array.isArray(value)) {
+    if (value.length <= arrayLimit) {
+      return value.map((item) => compactRunEventValue(item, stringLimit, arrayLimit, depth + 1));
+    }
+    const headCount = Math.ceil(arrayLimit / 2);
+    const tailCount = Math.floor(arrayLimit / 2);
+    return [
+      ...value.slice(0, headCount).map((item) => compactRunEventValue(item, stringLimit, arrayLimit, depth + 1)),
+      `[${value.length - arrayLimit} array items omitted]`,
+      ...value.slice(-tailCount).map((item) => compactRunEventValue(item, stringLimit, arrayLimit, depth + 1)),
+    ];
+  }
+  if (typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+        key,
+        compactRunEventValue(item, stringLimit, arrayLimit, depth + 1),
+      ]),
+    );
+  }
+  return String(value);
+}
+
+export function serializeRunEventData(data: unknown) {
+  const raw = JSON.stringify(data) ?? "null";
+  if (Buffer.byteLength(raw, "utf8") <= RUN_EVENT_MAX_BYTES) return raw;
+  let compacted = JSON.stringify(compactRunEventValue(data, 8_000, 32));
+  if (Buffer.byteLength(compacted, "utf8") <= RUN_EVENT_MAX_BYTES) return compacted;
+  compacted = JSON.stringify(compactRunEventValue(data, 2_000, 16));
+  return compacted;
+}
+
+export function enqueueJob(
+  input: Omit<AgentJob, "id" | "status" | "attempts" | "createdAt" | "updatedAt">,
+  options?: { beforeInsert?: () => void },
+) {
   return transaction(() => {
     if (input.messageId) {
       const existingRow = getDatabase().prepare(
         "SELECT data FROM jobs WHERE chat_id = ? AND json_extract(data, '$.messageId') = ? ORDER BY updated_at DESC LIMIT 1",
       ).get(input.chatId, input.messageId);
       const existing = parseData<AgentJob>(existingRow);
-      if (existing) return existing;
+      if (existing) {
+        // Keep retries self-healing: the callback is idempotent by message id
+        // and can restore a historically orphaned chat message if needed.
+        options?.beforeInsert?.();
+        return existing;
+      }
     }
     const active = getDatabase()
       .prepare(
         `SELECT data FROM jobs
-         WHERE chat_id = ? AND status IN ('queued', 'running', 'waiting_input', 'waiting_for_user')
+         WHERE chat_id = ? AND status IN ('queued', 'running', 'switching', 'waiting_input', 'waiting_for_user')
          ORDER BY updated_at DESC LIMIT 1`,
       )
       .get(input.chatId);
@@ -30,9 +84,18 @@ export function enqueueJob(input: Omit<AgentJob, "id" | "status" | "attempts" | 
       error.name = "ActiveChatRun";
       throw error;
     }
+    // Any durable side effect tied to this submission (notably the user
+    // message) must happen only after the active-run check and inside this
+    // same transaction. Otherwise a racing 409 can leave an orphan message
+    // in the chat with no job behind it.
+    options?.beforeInsert?.();
+
     const now = iso();
-    const configuredConcurrency = Number(process.env.AI_CHAT_WORKER_CONCURRENCY || 8);
-    const maxWorkers = Number.isFinite(configuredConcurrency) ? Math.max(1, Math.floor(configuredConcurrency)) : 8;
+    const background = input.workload === "background" || Boolean(input.automationId);
+    const priority = Number.isFinite(input.priority)
+      ? Math.max(0, Math.min(100, Math.floor(input.priority as number)))
+      : background ? 10 : 100;
+    const maxWorkers = parseWorkerConcurrency(process.env.AI_CHAT_WORKER_CONCURRENCY);
     const running = Number(
       (getDatabase().prepare(
         "SELECT COUNT(*) as count FROM jobs WHERE status = 'running'",
@@ -45,6 +108,8 @@ export function enqueueJob(input: Omit<AgentJob, "id" | "status" | "attempts" | 
     const queueMessage = describeQueueWait(running, queued, maxWorkers);
     const job: AgentJob = {
       ...input,
+      priority,
+      workload: background ? "background" : "interactive",
       ...(queueMessage ? { queueMessage } : {}),
       id: randomUUID(),
       status: "queued",
@@ -64,7 +129,7 @@ export function getActiveJob(chatId: string, userId?: string) {
     .prepare(
       `SELECT data FROM jobs
        WHERE chat_id = ?
-         AND status IN ('queued', 'running', 'waiting_input', 'waiting_for_user')
+         AND status IN ('queued', 'running', 'switching', 'waiting_input', 'waiting_for_user')
          AND (? IS NULL OR user_id = ? OR user_id IS NULL)
        ORDER BY updated_at DESC LIMIT 1`,
     )
@@ -76,6 +141,38 @@ export function getJob(id: string) {
   return parseData<AgentJob>(getDatabase().prepare("SELECT data FROM jobs WHERE id = ?").get(id));
 }
 
+export function listChildJobs(parentJobId: string, userId?: string) {
+  const rows = getDatabase().prepare(
+    `SELECT data FROM jobs
+     WHERE json_extract(data, '$.parentJobId') = ?
+       AND (? IS NULL OR user_id = ? OR user_id IS NULL)
+     ORDER BY updated_at ASC`,
+  ).all(parentJobId, userId ?? null, userId ?? null);
+  return rows.map((row) => parseData<AgentJob>(row)).filter((job): job is AgentJob => Boolean(job));
+}
+
+export function cancelChildJobs(parentJobId: string, userId: string | undefined, reason = "Parent agent cancelled.") {
+  const queue = [parentJobId];
+  const cancelled: AgentJob[] = [];
+  while (queue.length) {
+    const parentId = queue.shift()!;
+    for (const child of listChildJobs(parentId, userId)) {
+      queue.push(child.id);
+      if (!["queued", "running", "switching", "waiting_input", "waiting_for_user"].includes(child.status)) continue;
+      const updated = updateJob(child.id, { status: "cancelled", error: reason });
+      if (!updated) continue;
+      cancelled.push(updated);
+      updateChat(child.chatId, {
+        runStatus: "cancelled",
+        runUpdatedAt: new Date().toISOString(),
+        queueMessage: null,
+      }, child.userId);
+      appendRunEvent(child.id, child.chatId, child.userId, "done", { status: "cancelled", reason });
+    }
+  }
+  return cancelled;
+}
+
 export function listJobs(chatId?: string, userId?: string) {
   const rows = getDatabase().prepare(
     `SELECT data FROM jobs
@@ -85,14 +182,29 @@ export function listJobs(chatId?: string, userId?: string) {
   return rows.map((row) => parseData<AgentJob>(row)).filter((job): job is AgentJob => Boolean(job));
 }
 
-export function claimNextJob() {
+export function claimNextJob(options: { interactiveOnly?: boolean } = {}) {
   return transaction(() => {
     const db = getDatabase();
     const selectQueued = db.prepare(
-      "SELECT id, chat_id as chatId, user_id as userId, data FROM jobs WHERE status = 'queued' ORDER BY updated_at ASC LIMIT 1",
+      `SELECT id, chat_id as chatId, user_id as userId, data
+       FROM jobs
+       WHERE status = 'queued'
+         AND (
+           ? = 0
+           OR COALESCE(
+             CASE WHEN json_valid(data) THEN CAST(json_extract(data, '$.priority') AS INTEGER) END,
+             100
+           ) >= 50
+         )
+       ORDER BY COALESCE(
+                  CASE WHEN json_valid(data) THEN CAST(json_extract(data, '$.priority') AS INTEGER) END,
+                  100
+                ) DESC,
+                updated_at ASC
+       LIMIT 1`,
     );
     for (;;) {
-      const row = selectQueued.get() as { id: string; chatId: string; userId: string | null; data: string } | undefined;
+      const row = selectQueued.get(options.interactiveOnly ? 1 : 0) as { id: string; chatId: string; userId: string | null; data: string } | undefined;
       if (!row) return null;
       const job = parseData<AgentJob>(row);
       if (!job) {
@@ -120,7 +232,20 @@ export function claimNextJob() {
   });
 }
 
-export function updateJob(id: string, patch: Partial<Pick<AgentJob, "status" | "error" | "agentId" | "claimedAt" | "resumePrompt" | "resumeRequestedAt" | "runId">>) {
+export function updateJob(id: string, patch: Partial<Pick<AgentJob,
+  | "status"
+  | "error"
+  | "agentId"
+  | "claimedAt"
+  | "resumePrompt"
+  | "resumeRequestedAt"
+  | "runId"
+  | "modelId"
+  | "modelParams"
+  | "pendingModelId"
+  | "pendingModelParams"
+  | "modelSwitchRequestedAt"
+>>) {
   return transaction(() => {
     const current = getJob(id);
     if (!current) return null;
@@ -134,14 +259,29 @@ export function updateJob(id: string, patch: Partial<Pick<AgentJob, "status" | "
 export function touchJob(id: string) {
   const current = getJob(id);
   if (!current || current.status !== "running") return current;
-  const updated = { ...current, updatedAt: iso() };
-  getDatabase().prepare("UPDATE jobs SET data = ?, updated_at = ? WHERE id = ? AND status = 'running'")
-    .run(JSON.stringify(updated), updated.updatedAt, id);
-  return updated;
+  const updatedAt = iso();
+  try {
+    // Update only the heartbeat timestamp in JSON. Rewriting the entire row from
+    // a stale in-memory snapshot can erase a model-switch request written by
+    // the API process between getJob() and this heartbeat.
+    getDatabase().prepare(
+      "UPDATE jobs SET data = json_set(data, '$.updatedAt', ?), updated_at = ? WHERE id = ? AND status = 'running'",
+    ).run(updatedAt, updatedAt, id);
+    return getJob(id) || { ...current, updatedAt };
+  } catch (error) {
+    // This runs from a timer. Missing one liveness heartbeat is harmless;
+    // throwing from setInterval would be an uncaught worker exception.
+    if (isSqliteBusyError(error)) {
+      console.warn(`[jobs] sqlite busy; skipped heartbeat for ${id}`);
+      return current;
+    }
+    throw error;
+  }
 }
 
-export function recoverStaleJobs(_maxAgeMs = 15 * 60 * 1000) {
+export function recoverStaleJobs(maxAgeMs = 15 * 60 * 1000) {
   const jobs = listJobs();
+  const cutoff = Date.now() - Math.max(0, maxAgeMs);
   const queued: AgentJob[] = [];
   const resumed: AgentJob[] = [];
   const interrupted: AgentJob[] = [];
@@ -150,7 +290,22 @@ export function recoverStaleJobs(_maxAgeMs = 15 * 60 * 1000) {
       queued.push(job);
       continue;
     }
+    if (job.status === "switching") {
+      const updated = updateJob(job.id, {
+        status: "queued",
+        error: undefined,
+        resumePrompt: job.resumePrompt || "Resume the model handoff from the last saved state without repeating completed work.",
+        resumeRequestedAt: iso(),
+      });
+      if (updated) {
+        queued.push(updated);
+        resumed.push(updated);
+      }
+      continue;
+    }
     if (job.status !== "running") continue;
+    const updatedAt = Date.parse(job.updatedAt);
+    if (Number.isFinite(updatedAt) && updatedAt > cutoff) continue;
     const pendingQuestion = getDatabase().prepare(
       "SELECT question_id FROM pending_questions WHERE job_id = ? AND status = 'waiting_for_user' LIMIT 1",
     ).get(job.id);
@@ -181,17 +336,39 @@ export function recoverStaleJobs(_maxAgeMs = 15 * 60 * 1000) {
 export function appendRunEvent(jobId: string, chatId: string, userId: string | undefined, event: string, data: unknown) {
   const createdAt = iso();
   const db = getDatabase();
-  const result = db.prepare(
-    "INSERT INTO run_events (job_id, chat_id, user_id, event, data, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-  ).run(jobId, chatId, userId ?? null, event, JSON.stringify(data), createdAt);
-  if (Date.now() - lastRunEventCleanupAt >= 30_000) {
-    lastRunEventCleanupAt = Date.now();
-    db.prepare(
-      `DELETE FROM run_events
-       WHERE id <= (SELECT MAX(id) - ? FROM run_events)`,
-    ).run(RUN_EVENT_RETENTION);
+  const encoded = serializeRunEventData(data);
+  let result: { lastInsertRowid: number | bigint };
+  try {
+    result = withSqliteRetry(
+      () => db.prepare(
+        "INSERT INTO run_events (job_id, chat_id, user_id, event, data, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(jobId, chatId, userId ?? null, event, encoded, createdAt),
+      3,
+    );
+  } catch (error) {
+    // A transient telemetry/event-store lock must never terminate the agent.
+    // The durable assistant checkpoint remains the source of truth and lets
+    // the UI recover on its next chat refresh even if one live event is lost.
+    if (isSqliteBusyError(error)) {
+      console.warn(`[run-events] sqlite busy; dropped ${event} event for ${jobId}`);
+    return { id: 0, sequence: 0, jobId, chatId, event, data, createdAt, persisted: false as const };
+    }
+    throw error;
   }
-  return { id: Number(result.lastInsertRowid), jobId, chatId, event, data, createdAt };
+  if (Date.now() - lastRunEventCleanupAt >= 30_000) {
+    try {
+      withSqliteRetry(() => db.prepare(
+        `DELETE FROM run_events
+         WHERE id <= (SELECT MAX(id) - ? FROM run_events)`,
+      ).run(RUN_EVENT_RETENTION), 2);
+      lastRunEventCleanupAt = Date.now();
+    } catch (error) {
+      if (!isSqliteBusyError(error)) throw error;
+      // Cleanup is maintenance only; retry on a later event.
+    }
+  }
+  const sequence = Number(result.lastInsertRowid);
+  return { id: sequence, sequence, jobId, chatId, event, data, createdAt, persisted: true as const };
 }
 
 export function listRunEvents(
@@ -201,7 +378,7 @@ export function listRunEvents(
   jobId?: string,
 ) {
   const rows = getDatabase().prepare(
-    `SELECT id, job_id as jobId, chat_id as chatId, event, data, created_at as createdAt
+    `SELECT id, id as sequence, job_id as jobId, chat_id as chatId, event, data, created_at as createdAt
      FROM run_events
      WHERE chat_id = ? AND id > ?
        AND (? IS NULL OR job_id = ?)
@@ -219,8 +396,53 @@ export function listRunEvents(
   return rows.map((row) => ({ ...row, id: Number(row.id), data: JSON.parse(String(row.data)) }));
 }
 
+export function requeueSwitchingJob(id: string) {
+  const updatedAt = iso();
+  const result = getDatabase().prepare(
+    `UPDATE jobs
+     SET data = json_set(data, '$.status', 'queued', '$.updatedAt', ?),
+         status = 'queued',
+         updated_at = ?
+     WHERE id = ? AND status = 'switching'`,
+  ).run(updatedAt, updatedAt, id);
+  return result.changes ? getJob(id) : null;
+}
+
+export function requestJobModelSwitch(
+  chatId: string,
+  userId: string | undefined,
+  modelId: string,
+  modelParams?: Array<{ id: string; value: string }>,
+) {
+  const job = getActiveJob(chatId, userId);
+  if (!job) return null;
+  const nextModelId = modelId.trim();
+  if (!nextModelId) return job;
+
+  // A queued/paused job has no active provider stream to interrupt, so the new
+  // model can become effective immediately. A running job receives a pending
+  // handoff request that its worker observes without changing run status.
+  if (job.status !== "running") {
+    return updateJob(job.id, {
+      modelId: nextModelId,
+      modelParams,
+      pendingModelId: undefined,
+      pendingModelParams: undefined,
+      modelSwitchRequestedAt: undefined,
+    });
+  }
+  if (job.modelId === nextModelId && !job.pendingModelId) return job;
+  return updateJob(job.id, {
+    pendingModelId: nextModelId,
+    pendingModelParams: modelParams,
+    modelSwitchRequestedAt: iso(),
+  });
+}
+
 export function requestJobCancel(chatId: string, userId?: string) {
   const job = getActiveJob(chatId, userId);
   if (!job) return null;
-  return updateJob(job.id, { status: "cancelled", error: "Cancellation requested by user." });
+  const cancelled = updateJob(job.id, { status: "cancelled", error: "Cancellation requested by user." });
+  if (cancelled) cancelChildJobs(job.id, userId, "Parent agent cancelled.");
+  return cancelled;
 }

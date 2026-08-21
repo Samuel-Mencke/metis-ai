@@ -3,7 +3,9 @@ import { getDatabase, isSqliteForeignKeyError, parseData, transaction, withSqlit
 import type {
   NoteActivity,
   NoteAuthor,
+  NoteKind,
   NoteScope,
+  NoteTodo,
   SessionSnapshot,
   SharedNote,
   VoiceInputSettings,
@@ -93,6 +95,8 @@ export type NoteWriteInput = {
   title?: string;
   content?: string;
   color?: string;
+  kind?: NoteKind;
+  todos?: NoteTodo[];
   position?: { x?: number; y?: number };
   size?: { width?: number; height?: number };
   archived?: boolean;
@@ -102,6 +106,25 @@ export type NoteWriteInput = {
   author?: NoteAuthor;
   expectedVersion?: number;
 };
+
+export function normalizeNoteTodos(value: unknown): NoteTodo[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 80).flatMap((item, index) => {
+    const entry = item && typeof item === "object" ? item as Record<string, unknown> : { content: String(item || "") };
+    const content = String(entry.content || "").trim().slice(0, 300);
+    if (!content) return [];
+    const status = entry.status === "in_progress" || entry.status === "completed" ? entry.status : "pending";
+    const chatIds = Array.isArray(entry.chatIds)
+      ? entry.chatIds.filter((id): id is string => typeof id === "string" && Boolean(id.trim())).map((id) => id.trim().slice(0, 120)).slice(0, 40)
+      : undefined;
+    return [{
+      id: String(entry.id || `todo-${index + 1}`).slice(0, 80),
+      content,
+      status,
+      ...(chatIds?.length ? { chatIds } : {}),
+    }];
+  });
+}
 
 export class NoteConflictError extends Error {
   current?: SharedNote;
@@ -196,8 +219,10 @@ export function createNote(input: NoteWriteInput & { ownerId?: string; idempoten
     ...(input.chatId ? { chatId: input.chatId } : {}),
     ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
     scope: input.scope || (input.workspaceId ? "workspace" : input.chatId ? "chat" : "global"),
-    title: boundedText(input.title, 200) || "Untitled note",
+    title: boundedText(input.title, 200) || (input.kind === "project" ? "Untitled project" : "Untitled note"),
     content: boundedText(input.content, 50_000),
+    ...(input.kind === "project" ? { kind: "project" as const } : { kind: "note" as const }),
+    ...(normalizeNoteTodos(input.todos).length ? { todos: normalizeNoteTodos(input.todos) } : {}),
     color: /^#[0-9a-f]{6}$/i.test(input.color || "") ? String(input.color) : "#fef08a",
     position: {
       x: Math.max(-100_000, Math.min(100_000, Number(input.position?.x) || 0)),
@@ -243,6 +268,8 @@ export function updateNote(
       ...current,
       ...(input.title !== undefined ? { title: boundedText(input.title, 200) || current.title } : {}),
       ...(input.content !== undefined ? { content: boundedText(input.content, 50_000) } : {}),
+      ...(input.kind === "project" || input.kind === "note" ? { kind: input.kind } : {}),
+      ...(input.todos !== undefined ? { todos: normalizeNoteTodos(input.todos) } : {}),
       ...(input.color !== undefined && /^#[0-9a-f]{6}$/i.test(input.color) ? { color: input.color } : {}),
       ...(input.position ? {
         position: {

@@ -15,8 +15,29 @@ export type ModelParameter = {
   values: ModelParamValue[];
 };
 
-/** Boolean toggle appended to every model so uncensored mode can be flipped
- *  per-chat like `effort` / `fast` / `context`. */
+export type ModelParamSelection = {
+  id: string;
+  value: string;
+};
+
+export type ModelParameterModel = {
+  id?: string;
+  displayName?: string;
+  contextWindow?: number;
+  capabilities?: Record<string, boolean>;
+  parameters?: ModelParameter[];
+  defaultParams?: ModelParamSelection[];
+};
+
+export const FAST_PARAMETER: ModelParameter = {
+  id: "fast",
+  displayName: "Fast",
+  values: [
+    { value: "false" },
+    { value: "true", displayName: "Fast" },
+  ],
+};
+
 export const UNCENSORED_PARAMETER: ModelParameter = {
   id: "uncensored",
   displayName: "Uncensored",
@@ -26,15 +47,113 @@ export const UNCENSORED_PARAMETER: ModelParameter = {
   ],
 };
 
-/** Context-tier selection for models that ship multiple context windows
- *  (e.g. GLM 5.x 200K vs 1M). Selecting a tier rewrites the model id suffix
- *  ("-200k"/"-1m") before the request is sent, so the parameter is display
- *  and persistence sugar on top of the model id itself. */
-export const CONTEXT_TIER_PARAMETER: ModelParameter = {
-  id: "context",
-  displayName: "Context",
-  values: [
-    { value: "200k", displayName: "200K" },
-    { value: "1m", displayName: "1M" },
-  ],
-};
+const REASONING_IDS = new Set(["effort", "reasoning"]);
+
+function finiteContextWindow(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.round(value)
+    : undefined;
+}
+
+function contextLabel(value: number) {
+  if (value >= 1_000_000) return `${Math.round(value / 1_000_000 * 100) / 100}M`;
+  return `${Math.round(value / 1_000)}K`;
+}
+
+export function contextParameterForModel(contextWindow?: number): ModelParameter | null {
+  const max = finiteContextWindow(contextWindow);
+  if (!max) return null;
+  const maxValue: ModelParamValue = { value: "max", displayName: contextLabel(max) };
+  if (max <= 272_000) {
+    return { id: "context", displayName: "Context", values: [maxValue] };
+  }
+  return {
+    id: "context",
+    displayName: "Context",
+    values: [
+      { value: "272k", displayName: "272K" },
+      maxValue,
+    ],
+  };
+}
+
+function cloneParameter(parameter: ModelParameter): ModelParameter {
+  return {
+    id: parameter.id === "reasoning" ? "effort" : parameter.id,
+    displayName: REASONING_IDS.has(parameter.id) ? "Reasoning" : parameter.displayName,
+    values: parameter.values.map((value) => ({ ...value })),
+  };
+}
+
+export function modelParametersForModel(model: ModelParameterModel): ModelParameter[] {
+  const parameters: ModelParameter[] = [];
+  const seen = new Set<string>();
+  for (const raw of model.parameters || []) {
+    const parameter = cloneParameter(raw);
+    if (seen.has(parameter.id)) continue;
+    seen.add(parameter.id);
+    parameters.push(parameter);
+  }
+  const context = contextParameterForModel(model.contextWindow);
+  if (context && !seen.has("context")) {
+    parameters.push(context);
+    seen.add("context");
+  }
+  // Fast is only offered when the provider/model explicitly exposes it.
+  if (
+    !seen.has("fast") &&
+    Boolean(model.capabilities?.fast)
+  ) {
+    parameters.push(FAST_PARAMETER);
+    seen.add("fast");
+  }
+  if (!seen.has("uncensored")) parameters.push(UNCENSORED_PARAMETER);
+  return parameters;
+}
+
+export function defaultParamsForModel(model: ModelParameterModel): ModelParamSelection[] {
+  const parameters = modelParametersForModel(model);
+  const allowed = new Map(parameters.map((parameter) => [parameter.id, parameter]));
+  const result: ModelParamSelection[] = [];
+  for (const param of model.defaultParams || []) {
+    const id = param.id === "reasoning" ? "effort" : param.id;
+    const definition = allowed.get(id);
+    if (!definition || !definition.values.some((value) => value.value === param.value)) continue;
+    result.push({ id, value: param.value });
+  }
+  const context = parameters.find((parameter) => parameter.id === "context");
+  if (context && !result.some((param) => param.id === "context")) {
+    result.push({ id: "context", value: "max" });
+  }
+  if (parameters.some((parameter) => parameter.id === "fast") && !result.some((param) => param.id === "fast")) {
+    result.push({ id: "fast", value: "false" });
+  }
+  if (!result.some((param) => param.id === "uncensored")) {
+    result.push({ id: "uncensored", value: "false" });
+  }
+  return result;
+}
+
+export function sanitizeModelParams(
+  model: ModelParameterModel,
+  params?: ReadonlyArray<ModelParamSelection> | null,
+): ModelParamSelection[] {
+  const allowed = new Map(modelParametersForModel(model).map((parameter) => [parameter.id, parameter]));
+  const result: ModelParamSelection[] = [];
+  for (const raw of params || []) {
+    const id = raw.id === "reasoning" ? "effort" : raw.id;
+    const definition = allowed.get(id);
+    if (!definition || !definition.values.some((value) => value.value === raw.value)) continue;
+    result.push({ id, value: raw.value });
+  }
+  return result;
+}
+
+export function providerNativeParams(
+  params?: ReadonlyArray<ModelParamSelection> | null,
+): ModelParamSelection[] {
+  return (params || []).filter((param) =>
+    param.id !== "uncensored" &&
+    param.id !== "context",
+  );
+}

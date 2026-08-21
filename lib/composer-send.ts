@@ -40,8 +40,29 @@ export function decideComposerSend(options: {
   duplicate: boolean;
 }): ComposerSendAction {
   if (options.duplicate && !options.force) return "ignore";
+  if (!options.hasContent && !options.isOverride) return "ignore";
+  // Force/override must not start a second in-flight POST (queue spam / 409).
+  if (options.sendInFlight) return options.force || options.isOverride ? "ignore" : "queue";
   if (options.force || options.isOverride) return "send";
   if (!options.hasContent) return "ignore";
-  if (options.waitingForQuestion || options.busy || options.sendInFlight) return "queue";
+  if (options.waitingForQuestion || options.busy) return "queue";
   return "send";
+}
+
+export function shouldAutoDrainQueue(options: {
+  busy: boolean;
+  sendInFlight: boolean;
+  waitingForQuestion: boolean;
+  drainBlocked: boolean;
+  drainInProgress: boolean;
+  queueLength: number;
+}) {
+  return (
+    !options.busy &&
+    !options.sendInFlight &&
+    !options.waitingForQuestion &&
+    !options.drainBlocked &&
+    !options.drainInProgress &&
+    options.queueLength > 0
+  );
 }

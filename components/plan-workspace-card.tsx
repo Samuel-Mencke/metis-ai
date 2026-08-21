@@ -15,6 +15,7 @@ export type PlanWorkspaceCardProps = {
   onBuildWithAgents?: () => void;
   showMultiAgent?: boolean;
   buildDisabled?: boolean;
+  compact?: boolean;
 };
 
 export function PlanWorkspaceCard({
@@ -26,6 +27,7 @@ export function PlanWorkspaceCard({
   onBuildWithAgents,
   showMultiAgent = false,
   buildDisabled = false,
+  compact = false,
 }: PlanWorkspaceCardProps) {
   const [copied, setCopied] = useState(false);
 
@@ -53,17 +55,23 @@ export function PlanWorkspaceCard({
           <h3 className="truncate text-[13px] font-medium text-foreground" title={title}>
             {title}
           </h3>
-          <div className="mt-0.5 max-h-20 overflow-hidden text-xs text-muted-foreground">
-            {content ? <Markdown content={content} /> : <p>No plan details available yet.</p>}
-          </div>
+          {compact ? (
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Full plan available in the workspace.
+            </p>
+          ) : (
+            <div className="mt-0.5 max-h-20 overflow-hidden text-xs text-muted-foreground">
+              {content ? <Markdown content={content} /> : <p>No plan details available yet.</p>}
+            </div>
+          )}
           {workspaceLink ? <p className="mt-0.5 truncate text-[10px] text-muted-foreground/70">{workspaceLink}</p> : null}
         </div>
         {onOpen ? (
           <button
             type="button"
             className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-            aria-label="Pop out plan"
-            title="Pop out plan"
+            aria-label="Open plan workspace"
+            title="Open plan workspace"
             onClick={onOpen}
           >
             <ExternalLink className="size-3.5" />
@@ -71,17 +79,19 @@ export function PlanWorkspaceCard({
         ) : null}
       </div>
       <div className="mt-2 flex items-center justify-end gap-1">
-        <button
-          type="button"
-          className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
-          aria-label="Copy raw plan content"
-          title="Copy raw plan content"
-          onClick={() => void copyRawContent()}
-        >
-          {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-          {copied ? "Copied" : "Copy raw"}
-        </button>
-        {onOpen ? (
+        {!compact ? (
+          <button
+            type="button"
+            className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+            aria-label="Copy raw plan content"
+            title="Copy raw plan content"
+            onClick={() => void copyRawContent()}
+          >
+            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+            {copied ? "Copied" : "Copy raw"}
+          </button>
+        ) : null}
+        {onOpen && !compact ? (
           <button
             type="button"
             className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -100,7 +110,7 @@ export function PlanWorkspaceCard({
             )}
             onClick={onBuild}
           >
-            {buildDisabled ? "Agent running…" : "Build plan"}
+            {buildDisabled ? "Agent running…" : "Build"}
           </button>
         ) : null}
         {showMultiAgent && onBuildWithAgents ? (
@@ -114,7 +124,7 @@ export function PlanWorkspaceCard({
             title="Split independent work across parallel subagents"
             onClick={onBuildWithAgents}
           >
-            {buildDisabled ? "Agent running…" : "Build with agents"}
+            {buildDisabled ? "Agent running…" : "Build in parallel"}
           </button>
         ) : null}
       </div>

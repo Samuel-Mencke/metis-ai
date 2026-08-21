@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { describeQueueWait, waitForSchedulerTick } from "../lib/worker-scheduler";
+import { describeQueueWait, parseWorkerConcurrency, waitForSchedulerTick } from "../lib/worker-scheduler";
 
 test("queue wait is omitted when a worker slot is still free", () => {
   assert.equal(describeQueueWait(0, 0, 2), undefined);
@@ -44,4 +44,32 @@ test("waits for a running job only when the worker is at capacity", async () => 
   setTimeout(resolveJob, 15);
   const result = await waitForSchedulerTick(active, 1, 5_000);
   assert.equal(result, "slot-freed");
+});
+
+test("parseWorkerConcurrency uses a bounded default for empty or invalid values", () => {
+  assert.equal(parseWorkerConcurrency(undefined), 8);
+  assert.equal(parseWorkerConcurrency(""), 8);
+  assert.equal(parseWorkerConcurrency("  "), 8);
+  assert.equal(parseWorkerConcurrency("0"), 8);
+  assert.equal(parseWorkerConcurrency("Infinity"), 8);
+  assert.equal(parseWorkerConcurrency("not-a-number"), 8);
+  assert.equal(parseWorkerConcurrency("4"), 4);
+});
+
+test("queue wait is omitted when max workers is explicitly unlimited", () => {
+  assert.equal(describeQueueWait(8, 3, Number.POSITIVE_INFINITY), undefined);
+  assert.equal(describeQueueWait(2, 2, Number.NaN), undefined);
+});
+
+test("bounded concurrency waits at capacity", async () => {
+  let resolveJob!: () => void;
+  const job = new Promise<void>((resolve) => {
+    resolveJob = resolve;
+  });
+  const active = new Set<Promise<unknown>>([job]);
+  setTimeout(resolveJob, 15);
+  const result = await waitForSchedulerTick(active, 1, 5_000);
+  assert.equal(result, "slot-freed");
+  resolveJob();
+  await job;
 });

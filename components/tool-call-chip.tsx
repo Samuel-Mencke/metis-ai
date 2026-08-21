@@ -25,13 +25,16 @@ import { planLooksParallelizable } from "@/lib/modes";
 import { CanvasWorkspaceCard } from "@/components/canvas-workspace-card";
 import {
   compactFileDiff,
+  enrichToolDisplay,
   isToolRunning,
+  planFromToolPayload,
   todosFromToolPayload,
   toolCallHeadline,
   toolGroupLabel,
   truncateToolText,
   type ToolActionIcon,
 } from "@/lib/tool-call-display";
+import { looksLikeTranscriptDump } from "@/lib/agent-transcript";
 
 const toolCallTriggerClass =
   "inline-flex max-w-full cursor-pointer items-center gap-1 appearance-none rounded-none border-0 bg-transparent p-0 text-left text-[11px] font-light text-muted-foreground/70 shadow-none ring-0 outline-none transition-colors hover:bg-transparent hover:text-muted-foreground focus-visible:ring-0";
@@ -49,6 +52,7 @@ export type ToolCallData = {
   todos?: Array<{ id?: string; content: string; status?: string }>;
   subagent?: {
     agentId?: string;
+    chatId?: string;
     title?: string;
     mode?: string;
     model?: string;
@@ -111,6 +115,7 @@ function formatStructuredValue(value: unknown, indent = 0): string {
 
 function formatToolOutput(value?: string): string {
   if (!value) return "";
+  if (looksLikeTranscriptDump(value)) return "";
   try {
     const parsed: unknown = JSON.parse(value);
     if (
@@ -132,7 +137,9 @@ function formatToolOutput(value?: string): string {
     ) {
       return (parsed as { plan: string }).plan;
     }
-    return truncateToolText(typeof parsed === "string" ? parsed : formatStructuredValue(parsed));
+    const formatted = typeof parsed === "string" ? parsed : formatStructuredValue(parsed);
+    if (looksLikeTranscriptDump(formatted)) return "";
+    return truncateToolText(formatted);
   } catch {
     // Tool output is often plain text.
   }
@@ -177,40 +184,6 @@ function displayedDiffStats(diff?: ToolCallData["diff"], input?: string) {
     additions: Math.max(0, afterEnd - start),
     deletions: Math.max(0, beforeEnd - start),
   };
-}
-
-function planInfo(input?: string, result?: string, detail?: string) {
-  const sources = [input, result, detail].filter(Boolean) as string[];
-  for (const source of sources) {
-    try {
-      const parsed = JSON.parse(source) as Record<string, unknown>;
-      const value = parsed.value && typeof parsed.value === "object"
-        ? parsed.value as Record<string, unknown>
-        : {};
-      const content = [parsed.plan, parsed.content, value.plan, value.content]
-        .find((candidate): candidate is string => typeof candidate === "string");
-      if (content !== undefined) {
-        const title = [parsed.title, parsed.name, value.title, value.name]
-          .find((candidate): candidate is string => typeof candidate === "string" && Boolean(candidate.trim()));
-        return {
-          title: title?.trim() || "Plan",
-          content: content.trim(),
-          workspaceLink: typeof parsed.workspaceLink === "string"
-            ? parsed.workspaceLink
-            : typeof value.workspaceLink === "string"
-              ? value.workspaceLink
-              : typeof parsed.id === "string"
-                ? `workspace://plan/${parsed.id}`
-                : undefined,
-        };
-      }
-    } catch {
-      if (source.trim() && !source.trim().startsWith("{")) {
-        return { title: "Plan", content: source.trim() };
-      }
-    }
-  }
-  return null;
 }
 
 function canvasInfo(input?: string, result?: string, detail?: string) {
@@ -265,6 +238,16 @@ function noteInfo(input?: string, result?: string, detail?: string) {
   return null;
 }
 
+function toolReactKey(tool: ToolCallData, index: number): string {
+  const id = tool.id?.trim();
+  if (id) return `tool-${tool.kind || "other"}-${id}`;
+  const fingerprint = [tool.kind, tool.name, tool.path, tool.input, tool.result]
+    .filter(Boolean)
+    .join(":")
+    .slice(0, 160);
+  return `tool-${fingerprint || "unknown"}-${index}`;
+}
+
 export const ToolCallChip = memo(function ToolCallChip({
   name,
   status,
@@ -290,17 +273,20 @@ export const ToolCallChip = memo(function ToolCallChip({
   const [userOpen, setUserOpen] = useState(false);
   const running = isToolRunning(status);
   const expanded = locked ? autoExpand : autoExpand || userOpen;
-  const todoItems = todos?.length ? todos : todosFromToolPayload(input, result);
-  const deleteTool = /(^|[._:/-])(delete|remove|unlink)(?=[._:/-]|$)/i.test(name);
-  const headline = toolCallHeadline({ name, kind, input, detail, path, hostnames });
-  const Icon = deleteTool && (kind === "edit" || headline.icon === "edit")
+  const display = enrichToolDisplay({ name, input, result, kind });
+  const todoItems = todos?.length ? todos : display.todos;
+  const resolvedKind = display.kind;
+  const resolvedName = display.name || name;
+  const deleteTool = /(^|[._:/-])(delete|remove|unlink)(?=[._:/-]|$)/i.test(resolvedName);
+  const headline = toolCallHeadline({ name: resolvedName, kind: resolvedKind, input, detail, path, hostnames });
+  const Icon = deleteTool && (resolvedKind === "edit" || headline.icon === "edit")
     ? Trash2
     : ACTION_ICONS[headline.icon];
-  const clickable = kind === "edit" && Boolean(diff || path);
-  const subagentClickable = kind === "subagent";
-  const workspaceClickable = kind === "plan" || kind === "canvas" || kind === "browser";
-  if (kind === "todo" && todoItems?.length) {
-    const completed = todoItems.filter((todo) => todo.status === "completed" || todo.status === "done").length;
+  const clickable = resolvedKind === "edit" && Boolean(diff || path);
+  const subagentClickable = resolvedKind === "subagent";
+  const workspaceClickable = resolvedKind === "plan" || resolvedKind === "canvas" || resolvedKind === "browser";
+  if (todoItems?.length) {
+    const completed = todoItems.filter((todo) => /^(completed|done)$/i.test(todo.status || "")).length;
     return (
       <div className="my-2 w-full rounded-md border border-border/50 bg-muted/15 px-2.5 py-2">
         <div className="mb-1.5 flex items-center gap-2 text-xs">
@@ -320,7 +306,7 @@ export const ToolCallChip = memo(function ToolCallChip({
         </div>
         <div className="space-y-1">
           {todoItems.map((todo, index) => {
-            const done = todo.status === "completed" || todo.status === "done";
+            const done = /^(completed|done)$/i.test(todo.status || "");
             return (
               <div key={todo.id ?? `${todo.content}-${index}`} className="flex min-w-0 items-center gap-2 text-xs">
                 <span className={cn("flex size-3.5 shrink-0 items-center justify-center rounded-full border text-[9px]", done ? "border-emerald-400/60 bg-emerald-400/15 text-emerald-400" : "border-border/70 text-muted-foreground/50")}>
@@ -334,7 +320,7 @@ export const ToolCallChip = memo(function ToolCallChip({
       </div>
     );
   }
-  if (kind === "memory") {
+  if (resolvedKind === "memory") {
     const memoryOutput = formatToolOutput(result || detail || input) || "Memory updated";
     return (
       <div className="my-2 flex w-full items-start gap-2 rounded-md border border-violet-400/30 bg-violet-400/10 px-2.5 py-2 text-xs">
@@ -346,10 +332,10 @@ export const ToolCallChip = memo(function ToolCallChip({
       </div>
     );
   }
-  const plan = kind === "plan" ? planInfo(input, result, detail) : null;
+  const plan = resolvedKind === "plan" ? planFromToolPayload(input, result, detail) : null;
   const previewText = headline.preview;
   const diffStats = displayedDiffStats(diff, input);
-  if (kind === "plan" && !running && plan) {
+  if (resolvedKind === "plan" && !running && plan) {
     return (
       <PlanWorkspaceCard
         title={plan.title}
@@ -360,10 +346,11 @@ export const ToolCallChip = memo(function ToolCallChip({
         onBuildWithAgents={() => onBuildPlan?.(plan, { multiAgent: true })}
         showMultiAgent={planLooksParallelizable(plan.content)}
         buildDisabled={buildDisabled}
+        compact
       />
     );
   }
-  const canvas = kind === "canvas" && !running
+  const canvas = resolvedKind === "canvas" && !running
     ? canvasInfo(input, result, detail)
     : null;
   if (canvas) {
@@ -376,7 +363,7 @@ export const ToolCallChip = memo(function ToolCallChip({
       />
     );
   }
-  const note = kind === "note" && !running ? noteInfo(input, result, detail) : null;
+  const note = resolvedKind === "note" && !running ? noteInfo(input, result, detail) : null;
   if (note) {
     return (
       <section className="my-2.5 w-full rounded-lg border border-border/50 border-l-yellow-300/70 bg-muted/20 p-2.5">
@@ -495,8 +482,8 @@ export const ToolCallChip = memo(function ToolCallChip({
           <button
             type="button"
             className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground/40 opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
-            aria-label={`Open ${kind === "canvas" ? "canvas" : kind === "plan" ? "plan" : "browser"} in side panel`}
-            title={`Open ${kind === "canvas" ? "canvas" : kind === "plan" ? "plan" : "browser"}`}
+            aria-label={`Open ${resolvedKind === "canvas" ? "canvas" : resolvedKind === "plan" ? "plan" : "browser"} in side panel`}
+            title={`Open ${resolvedKind === "canvas" ? "canvas" : resolvedKind === "plan" ? "plan" : "browser"}`}
             onClick={(event) => {
               event.stopPropagation();
               onOpenWorkspace?.();
@@ -527,7 +514,7 @@ export const ToolCallChip = memo(function ToolCallChip({
               <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono">{formatToolOutput(input)}</pre>
             </section>
           ) : null}
-          {kind === "edit" && diff ? (
+          {kind === "edit" && diff && (diff.before !== undefined || diff.after !== undefined) ? (
             <section>
               <p className="mb-1 font-sans text-[10px] font-medium uppercase tracking-wide text-muted-foreground/60">File diff</p>
               <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono">{compactFileDiff(diff.before, diff.after)}</pre>
@@ -559,8 +546,8 @@ export function PlanToolCallCard({
   buildDisabled?: boolean;
   hostnames?: Record<string, string>;
 }) {
-  const plan = planInfo(tool.input, tool.result, tool.detail);
-  if (tool.status !== "running" && plan) {
+ const plan = planFromToolPayload(tool.input, tool.result, tool.detail);
+  if (!isToolRunning(tool.status) && plan) {
     return (
       <PlanWorkspaceCard
         title={plan.title}
@@ -571,6 +558,7 @@ export function PlanToolCallCard({
         onBuildWithAgents={() => onBuildPlan?.(plan, { multiAgent: true })}
         showMultiAgent={planLooksParallelizable(plan.content)}
         buildDisabled={buildDisabled}
+        compact
       />
     );
   }
@@ -611,14 +599,18 @@ export const ToolCallGroup = memo(function ToolCallGroup({
   hostnames?: Record<string, string>;
 }) {
   const [userOpen, setUserOpen] = useState(false);
+  const isTodoTool = (tool: ToolCallData) =>
+    tool.kind === "todo" ||
+    Boolean(tool.todos?.length) ||
+    Boolean(todosFromToolPayload(tool.input, tool.result)?.length);
   const planTools = includePlans ? tools.filter((tool) => tool.kind === "plan") : [];
   const noteTools = tools.filter((tool) => tool.kind === "note");
-  const todoTools = tools.filter((tool) => tool.kind === "todo");
+  const todoTools = tools.filter((tool) => isTodoTool(tool));
   const regularTools = tools.filter(
     (tool) =>
       tool.kind !== "note" &&
-      tool.kind !== "todo" &&
-      (includePlans || tool.kind !== "plan"),
+      tool.kind !== "plan" &&
+      !isTodoTool(tool),
   );
   const groupTitle = toolGroupLabel(regularTools);
   const groupOpen = userOpen || Boolean(live) || Boolean(autoExpand);
@@ -641,33 +633,33 @@ export const ToolCallGroup = memo(function ToolCallGroup({
   if (regularTools.length === 0) {
     return (
       <>
-        {planTools.map((tool) => (
-          <div key={tool.id}>{renderTool(tool)}</div>
+        {planTools.map((tool, index) => (
+          <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
         ))}
-        {noteTools.map((tool) => (
-          <div key={tool.id}>{renderTool(tool)}</div>
+        {noteTools.map((tool, index) => (
+          <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
         ))}
-        {todoTools.map((tool) => (
-          <div key={tool.id}>{renderTool(tool)}</div>
+        {todoTools.map((tool, index) => (
+          <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
         ))}
       </>
     );
   }
   return (
     <div className="w-full min-w-0" style={{ overflowAnchor: "none" }}>
-      {planTools.map((tool) => (
-        <div key={tool.id}>{renderTool(tool)}</div>
+      {planTools.map((tool, index) => (
+        <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
       ))}
-      {noteTools.map((tool) => (
-        <div key={tool.id}>{renderTool(tool)}</div>
+      {noteTools.map((tool, index) => (
+        <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
       ))}
-      {todoTools.map((tool) => (
-        <div key={tool.id}>{renderTool(tool)}</div>
+      {todoTools.map((tool, index) => (
+        <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
       ))}
       {regularTools.length === 1 ? (
         <div className="flex flex-col">
-          {regularTools.map((tool) => (
-            <div key={tool.id}>{renderTool(tool)}</div>
+          {regularTools.map((tool, index) => (
+            <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
           ))}
         </div>
       ) : (
@@ -686,8 +678,8 @@ export const ToolCallGroup = memo(function ToolCallGroup({
           </button>
           {groupOpen ? (
             <div className="mt-0.5 space-y-0 pl-4">
-              {regularTools.map((tool) => (
-                <div key={tool.id}>{renderTool(tool, true)}</div>
+              {regularTools.map((tool, index) => (
+                <div key={toolReactKey(tool, index)}>{renderTool(tool, true)}</div>
               ))}
             </div>
           ) : null}

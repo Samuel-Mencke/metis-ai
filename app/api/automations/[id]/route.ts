@@ -2,6 +2,7 @@ import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import {
   deleteAutomation,
   getAutomation,
+  runAutomationNow,
   setAutomationStatus,
   updateAutomation,
   type AutomationSchedule,
@@ -46,6 +47,12 @@ export async function PATCH(req: Request, { params }: Params) {
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
   try {
     const action = typeof body.action === "string" ? body.action : "";
+    if (action === "run") {
+      const queued = runAutomationNow(id, ownerId);
+      return queued
+        ? Response.json(queued, { status: 202 })
+        : Response.json({ error: "Automation not found" }, { status: 404 });
+    }
     const automation = action === "pause" || action === "resume"
       ? setAutomationStatus(id, ownerId, action === "resume" ? "active" : "paused")
       : updateAutomation(id, ownerId, {
@@ -54,6 +61,7 @@ export async function PATCH(req: Request, { params }: Params) {
           ...(typeof body.modeId === "string" ? { modeId: body.modeId } : {}),
           ...(typeof body.modelId === "string" ? { modelId: body.modelId } : {}),
           ...(typeof body.extendedModelId === "string" ? { extendedModelId: body.extendedModelId } : {}),
+          ...(typeof body.maxRunMinutes === "number" ? { maxRunMinutes: body.maxRunMinutes } : {}),
           ...(typeof body.chatId === "string" ? { chatId: body.chatId } : {}),
           ...(typeof body.timezone === "string" ? { timezone: body.timezone } : {}),
           ...(scheduleFromBody(body) ? { schedule: scheduleFromBody(body) } : {}),

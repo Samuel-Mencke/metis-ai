@@ -24,6 +24,7 @@ export type SseEvent =
         todos?: Array<{ id?: string; content: string; status?: string }>;
         subagent?: {
           agentId?: string;
+          chatId?: string;
           mode?: string;
           model?: string;
           prompt?: string;
@@ -38,6 +39,18 @@ export type SseEvent =
       };
     }
   | { event: "status"; data: { status: string; message?: string } }
+  | {
+      event: "compaction";
+      data: {
+        type: "compaction";
+        status: "started" | "completed" | "error";
+        beforeTokens?: number;
+        targetTokens?: number;
+        afterTokens?: number;
+        removedMessages?: number;
+        message?: string;
+      };
+    }
   | { event: "agentId"; data: { agentId: string } }
   | { event: "assistantId"; data: { messageId: string } }
   | {

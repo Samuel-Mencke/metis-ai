@@ -1,13 +1,16 @@
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { getDatabase } from "@/lib/sqlite";
 import {
   findActiveConnection,
   getProviderConnectionSecret,
+  listProviderConnections,
+  updateProviderConnection,
 } from "@/lib/provider-connections";
+import { readCodexOAuthCredentials } from "@/lib/providers/discovery";
 import type { UsageProvider, UsageSnapshot, UsageWindow } from "@/lib/usage-display";
 import { parseCursorUsageBody } from "@/lib/usage-display";
 
@@ -33,7 +36,6 @@ const cache = new Map<string, UsageSnapshot>();
 const inflight = new Map<string, Promise<UsageSnapshot>>();
 
 const HOME = process.env.HOME || "/home/samuel";
-const BRIDGE_CODEX_HOME = `${HOME}/.cache/plan-bridge/codex-home`;
 const CODEX_BIN = process.env.CODEX_BIN || `${HOME}/.npm-global/bin/codex`;
 const GATEWAY_DB = process.env.GATEWAY_DB_PATH || `${HOME}/AiApi-Wrapper/data/gateway.db`;
 const WRAPPER_ENV = `${HOME}/AiApi-Wrapper/.env`;
@@ -64,39 +66,127 @@ function epochMsToIso(value: unknown): string | null {
 
 /* ---------------- Codex (ChatGPT plan) ---------------- */
 
-type CodexWindow = { usedPercent: number; windowDurationMins: number; resetsAt: number } | null;
+type CodexWindow = Record<string, unknown> | null;
 
-function codexWindowLabel(mins: number): string {
+export function codexWindowLabel(mins: number): string {
   if (mins >= 10080) return "weekly";
-  if (mins >= 1400 && mins <= 150) return "weekly";
+  if (mins >= 4 * 60 && mins <= 6 * 60) return "5h";
   if (mins >= 2880) return `${Math.round(mins / 1440)}d`;
   if (mins > 60) return `${Math.round(mins / 60)}h`;
   return `${mins}m`;
 }
 
-function codexWindow(w: CodexWindow): UsageWindow | null {
-  if (!w || typeof w.usedPercent !== "number") return null;
+export function normalizeCodexWindow(w: CodexWindow): UsageWindow | null {
+  if (!w) return null;
+  const usedValue = w.usedPercent ?? w.used_percent ?? w.percentage;
+  const usedPercent = typeof usedValue === "number" ? usedValue : Number(usedValue);
+  if (!Number.isFinite(usedPercent)) return null;
+  const durationValue =
+    w.windowDurationMins ??
+    w.window_duration_mins ??
+    w.limitWindowMins ??
+    (w.windowDurationSeconds !== undefined ? Number(w.windowDurationSeconds) / 60 : undefined) ??
+    (w.limitWindowSeconds !== undefined ? Number(w.limitWindowSeconds) / 60 : undefined);
+  const duration = typeof durationValue === "number" ? durationValue : Number(durationValue);
+  const resetValue = w.resetsAt ?? w.resetAt ?? w.reset_at ?? w.resetTime;
   return {
-    label: codexWindowLabel(w.windowDurationMins),
-    usedPercent: Math.round(w.usedPercent),
-    resetsAt: epochMsToIso(w.resetsAt),
+    label: Number.isFinite(duration) && duration > 0 ? codexWindowLabel(duration) : "quota",
+    usedPercent: Math.round(Math.min(100, Math.max(0, usedPercent))),
+    resetsAt: epochMsToIso(resetValue),
   };
 }
 
-async function fetchCodexUsage(): Promise<UsageProvider> {
-  const base: UsageProvider = { key: "codex", name: "Codex (ChatGPT plan)", status: "live", windows: [] };
+type CodexUsageHome = {
+  home: string;
+  authTokens?: { accessToken: string; chatgptAccountId: string; chatgptPlanType?: string | null };
+  apiKey?: string;
+  cleanup: () => void;
+};
+
+function createCodexUsageHome(ownerId?: string): CodexUsageHome | null {
+  if (!ownerId) return null;
+  try {
+    const connection = findActiveConnection(ownerId, "codex");
+    if (!connection || !connection.enabled) return null;
+    const credential = getProviderConnectionSecret(connection.id, ownerId);
+    if (!credential?.secret?.trim()) return null;
+
+    let auth: Record<string, unknown> = {};
+    let authTokens: CodexUsageHome["authTokens"];
+    if (connection.authType === "oauth") {
+      const oauth = readCodexOAuthCredentials(credential.secret);
+      authTokens = {
+        accessToken: oauth.access,
+        chatgptAccountId: oauth.accountId,
+      };
+      auth = {
+        auth_mode: "chatgpt",
+        OPENAI_API_KEY: null,
+        tokens: {
+          access_token: oauth.access,
+          refresh_token: oauth.refresh,
+          id_token: oauth.idToken,
+          account_id: oauth.accountId,
+        },
+        last_refresh: new Date(oauth.expires).toISOString(),
+      };
+    } else if (connection.authType === "account") {
+      const parsed = JSON.parse(credential.secret) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+      auth = parsed as Record<string, unknown>;
+    } else if (connection.authType !== "api_key") {
+      return null;
+    }
+
+    const home = mkdtempSync(path.join(tmpdir(), "metis-codex-usage-"));
+    writeFileSync(path.join(home, "auth.json"), `${JSON.stringify(auth)}\n`, { mode: 0o600 });
+    return {
+      home,
+      ...(authTokens ? { authTokens } : {}),
+      ...(connection.authType === "api_key" ? { apiKey: credential.secret.trim() } : {}),
+      cleanup: () => {
+        try { rmSync(home, { recursive: true, force: true }); } catch { /* already gone */ }
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchCodexUsage(ownerId?: string): Promise<UsageProvider> {
+  const connection = ownerId ? findActiveConnection(ownerId, "codex") : null;
+  const base: UsageProvider = {
+    key: "codex",
+    name: "Codex (ChatGPT plan)",
+    status: "live",
+    windows: [],
+    source: "dashboard",
+    ...(connection?.id ? { connectionId: connection.id } : {}),
+  };
+  const usageHome = createCodexUsageHome(ownerId);
+  if (!usageHome) return { ...base, status: "no_auth", error: "no authenticated Codex account connection" };
+
   return new Promise<UsageProvider>((resolve) => {
     let settled = false;
-    const done = (p: UsageProvider) => {
-      if (!settled) { settled = true; resolve(p); }
+    let child: ReturnType<typeof execFile> | null = null;
+    const done = (provider: UsageProvider) => {
+      if (settled) return;
+      settled = true;
+      try { child?.kill("SIGTERM"); } catch { /* noop */ }
+      usageHome.cleanup();
+      resolve(provider);
     };
     const timer = setTimeout(() => done({ ...base, status: "error", error: "timeout" }), 20_000);
     try {
-      const child = execFile(
+      child = execFile(
         CODEX_BIN,
         ["app-server", "--stdio"],
         {
-          env: { ...process.env, CODEX_HOME: BRIDGE_CODEX_HOME },
+          env: {
+            ...process.env,
+            ...(usageHome.apiKey ? { CODEX_API_KEY: usageHome.apiKey } : {}),
+            CODEX_HOME: usageHome.home,
+          },
           timeout: 18_000,
         },
         () => {
@@ -109,7 +199,7 @@ async function fetchCodexUsage(): Promise<UsageProvider> {
       }
       let buffer = "";
       const send = (obj: unknown) => {
-        try { child.stdin?.write(`${JSON.stringify(obj)}\n`); } catch { /* closed */ }
+        try { child?.stdin?.write(`${JSON.stringify(obj)}\n`); } catch { /* closed */ }
       };
       child.stdin.on("error", () => {});
       child.stdout.setEncoding("utf8");
@@ -122,35 +212,82 @@ async function fetchCodexUsage(): Promise<UsageProvider> {
           if (!line) continue;
           let msg: Record<string, unknown>;
           try { msg = JSON.parse(line); } catch { continue; }
-          if (msg.id === 2) {
-            clearTimeout(timer);
-            try { child.kill("SIGTERM"); } catch { /* noop */ }
-            const result = (msg.result as { rateLimits?: Record<string, unknown> } | undefined)?.rateLimits;
-            if (!result) return done({ ...base, status: "error", error: "no rate limits in response" });
-            const planType = typeof result.planType === "string" ? result.planType : undefined;
-            const windows = [
-              codexWindow(result.primary as CodexWindow),
-              codexWindow(result.secondary as CodexWindow),
-            ].filter((w): w is UsageWindow => w !== null);
-            return done({
-              ...base,
-              planLabel: planType ? planType.charAt(0).toUpperCase() + planType.slice(1) : undefined,
-              windows,
-              extra: {
-                spendControlReached: result.spendControlReached === true ? "yes" : "no",
-                rateLimitReachedType: typeof result.rateLimitReachedType === "string"
-                  ? result.rateLimitReachedType
-                  : null,
-              },
-            });
+          if (msg.id === 2 && usageHome.authTokens) {
+            const loginError = msg.error && typeof msg.error === "object"
+              ? msg.error as Record<string, unknown>
+              : null;
+            if (loginError) {
+              clearTimeout(timer);
+              const message = typeof loginError.message === "string" ? loginError.message : "Codex login failed";
+              return done({ ...base, status: "no_auth", error: message });
+            }
+            send({ jsonrpc: "2.0", id: 3, method: "account/rateLimits/read", params: {} });
+            continue;
           }
+          const rateLimitId = usageHome.authTokens ? 3 : 2;
+          if (msg.id !== rateLimitId) continue;
+          clearTimeout(timer);
+          const rpcError = msg.error && typeof msg.error === "object"
+            ? msg.error as Record<string, unknown>
+            : null;
+          if (rpcError) {
+            const message = typeof rpcError.message === "string" ? rpcError.message : "rate-limit request failed";
+            const code = typeof rpcError.code === "number" || typeof rpcError.code === "string"
+              ? ` (${rpcError.code})`
+              : "";
+            const status = /auth|login|credential|unauthorized|required|401|403/i.test(message)
+              ? "no_auth"
+              : "error";
+            return done({ ...base, status, error: `${message}${code}` });
+          }
+          const result = (msg.result as { rateLimits?: Record<string, unknown> } | undefined)?.rateLimits;
+          if (!result) return done({ ...base, status: "error", error: "unsupported: no rate limits in response" });
+          const planType = typeof result.planType === "string" ? result.planType : undefined;
+          const windows = [
+            normalizeCodexWindow(result.primary as CodexWindow),
+            normalizeCodexWindow(result.secondary as CodexWindow),
+            normalizeCodexWindow(result.weekly as CodexWindow),
+            normalizeCodexWindow(result.fiveHour as CodexWindow),
+          ].filter((window): window is UsageWindow => window !== null);
+          return done({
+            ...base,
+            planLabel: planType ? planType.charAt(0).toUpperCase() + planType.slice(1) : undefined,
+            windows,
+            extra: {
+              spendControlReached: result.spendControlReached === true ? "yes" : "no",
+              rateLimitReachedType: typeof result.rateLimitReachedType === "string"
+                ? result.rateLimitReachedType
+                : null,
+              credits: typeof result.credits === "number" ? result.credits : null,
+              resetsAt: typeof result.resetAt === "string" ? result.resetAt : null,
+            },
+          });
         }
       });
-      child.on("error", () => { clearTimeout(timer); done({ ...base, status: "error", error: "spawn error" }); });
-      child.on("close", () => { clearTimeout(timer); done({ ...base, status: "error", error: "app-server exited" }); });
-      send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { clientInfo: { name: "metis-usage", version: "1.0" } } });
+      child.on("error", (error) => {
+        clearTimeout(timer);
+        done({ ...base, status: "error", error: error.message || "spawn error" });
+      });
+      child.on("close", (code, signal) => {
+        clearTimeout(timer);
+        done({
+          ...base,
+          status: "error",
+          error: signal ? `app-server ${signal}` : `app-server exited (${code ?? "unknown"})`,
+        });
+      });
+      send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { clientInfo: { name: "metis-usage", version: "1.0" }, capabilities: { experimentalApi: true } } });
       send({ jsonrpc: "2.0", method: "notifications/initialized" });
-      send({ jsonrpc: "2.0", id: 2, method: "account/rateLimits/read", params: {} });
+      if (usageHome.authTokens) {
+        send({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "account/login/start",
+          params: { type: "chatgptAuthTokens", ...usageHome.authTokens },
+        });
+      } else {
+        send({ jsonrpc: "2.0", id: 2, method: "account/rateLimits/read", params: {} });
+      }
     } catch (error) {
       clearTimeout(timer);
       done({ ...base, status: "error", error: error instanceof Error ? error.message : "spawn failed" });
@@ -168,125 +305,232 @@ type ZaiLimit = {
   number?: number;
 };
 
-async function fetchZaiUsage(): Promise<UsageProvider> {
+async function fetchZaiUsage(ownerId?: string): Promise<UsageProvider> {
   const base: UsageProvider = { key: "zai", name: "z.ai Coding Plan", status: "live", windows: [] };
-  const key = readWrapperEnvKey(["GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"]);
-  if (!key) return { ...base, status: "no_auth", error: "no z.ai API key found" };
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
-    const res = await fetch("https://api.z.ai/api/monitor/usage/quota/limit", {
-      headers: { Authorization: key, Accept: "application/json" },
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-    if (!res.ok) {
-      return { ...base, status: res.status === 401 ? "no_auth" : "error", error: `HTTP ${res.status}` };
-    }
-    const body = (await res.json()) as {
-      data?: { limits?: ZaiLimit[]; level?: string };
-    };
-    const limits = body.data?.limits ?? [];
-    const level = typeof body.data?.level === "string" ? body.data.level : undefined;
-    const windows: UsageWindow[] = [];
-    for (const limit of limits) {
-      if (limit.type === "TOKENS_LIMIT") {
-        const hours = limit.number && limit.unit === 3 ? limit.number : 5;
-        windows.push({
-          label: `${hours}h`,
-          usedPercent: typeof limit.percentage === "number" ? Math.round(limit.percentage) : null,
-          resetsAt: epochMsToIso(limit.nextResetTime),
-        });
-      } else if (limit.type === "TIME_LIMIT") {
-        windows.push({
-          label: limit.number === 1 && limit.unit === 5 ? "monthly" : "time",
-          usedPercent: typeof limit.percentage === "number" ? Math.round(limit.percentage) : null,
-          resetsAt: epochMsToIso(limit.nextResetTime),
-        });
+  const keys: Array<{ secret: string; connectionId?: string }> = [];
+  if (ownerId) {
+    const candidates = listProviderConnections(ownerId, false)
+      .filter((connection) => /z\.?ai|z-ai|glm/i.test(`${connection.label} ${connection.baseUrl || ""}`))
+      .sort((a, b) => Number(/coding/i.test(`${b.label} ${b.baseUrl || ""}`)) - Number(/coding/i.test(`${a.label} ${a.baseUrl || ""}`)));
+    for (const connection of candidates) {
+      try {
+        const secret = getProviderConnectionSecret(connection.id, ownerId)?.secret?.trim();
+        if (secret && !keys.some((item) => item.secret === secret)) keys.push({ secret, connectionId: connection.id });
+      } catch {
+        /* try the next z.ai-compatible connection */
       }
     }
-    return {
-      ...base,
-      planLabel: level ? level.charAt(0).toUpperCase() + level.slice(1) : undefined,
-      windows,
-    };
-  } catch (error) {
-    return { ...base, status: "error", error: error instanceof Error ? error.message : "fetch failed" };
   }
+  if (!ownerId) {
+    const fallbackKey = readWrapperEnvKey(["GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"]);
+    if (fallbackKey && !keys.some((item) => item.secret === fallbackKey)) keys.push({ secret: fallbackKey });
+  }
+  if (!keys.length) return { ...base, status: "no_auth", error: "no z.ai API key found" };
+
+  let lastError = "quota lookup failed";
+  for (const credential of keys) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10_000);
+      const res = await fetch("https://api.z.ai/api/monitor/usage/quota/limit", {
+        headers: { Authorization: credential.secret, Accept: "application/json" },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (!res.ok) {
+        lastError = `HTTP ${res.status}`;
+        continue;
+      }
+      const body = (await res.json()) as {
+        data?: { limits?: ZaiLimit[]; level?: string };
+      };
+      const limits = body.data?.limits ?? [];
+      const level = typeof body.data?.level === "string" ? body.data.level : undefined;
+      const windows: UsageWindow[] = [];
+      for (const limit of limits) {
+        if (limit.type === "TOKENS_LIMIT") {
+          const hours = limit.number && limit.unit === 3 ? limit.number : 5;
+          windows.push({
+            label: `${hours}h`,
+            usedPercent: typeof limit.percentage === "number" ? Math.round(limit.percentage) : null,
+            resetsAt: epochMsToIso(limit.nextResetTime),
+          });
+        } else if (limit.type === "TIME_LIMIT") {
+          windows.push({
+            label: limit.number === 1 && limit.unit === 5 ? "monthly" : "time",
+            usedPercent: typeof limit.percentage === "number" ? Math.round(limit.percentage) : null,
+            resetsAt: epochMsToIso(limit.nextResetTime),
+          });
+        }
+      }
+      return {
+        ...base,
+        ...(credential.connectionId ? { connectionId: credential.connectionId } : {}),
+        source: "dashboard",
+        planLabel: level ? level.charAt(0).toUpperCase() + level.slice(1) : undefined,
+        windows,
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "fetch failed";
+    }
+  }
+  return { ...base, status: /401/.test(lastError) ? "no_auth" : "error", error: lastError };
 }
 
 /* ---------------- Antigravity ---------------- */
 
-async function fetchAntigravityUsage(): Promise<UsageProvider> {
-  const base: UsageProvider = { key: "antigravity", name: "Antigravity", status: "live", windows: [] };
-  let token: string | undefined;
+function antigravityAccessToken(secret: string | undefined): string | null {
+  if (!secret?.trim()) return null;
   try {
-    const raw = JSON.parse(
-      readFileSync(`${HOME}/.gemini/antigravity-cli/antigravity-oauth-token`, "utf8"),
-    ) as { token?: unknown };
-    if (typeof raw.token === "string") token = raw.token;
-    else if (raw.token && typeof raw.token === "object") {
-      token = (raw.token as { access_token?: string }).access_token;
-    }
+    const raw = JSON.parse(secret) as { token?: unknown };
+    const token = typeof raw.token === "string"
+      ? raw.token
+      : raw.token && typeof raw.token === "object"
+        ? (raw.token as { access_token?: unknown }).access_token
+        : undefined;
+    return typeof token === "string" && token.trim() ? token.trim() : null;
   } catch {
-    /* no token file */
+    return null;
   }
-  if (!token) return { ...base, status: "no_auth", error: "no antigravity OAuth token" };
+}
+
+/** Ask the official Antigravity CLI to refresh its own token file without
+ * starting a model turn. `agy models` performs authenticated model discovery,
+ * which exercises the same automatic token refresh used by normal CLI runs. */
+async function refreshAntigravityCredential(secret: string): Promise<string | null> {
+  const command = process.env.AGY_CLI_PATH?.trim() || path.join(HOME, ".local", "bin", "agy");
+  if (!existsSync(command)) return null;
+  const home = mkdtempSync(path.join(tmpdir(), "metis-agy-usage-"));
+  const tokenFile = path.join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token");
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 12_000);
-    const res = await fetch(
-      "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-          "User-Agent": "antigravity-usage/1.0",
+    mkdirSync(path.dirname(tokenFile), { recursive: true, mode: 0o700 });
+    writeFileSync(tokenFile, secret, { mode: 0o600 });
+    await new Promise<void>((resolve) => {
+      execFile(
+        command,
+        ["models"],
+        {
+          env: {
+            ...process.env,
+            HOME: home,
+            USERPROFILE: home,
+            XDG_CONFIG_HOME: path.join(home, ".config"),
+            XDG_CACHE_HOME: path.join(home, ".cache"),
+          },
+          timeout: 15_000,
+          maxBuffer: 512_000,
         },
-        body: "{}",
-        signal: controller.signal,
-      },
-    );
-    clearTimeout(timer);
-    if (!res.ok) {
-      return { ...base, status: res.status === 401 || res.status === 403 ? "no_auth" : "error", error: `HTTP ${res.status}` };
-    }
-    const body = (await res.json()) as {
-      models?: Record<string, { quotaInfo?: { remainingFraction?: number; resetTime?: string } }>;
-    };
-    const models = body.models ?? {};
-    // Aggregate: show the most constrained model window + reset time of the soonest reset.
-    let soonestReset: string | null = null;
-    let mostUsedPercent: number | null = null;
-    let constrainedModel: string | null = null;
-    for (const [id, model] of Object.entries(models)) {
-      const reset = model.quotaInfo?.resetTime ?? null;
-      if (reset && (!soonestReset || reset < soonestReset)) soonestReset = reset;
-      const remaining = model.quotaInfo?.remainingFraction;
-      if (typeof remaining === "number" && Number.isFinite(remaining)) {
-        const used = Math.round((1 - remaining) * 100);
-        if (mostUsedPercent === null || used > mostUsedPercent) {
-          mostUsedPercent = used;
-          constrainedModel = id;
-        }
+        () => resolve(),
+      );
+    });
+    const refreshed = readFileSync(tokenFile, "utf8");
+    return antigravityAccessToken(refreshed) ? refreshed : null;
+  } catch {
+    return null;
+  } finally {
+    try { rmSync(home, { recursive: true, force: true }); } catch { /* already gone */ }
+  }
+}
+
+async function fetchAntigravityUsage(ownerId?: string): Promise<UsageProvider> {
+  const base: UsageProvider = { key: "antigravity", name: "Antigravity", status: "live", windows: [], source: "dashboard" };
+  const credentials: Array<{ secret: string; connectionId?: string }> = [];
+  const addCredential = (secret: string | undefined, connectionId?: string) => {
+    if (!secret?.trim() || !antigravityAccessToken(secret)) return;
+    if (credentials.some((item) => item.secret === secret)) return;
+    credentials.push({ secret, ...(connectionId ? { connectionId } : {}) });
+  };
+
+  if (ownerId) {
+    for (const connection of listProviderConnections(ownerId, false).filter((item) => item.providerKey === "antigravity")) {
+      try {
+        addCredential(getProviderConnectionSecret(connection.id, ownerId)?.secret, connection.id);
+      } catch {
+        /* try the next account-scoped connection */
       }
     }
-    return {
-      ...base,
-      windows: [{
-        label: "quota",
-        usedPercent: mostUsedPercent,
-        resetsAt: soonestReset,
-      }],
-      extra: {
-        models: Object.keys(models).length,
-        mostConstrained: constrainedModel,
-      },
-    };
-  } catch (error) {
-    return { ...base, status: "error", error: error instanceof Error ? error.message : "fetch failed" };
+  } else {
+    try {
+      addCredential(readFileSync(`${HOME}/.gemini/antigravity-cli/antigravity-oauth-token`, "utf8"));
+    } catch {
+      /* no unscoped CLI token */
+    }
   }
+
+  if (!credentials.length) return { ...base, status: "no_auth", error: "no authenticated Antigravity connection" };
+
+  const readQuota = async (token: string) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12_000);
+    try {
+      return await fetch(
+        "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+            "User-Agent": "antigravity-usage/1.0",
+          },
+          body: "{}",
+          signal: controller.signal,
+        },
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  let lastError = "quota lookup failed";
+  for (const credential of credentials) {
+    try {
+      let secret = credential.secret;
+      let token = antigravityAccessToken(secret)!;
+      let res = await readQuota(token);
+      if ((res.status === 401 || res.status === 403) && ownerId && credential.connectionId) {
+        const refreshed = await refreshAntigravityCredential(secret);
+        if (refreshed && refreshed !== secret) {
+          secret = refreshed;
+          token = antigravityAccessToken(secret)!;
+          updateProviderConnection(credential.connectionId, ownerId, { secret, enabled: true });
+          res = await readQuota(token);
+        }
+      }
+      if (!res.ok) {
+        lastError = `HTTP ${res.status}`;
+        continue;
+      }
+      const body = (await res.json()) as {
+        models?: Record<string, { quotaInfo?: { remainingFraction?: number; resetTime?: string } }>;
+      };
+      const models = body.models ?? {};
+      let soonestReset: string | null = null;
+      let mostUsedPercent: number | null = null;
+      let constrainedModel: string | null = null;
+      for (const [id, model] of Object.entries(models)) {
+        const reset = model.quotaInfo?.resetTime ?? null;
+        if (reset && (!soonestReset || reset < soonestReset)) soonestReset = reset;
+        const remaining = model.quotaInfo?.remainingFraction;
+        if (typeof remaining === "number" && Number.isFinite(remaining)) {
+          const used = Math.round((1 - remaining) * 100);
+          if (mostUsedPercent === null || used > mostUsedPercent) {
+            mostUsedPercent = used;
+            constrainedModel = id;
+          }
+        }
+      }
+      return {
+        ...base,
+        ...(credential.connectionId ? { connectionId: credential.connectionId } : {}),
+        windows: [{ label: "quota", usedPercent: mostUsedPercent, resetsAt: soonestReset }],
+        extra: { models: Object.keys(models).length, mostConstrained: constrainedModel },
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "fetch failed";
+    }
+  }
+  const noAuth = /HTTP 401|HTTP 403/.test(lastError);
+  return { ...base, status: noAuth ? "no_auth" : "error", error: lastError };
 }
 
 /* ---------------- Local gateway 5h stats ---------------- */
@@ -296,11 +540,7 @@ function fetchGateway5h(): UsageProvider[] {
   // NOTE: created_at strings are ISO-8601 with "T" separators; the cutoff must
   // use the same format or string comparison overcounts.
   try {
-    const Database = require("node:sqlite").DatabaseSync as new (p: string, o?: unknown) => {
-      prepare: (sql: string) => { all: (...a: unknown[]) => unknown[] };
-      close?: () => void;
-    };
-    const db = new Database(`file:${GATEWAY_DB}?mode=ro`, { open: true });
+    const db = new DatabaseSync(`file:${GATEWAY_DB}?mode=ro`, { open: true });
     const cutoff = new Date(Date.now() - 5 * 60 * 60 * 1000)
       .toISOString()
       .replace(/\.\d{3}Z$/, "");
@@ -324,6 +564,7 @@ function fetchGateway5h(): UsageProvider[] {
       key: `gateway:${row.provider}:${row.model_alias}`,
       name: `Gateway · ${row.provider} · ${row.model_alias}`,
       status: "live" as const,
+      source: "local" as const,
       windows: [],
       extra: {
         model: row.real_model || row.model_alias,
@@ -363,6 +604,7 @@ function fetchMetisTelemetry5h(): UsageProvider[] {
       key: `local:${row.model_id}`,
       name: `Local · ${row.model_id}`,
       status: "live" as const,
+      source: "local" as const,
       windows: [],
       extra: {
         model: row.model_id,
@@ -439,19 +681,24 @@ async function cursorFetchJson(url: string, token: string): Promise<unknown> {
 }
 
 async function fetchCursorUsage(ownerId?: string): Promise<UsageProvider> {
-  const base: UsageProvider = { key: "cursor", name: "Cursor", status: "live", windows: [] };
-  const tokens: string[] = [];
+  const base: UsageProvider = { key: "cursor", name: "Cursor", status: "live", windows: [], source: "dashboard" };
+  const tokens: Array<{ token: string; connectionId?: string; apiKeyOnly?: boolean }> = [];
   if (ownerId) {
-    try {
-      const connection = findActiveConnection(ownerId, "cursor");
-      const secret = connection ? getProviderConnectionSecret(connection.id, ownerId)?.secret : undefined;
-      if (secret?.trim()) tokens.push(secret.trim());
-    } catch {
-      /* no stored Cursor key */
+    for (const connection of listProviderConnections(ownerId, false).filter((item) => item.providerKey === "cursor")) {
+      try {
+        const secret = getProviderConnectionSecret(connection.id, ownerId)?.secret;
+        if (secret?.trim() && !tokens.some((item) => item.token === secret.trim())) {
+          tokens.push({ token: secret.trim(), connectionId: connection.id, apiKeyOnly: connection.authType === "api_key" });
+        }
+      } catch {
+        /* try the next stored Cursor credential */
+      }
     }
   }
-  const session = readCursorAppSession();
-  if (session && !tokens.includes(session)) tokens.push(session);
+  if (!ownerId) {
+    const session = readCursorAppSession();
+    if (session && !tokens.some((item) => item.token === session)) tokens.push({ token: session });
+  }
 
   if (!tokens.length) return { ...base, status: "no_auth" };
 
@@ -460,12 +707,17 @@ async function fetchCursorUsage(ownerId?: string): Promise<UsageProvider> {
     "https://cursor.com/api/usage-summary",
     "https://www.cursor.com/api/usage-summary",
   ];
-  for (const token of tokens) {
+  for (const credential of tokens) {
+    if (credential.apiKeyOnly) continue;
     for (const url of urls) {
       try {
-        const body = await cursorFetchJson(url, token);
+        const body = await cursorFetchJson(url, credential.token);
         const parsed = parseCursorUsageBody(body);
-        if (parsed) return { ...base, ...parsed };
+        if (parsed) return {
+          ...base,
+          ...(credential.connectionId ? { connectionId: credential.connectionId } : {}),
+          ...parsed,
+        };
         lastError = "unsupported usage payload";
       } catch (error) {
         lastError = error instanceof Error ? error.message : "fetch failed";
@@ -473,22 +725,37 @@ async function fetchCursorUsage(ownerId?: string): Promise<UsageProvider> {
     }
   }
   const noAuth = /HTTP 401|HTTP 403/.test(lastError);
+  if (tokens.every((credential) => credential.apiKeyOnly)) {
+    return { ...base, status: "unsupported", error: "Cursor API keys provide model access, not dashboard quota." };
+  }
   return { ...base, status: noAuth ? "no_auth" : "error", error: lastError };
 }
 
 /* ---------------- Aggregate + cache ---------------- */
 
 async function collect(ownerId?: string): Promise<UsageSnapshot> {
-  const results = await Promise.allSettled([
-    fetchCursorUsage(ownerId),
-    fetchCodexUsage(),
-    fetchZaiUsage(),
-    fetchAntigravityUsage(),
-  ]);
+  const sources = [
+    { key: "cursor", name: "Cursor", load: fetchCursorUsage },
+    { key: "codex", name: "Codex (ChatGPT plan)", load: fetchCodexUsage },
+    { key: "zai", name: "z.ai Coding Plan", load: fetchZaiUsage },
+    { key: "antigravity", name: "Antigravity", load: fetchAntigravityUsage },
+  ] as const;
+  const results = await Promise.allSettled(sources.map(({ load }) => load(ownerId)));
   const providers: UsageProvider[] = [];
-  for (const result of results) {
-    if (result.status === "fulfilled") providers.push(result.value);
-  }
+  results.forEach((result, index) => {
+    if (result.status === "fulfilled") {
+      providers.push(result.value);
+      return;
+    }
+    const error = result.reason instanceof Error ? result.reason.message : String(result.reason || "provider lookup failed");
+    providers.push({
+      key: sources[index].key,
+      name: sources[index].name,
+      status: "error",
+      windows: [],
+      error,
+    });
+  });
   providers.push(...fetchGateway5h());
   providers.push(...fetchMetisTelemetry5h());
   return { providers, fetchedAt: new Date().toISOString() };

@@ -23,11 +23,29 @@ export function isToolRunning(status?: string): boolean {
 
 export type AssistantViewBlock<TTool> =
   | { type: "thinking"; content: string; done?: boolean; durationMs?: number }
+  | {
+      type: "compaction";
+      status: "started" | "completed" | "error";
+      beforeTokens?: number;
+      targetTokens?: number;
+      afterTokens?: number;
+      removedMessages?: number;
+      message?: string;
+    }
   | { type: "text"; content: string }
   | { type: "tools"; tools: TTool[] };
 
 type LayoutPart<TTool> =
   | { type: "thinking"; content: string; done?: boolean; durationMs?: number }
+  | {
+      type: "compaction";
+      status: "started" | "completed" | "error";
+      beforeTokens?: number;
+      targetTokens?: number;
+      afterTokens?: number;
+      removedMessages?: number;
+      message?: string;
+    }
   | { type: "text"; content: string }
   | ({ type: "tool" } & TTool);
 
@@ -43,43 +61,270 @@ export function isStandaloneToolKind(kind?: string): boolean {
   return Boolean(kind && STANDALONE_TOOL_KINDS.has(kind));
 }
 
+export type ToolKind =
+  | "plan"
+  | "edit"
+  | "read"
+  | "shell"
+  | "subagent"
+  | "mcp"
+  | "canvas"
+  | "note"
+  | "todo"
+  | "browser"
+  | "memory"
+  | "other";
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return undefined;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function parseToolValue(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
+
+export function unwrapToolRecord(value: unknown, depth = 0): Record<string, unknown> | undefined {
+  if (depth > 5) return asRecord(value);
+  const parsed = parseToolValue(value);
+  const record = asRecord(parsed);
+  if (!record) return undefined;
+  const nestedText = Array.isArray(record.content)
+    ? record.content
+      .map((item) => {
+        const block = asRecord(item);
+        const text = block?.text;
+        if (typeof text === "string") return text;
+        const inner = asRecord(text);
+        return typeof inner?.text === "string" ? inner.text : "";
+      })
+      .filter(Boolean)
+      .join("\n")
+    : typeof record.content === "string"
+      ? record.content
+      : "";
+  if (nestedText.trim().startsWith("{") || nestedText.trim().startsWith("[")) {
+    const inner = unwrapToolRecord(nestedText, depth + 1);
+    if (inner) return { ...record, ...inner };
+  }
+  for (const key of Object.keys(record)) {
+    if (/ToolCall$/i.test(key) || /^(call_mcp_tool|CallMcpTool)$/i.test(key)) {
+      const inner = unwrapToolRecord(record[key], depth + 1);
+      if (inner) Object.assign(record, inner);
+    }
+  }
+  for (const key of ["value", "result", "output", "args", "arguments", "input", "data", "params"]) {
+    if (record[key] == null) continue;
+    const inner = unwrapToolRecord(record[key], depth + 1);
+    if (inner) Object.assign(record, inner);
+  }
+  return record;
+}
+
+function normalizeTodoStatus(status?: string): string | undefined {
+  if (!status) return undefined;
+  const value = status.trim();
+  if (/^in[_\s-]?progress$/i.test(value)) return "in_progress";
+  if (/^(complete[d]?|done)$/i.test(value)) return "completed";
+  if (/^(cancel(led)?|cancelled)$/i.test(value)) return "cancelled";
+  return value;
+}
+
+function nestedRecord(record: Record<string, unknown>, key: string): Record<string, unknown> {
+  return asRecord(record[key]) || {};
+}
+
+function todosFromList(list: unknown): Array<{ id?: string; content: string; status?: string }> {
+  if (!Array.isArray(list)) return [];
+  return list.flatMap((item) => {
+    if (typeof item === "string" && item.trim()) return [{ content: item.trim() }];
+    const entry = asRecord(item);
+    if (!entry) return [];
+    const content = [entry.content, entry.text, entry.title, entry.task]
+      .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+    if (!content) return [];
+    const status = normalizeTodoStatus(typeof entry.status === "string" ? entry.status : undefined);
+    return [{
+      ...(typeof entry.id === "string" ? { id: entry.id } : {}),
+      content,
+      ...(status ? { status } : {}),
+    }];
+  });
+}
+
+export function innerToolName(name: string, input?: unknown, result?: unknown): string {
+  const outer = (name || "").trim() || "tool";
+  const outerKey = outer.replace(/^(mcp[_:-])?(gateway[_:-])?/i, "");
+  const isWrapper = /^(mcp|call_mcp_tool|callmcptool)$/i.test(outerKey);
+  if (!isWrapper) return outer;
+  const record = unwrapToolRecord(input) || unwrapToolRecord(result);
+  const nested = [record?.toolName, record?.tool_name, record?.name, record?.tool]
+    .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+  return (nested || outer).trim();
+}
+
+export function classifyToolKind(name: string, input?: unknown, result?: unknown): ToolKind {
+  const inner = innerToolName(name, input, result);
+  const value = `${inner} ${name}`.toLowerCase();
+  if (/(todo)/.test(value)) return "todo";
+  if (/(note)/.test(value)) return "note";
+  if (/(memory|remember)/.test(value)) return "memory";
+  if (/(browser|navigate|playwright|webfetch)/.test(value)) return "browser";
+  if (value.includes("edit_plan") || /\bcreate_plan\b/.test(value)) return "plan";
+  if (value.includes("edit_canvas") || /\bcreate_canvas\b/.test(value)) return "canvas";
+  if (/(subagent|delegate|\btask\b)/.test(value) || /\bagents?\b/.test(inner.toLowerCase())) return "subagent";
+  if (/\bplan\b/.test(value)) return "plan";
+  if (/(edit|write|patch|replace|create_file|delete|remove|unlink)/.test(value)) return "edit";
+  if (/(read|search|list|glob|grep)/.test(value)) return "read";
+  if (/(shell|terminal|command|exec|run)/.test(value)) return "shell";
+  if (/(mcp|connector|integration|getmcptools|call_mcp)/.test(value)) return "mcp";
+  if (value.includes("canvas")) return "canvas";
+  return "other";
+}
+
 export function todosFromToolPayload(
   input?: string,
   result?: string,
 ): Array<{ id?: string; content: string; status?: string }> | undefined {
   for (const raw of [input, result]) {
     if (!raw) continue;
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      const record = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? parsed as Record<string, unknown>
-        : null;
-      const list = record?.todos;
-      if (!Array.isArray(list)) continue;
-      const todos = list.flatMap((item) => {
-        if (typeof item === "string" && item.trim()) return [{ content: item.trim() }];
-        if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-        const entry = item as Record<string, unknown>;
-        const content = [entry.content, entry.text, entry.title, entry.task]
-          .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
-        if (!content) return [];
-        return [{
-          ...(typeof entry.id === "string" ? { id: entry.id } : {}),
+    const record = unwrapToolRecord(raw);
+    const list = record?.todos ?? record?.items ?? record?.tasks ?? record?.todoList;
+    const todos = todosFromList(list);
+    if (todos.length) return todos;
+  }
+  return undefined;
+}
+
+export function planFromToolPayload(input?: string, result?: string, detail?: string): {
+  title: string;
+  content: string;
+  workspaceLink?: string;
+} | undefined {
+  for (const source of [input, result, detail]) {
+    if (!source) continue;
+    const record = unwrapToolRecord(source);
+    if (record) {
+      const plan = nestedRecord(record, "plan");
+      const value = nestedRecord(record, "value");
+      const content = [
+        record.content,
+        record.plan,
+        plan.content,
+        value.content,
+        value.plan,
+      ].map(nonEmptyString).find(Boolean);
+      if (content) {
+        const title = [
+          record.title,
+          record.name,
+          plan.title,
+          plan.name,
+          value.title,
+          value.name,
+        ].map(nonEmptyString).find(Boolean);
+        const workspaceLink = [
+          record.workspaceLink,
+          plan.workspaceLink,
+          value.workspaceLink,
+        ].map(nonEmptyString).find(Boolean);
+        const id = nonEmptyString(record.id) || nonEmptyString(plan.id) || nonEmptyString(value.id);
+        return {
+          title: title || "Plan",
           content,
-          ...(typeof entry.status === "string" ? { status: entry.status } : {}),
-        }];
-      });
-      if (todos.length) return todos;
-    } catch {
-      // Tool payloads are often plain text.
+          ...(workspaceLink
+            ? { workspaceLink }
+            : id ? { workspaceLink: `workspace://plan/${id}` } : {}),
+        };
+      }
+    } else if (source.trim() && !source.trim().startsWith("{")) {
+      return { title: "Plan", content: source.trim() };
     }
   }
   return undefined;
 }
 
+export function enrichToolDisplay(tool: {
+  name: string;
+  input?: string;
+  result?: string;
+  kind?: string;
+}): { name: string; kind: ToolKind; todos?: Array<{ id?: string; content: string; status?: string }> } {
+  const name = innerToolName(tool.name, tool.input, tool.result);
+  const classified = classifyToolKind(name, tool.input, tool.result);
+  const todos = todosFromToolPayload(tool.input, tool.result);
+  const kind: ToolKind = todos?.length || classified === "todo"
+    ? "todo"
+    : tool.kind && tool.kind !== "mcp" && tool.kind !== "other"
+      ? tool.kind as ToolKind
+      : classified;
+  return {
+    name: name || tool.name,
+    kind,
+    ...(todos?.length ? { todos } : {}),
+  };
+}
+
+export function withEnrichedToolDisplay<T extends {
+  name?: string;
+  input?: string;
+  result?: string;
+  kind?: string;
+  todos?: Array<{ id?: string; content: string; status?: string }>;
+}>(tool: T): T {
+  const enriched = enrichToolDisplay({
+    name: tool.name || "",
+    input: tool.input,
+    result: tool.result,
+    kind: tool.kind,
+  });
+  return {
+    ...tool,
+    name: enriched.name || tool.name,
+    kind: enriched.kind as T["kind"],
+    ...(enriched.todos?.length && !tool.todos?.length ? { todos: enriched.todos } : {}),
+  };
+}
+
 export function layoutAssistantParts<TTool extends { kind?: string }>(
   parts: Array<LayoutPart<TTool>>,
 ): AssistantViewBlock<TTool>[] {
+  // Plans and todos are state surfaces, not append-only history. Models may call
+  // create/edit_plan or write_todos repeatedly while working; rendering every
+  // intermediate call produces duplicate plan/task cards. Normalize tools once,
+  // then keep only the latest plan and todo for this assistant turn.
+  const normalized = parts.map((part) => {
+    if (part.type !== "tool") return part;
+    const { type: _type, ...tool } = part;
+    void _type;
+    const next = withEnrichedToolDisplay(tool as unknown as TTool & {
+      name?: string;
+      input?: string;
+      result?: string;
+      kind?: string;
+    }) as unknown as TTool;
+    return { type: "tool" as const, ...next };
+  });
+  const lastStateIndex = new Map<string, number>();
+  normalized.forEach((part, index) => {
+    if (part.type === "tool" && (part.kind === "plan" || part.kind === "todo")) {
+      lastStateIndex.set(part.kind, index);
+    }
+  });
+
   const blocks: AssistantViewBlock<TTool>[] = [];
   let tools: TTool[] = [];
 
@@ -89,7 +334,26 @@ export function layoutAssistantParts<TTool extends { kind?: string }>(
     tools = [];
   };
 
-  for (const part of parts) {
+  const pushStandalone = (tool: TTool) => {
+    flushTools();
+    const last = blocks.at(-1);
+    const isPlanTodo = tool.kind === "plan" || tool.kind === "todo";
+    const lastIsPlanTodoGroup =
+      last?.type === "tools" &&
+      last.tools.length > 0 &&
+      last.tools.every((item) => item.kind === "plan" || item.kind === "todo");
+    if (isPlanTodo && lastIsPlanTodoGroup) {
+      const byKind = new Map(last.tools.map((item) => [item.kind, item]));
+      byKind.set(tool.kind, tool);
+      // Cursor-like presentation: the plan is the primary surface and the task
+      // checklist sits directly below it in the same visual block.
+      last.tools = [byKind.get("plan"), byKind.get("todo")].filter(Boolean) as TTool[];
+      return;
+    }
+    blocks.push({ type: "tools", tools: [tool] });
+  };
+
+  normalized.forEach((part, index) => {
     if (part.type === "thinking") {
       flushTools();
       blocks.push({
@@ -98,26 +362,33 @@ export function layoutAssistantParts<TTool extends { kind?: string }>(
         done: part.done,
         durationMs: part.durationMs,
       });
-      continue;
+      return;
+    }
+    if (part.type === "compaction") {
+      flushTools();
+      blocks.push(part);
+      return;
     }
     if (part.type === "text") {
-      if (!part.content.trim()) continue;
+      if (!part.content.trim()) return;
       flushTools();
       const last = blocks.at(-1);
       if (last?.type === "text") last.content = joinAssistantText(last.content, part.content);
       else blocks.push({ type: "text", content: part.content });
-      continue;
+      return;
     }
-    const { type: _type, ...tool } = part;
-    void _type;
-    const next = tool as unknown as TTool;
-    if (isStandaloneToolKind(next.kind)) {
-      flushTools();
-      blocks.push({ type: "tools", tools: [next] });
-      continue;
+    if (
+      (part.kind === "plan" || part.kind === "todo") &&
+      lastStateIndex.get(part.kind) !== index
+    ) {
+      return;
     }
-    tools.push(next);
-  }
+    if (isStandaloneToolKind(part.kind)) {
+      pushStandalone(part);
+      return;
+    }
+    tools.push(part);
+  });
   flushTools();
   return blocks;
 }
@@ -153,11 +424,6 @@ const PATH_TOOL_NAMES = new Set([
   "write",
   "grep",
 ]);
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  return value as Record<string, unknown>;
-}
 
 function parseJsonObject(raw?: string): Record<string, unknown> | undefined {
   if (!raw) return undefined;

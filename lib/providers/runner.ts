@@ -1,6 +1,4 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createInterface } from "node:readline";
-import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { jsonSchema, stepCountIs, streamText, tool, type LanguageModel, type ModelMessage, type ToolSet } from "ai";
@@ -22,9 +20,8 @@ import {
 import { getJob, appendRunEvent, updateJob } from "@/lib/db-jobs";
 import { buildAttachmentPrompt } from "@/lib/uploads";
 import { config } from "@/lib/config";
-import { contextHubTools } from "@/lib/context-hub";
 import { mcpBridgeTools } from "@/lib/mcp-bridge";
-import { getUserAgentCwd, getUserExecutionIdentity } from "@/lib/mcp";
+import { getUserAgentCwd, getMcpServers, buildMcpContext } from "@/lib/mcp";
 import {
   findActiveConnection,
   getProviderConnection,
@@ -33,19 +30,34 @@ import {
   type ProviderConnectionWithSecret,
 } from "@/lib/provider-connections";
 import { getProviderDefinition } from "@/lib/providers/registry";
-import { parseModelKey } from "@/lib/providers/types";
+import { normalizeLegacyProviderModelId } from "@/lib/providers/model-aliases";
+import { modelKey, parseModelKey } from "@/lib/providers/types";
 import {
   createOAuthProvider,
   ensureAntigravityProjectId,
   type OAuthProviderKey,
 } from "@/lib/providers/oauth";
-import { runOfficialAntigravityJob } from "@/lib/providers/official-antigravity";
+import { antigravitySupportsEffort, runOfficialAntigravityJob } from "@/lib/providers/official-antigravity";
 import type { AgentJob } from "@/lib/jobs";
-import { getMcpServers } from "@/lib/mcp";
-import { allModes, modeById } from "@/lib/modes";
+import { modeById } from "@/lib/modes";
+import { classifyToolKind, innerToolName, todosFromToolPayload } from "@/lib/tool-call-display";
 import { compress } from "@/lib/compression";
-import { contextWindowForModel } from "@/lib/context-window";
+import {
+  contextModeOf,
+  effectiveContextBudget,
+  estimateContextTokens,
+  type ContextMode,
+  contextWindowForSelection,
+} from "@/lib/context-window";
 import { logError } from "@/lib/error-logs";
+import { persistToolsForMessage } from "@/lib/tool-persistence";
+import { stripRawToolMarkup } from "@/lib/providers/tool-schema";
+import { executeEmbeddedToolFallbacks, type EmbeddedToolExecution } from "@/lib/providers/embedded-tool-fallback";
+import { subagentMetadataFromTool } from "@/lib/subagent-tool";
+import { METIS_SHARED_AGENT_CONTROL, toolContractPrompt } from "@/lib/agent-control";
+import { uncensoredInstructions } from "@/lib/uncensored";
+import { recordSignal, type TaskCategory } from "@/lib/model-telemetry";
+import { LoopGuard, routeTask } from "@/lib/agent-efficiency";
 
 type Usage = {
   inputTokens?: number;
@@ -70,6 +82,33 @@ type ProviderContext = {
   onStream: (data: Record<string, unknown>) => void;
 };
 
+function telemetryCategory(message: string): TaskCategory {
+  const text = String(message || "");
+  if (/\b(debug|bug|error|crash|fehler|kaputt)\b/i.test(text)) return "debugging";
+  if (/\b(implement|build|edit|fix|refactor|code|änder|baue|umsetzen)\b/i.test(text)) return "coding";
+  if (/\b(research|analyse|analyze|recherch|dokumentation|prüf)\b/i.test(text)) return "research";
+  if (text.length > 2_500) return "long-context";
+  return "chat";
+}
+
+function finalizeAlternativeTools(tools: ToolPart[]) {
+  for (const tool of tools) {
+    if (tool.status !== "running") continue;
+    tool.status = "error";
+    tool.result ||= "Provider ended before returning a tool result.";
+  }
+}
+
+type CompactionEvent = {
+  type: "compaction";
+  status: "started" | "completed" | "error";
+  beforeTokens?: number;
+  targetTokens?: number;
+  afterTokens?: number;
+  removedMessages?: number;
+  message?: string;
+};
+
 const remoteToolSchema = jsonSchema<Record<string, unknown>>({
   type: "object",
   properties: {
@@ -87,7 +126,7 @@ const remoteToolSchema = jsonSchema<Record<string, unknown>>({
 });
 
 function providerRemoteTools(context: ProviderContext): ToolSet {
-  const mode = modeById(context.chat.sessionState?.modeId);
+  const mode = modeById(context.job.modeId || context.chat.sessionState?.modeId);
   const canWrite = mode.allowedCategories.includes("write");
   const canRemote = mode.allowedCategories.includes("remote");
   if (!canRemote) return {};
@@ -160,7 +199,16 @@ function inheritedEnv(extra: Record<string, string | undefined> = {}) {
   );
 }
 
-function providerPrompt(job: AgentJob) {
+function providerTaskMessage(job: AgentJob) {
+  return job.resumePrompt?.trim() || job.message || "Continue the current task without repeating completed work.";
+}
+
+function providerPrompt(
+  job: AgentJob,
+  toolNames?: ReadonlyArray<string>,
+  nativeTools = false,
+  modelParams?: ReadonlyArray<{ id: string; value: string }> | null,
+) {
   const references = job.references?.length
     ? job.references.map((reference) => [
         `- [${reference.kind}] ${reference.label}`,
@@ -169,32 +217,137 @@ function providerPrompt(job: AgentJob) {
         reference.content ? `  Context:\n${reference.content}` : "",
       ].filter(Boolean).join("\n")).join("\n")
     : "";
-  return [
+  const prompt = [
     "You are a provider inside a private AI chat application.",
     "Working style: precise, technically fluent, proactive. Act with your tools instead of describing steps. Reply in the user's language — German in, German out. No filler phrases. On clear orders decide and act yourself; ask back only when genuinely ambiguous or destructive.",
     "Answer the user directly and do not claim to have used tools you were not given.",
+    METIS_SHARED_AGENT_CONTROL,
+    toolContractPrompt({
+      modeId: job.modeId || "agent",
+      provider: "alternative-provider",
+      toolNames,
+      nativeTools,
+    }),
     "Response recommendation rule: when the result is incomplete, uses demo/stub endpoints, or still lacks real integrations, clearly distinguish implemented from missing functionality, then provide 1–3 concise, concrete next-step recommendations and ask whether to implement the recommended next step. Never present demo functionality as production-ready.",
     "Remote-client tools are available in this run when supported by the provider. Use list_remote_clients first, then target remote operations with target=client:<remote-client-id>; do not use server paths for client files.",
+    "Browser: for login, forms, captchas, checkouts, and long page tasks ALWAYS use the persistent Metis in-app browser (browser_navigate, browser_form_state, browser_batch, browser_wait_for, browser_fill_form, browser_snapshot). Inspect the current state first; navigate only when the URL actually needs to change, and never reload or re-login merely to inspect progress. browser_form_state and browser_extract_text include embedded frames and return frame hints/selectors. Batch repetitive actions and wait on DOM conditions instead of sleeps. Do not use shell, curl, Playwright, or web_fetch as a substitute when a real page is needed. web_search/web_fetch are only for simple lookup.",
     "When you use browser results, selected references, or other verifiable web sources, cite the exact URL immediately after the sentence it supports using the format [Source: Website title](URL). At the end, put every source used in exactly one fenced block starting with ```sources, with one Markdown link per line. Never invent URLs; if no verifiable source is available, do not create a sources block.",
-        "If the user reports a UI/UX bug or something feels broken, inspect list_recent_errors first, diagnose, then fix it in the repo.",
 "Personal context: the context_search / context_profile / context_remember tools, when available in this run, access the owner's shared context hub (devices, services, projects, preferences). When a task touches the owner's infrastructure, projects, or devices, consult them FIRST instead of asking the user. Do not dump contents unprompted; cite only what the query returned. Store newly learned durable preferences (how the owner wants things) via context_remember.",
     references ? `Selected references:\n${references}` : "",
     job.referenceText ? `Referenced context:\n${job.referenceText}` : "",
     buildAttachmentPrompt(job.chatId, job.attachments),
   ].filter(Boolean).join("\n\n");
+  const uncensored = modelParams?.some((param) => param.id === "uncensored" && param.value === "true");
+  return uncensored
+    ? `${uncensoredInstructions()}\n\n${prompt}`
+    : prompt;
 }
 
-function modelMessages(chat: Chat, job: AgentJob, contextWindow?: number): ModelMessage[] {
+function parseToolInput(value?: string) {
+  if (!value?.trim()) return {};
+  try {
+    return JSON.parse(value) as Record<string, unknown>;
+  } catch {
+    return { raw: value };
+  }
+}
+
+function modelMessageText(message: ModelMessage): string {
+  if (typeof message.content === "string") return message.content;
+  if (!Array.isArray(message.content)) return "";
+  return message.content.map((part) => {
+    if (!part || typeof part !== "object") return String(part ?? "");
+    try {
+      return JSON.stringify(part);
+    } catch {
+      return String(part);
+    }
+  }).join("\n");
+}
+
+function stripProviderReasoning(messages: ModelMessage[]): ModelMessage[] {
+  return messages.map((message) => {
+    if (message.role !== "assistant" || typeof message.content === "string") return message;
+    return {
+      ...message,
+      content: message.content.filter((part) => part.type !== "reasoning"),
+    };
+  });
+}
+
+function modelMessages(
+  chat: Chat,
+  job: AgentJob,
+  contextWindow?: number,
+  contextMode: ContextMode = "normal",
+  onCompaction?: (event: CompactionEvent) => void,
+): ModelMessage[] {
   const messages: ModelMessage[] = [];
   for (const message of chat.messages) {
+    if (message.role !== "user" && message.role !== "assistant") continue;
     const content = message.content.trim();
-    if (!content || (message.role !== "user" && message.role !== "assistant")) continue;
-    messages.push({ role: message.role, content });
+    const tools = message.tools || [];
+    if (!content && !tools.length) continue;
+    if (message.role === "user") {
+      messages.push({ role: "user", content: content || "Please respond." });
+      continue;
+    }
+    if (!tools.length) {
+      messages.push({ role: "assistant", content: content });
+      continue;
+    }
+    messages.push({
+      role: "assistant",
+      content: [
+        ...(content ? [{ type: "text" as const, text: content }] : []),
+        ...tools.map((item) => ({
+          type: "tool-call" as const,
+          toolCallId: item.id,
+          toolName: item.name,
+          input: parseToolInput(item.input),
+        })),
+      ],
+    });
+    messages.push({
+      role: "tool",
+      content: tools.map((item) => ({
+        type: "tool-result" as const,
+        toolCallId: item.id,
+        toolName: item.name,
+        output: item.status === "error"
+          ? { type: "error-text" as const, value: item.result || item.status }
+          : { type: "text" as const, value: item.result || item.status },
+      })),
+    });
   }
   if (!messages.some((message) => message.role === "user")) {
     messages.push({ role: "user", content: job.message || "Please respond." });
   }
-  return compactIfNeeded(messages, contextWindow);
+  return compactIfNeeded(messages, contextWindow, contextMode, onCompaction);
+}
+
+function effectiveModelParams(chat: Chat, job: AgentJob) {
+  return job.modelParams?.length ? job.modelParams : chat.modelParams;
+}
+
+function estimateProviderInputTokens(chat: Chat, job: AgentJob, modelId: string) {
+  const contextWindow = contextWindowForSelection(
+    { id: modelId, providerId: parseModelKey(job.modelId).providerKey },
+    effectiveModelParams(chat, job),
+  );
+  const messages = modelMessages(
+    chat,
+    job,
+    contextWindow,
+    contextModeOf(effectiveModelParams(chat, job)),
+  );
+  // Includes the provider/system instructions plus the exact compacted chat
+  // payload. Historical tool inputs/results are represented in modelMessages
+  // as native tool-call/tool-result parts (text recap only after compaction).
+  return Math.max(1, estimateContextTokens({
+    instructions: providerPrompt(job),
+    messages,
+  }));
 }
 
 /**
@@ -208,39 +361,190 @@ function modelMessages(chat: Chat, job: AgentJob, contextWindow?: number): Model
  *  compaction is then skipped rather than guessing. */
 function resolvedContextWindow(context: ProviderContext): number | undefined {
   try {
-    return contextWindowForModel({ id: context.modelId });
+    return contextWindowForSelection(
+      { id: context.modelId, providerId: context.connection.providerKey },
+      effectiveModelParams(context.chat, context.job),
+    );
   } catch {
     return undefined;
   }
 }
 
-function compactIfNeeded(messages: ModelMessage[], contextWindow?: number): ModelMessage[] {
-  if (!contextWindow || contextWindow <= 0 || messages.length < 6) return messages;
-  const approxTokens = (value: string) => Math.ceil(value.length / 4);
-  const total = messages.reduce((sum, message) => sum + approxTokens(String(message.content || "")), 0);
-  const budget = Math.floor(contextWindow * 0.7);
+function providerConversationPrompt(context: ProviderContext): string {
+  const contextWindow = resolvedContextWindow(context);
+  const messages = modelMessages(
+    context.chat,
+    context.job,
+    contextWindow,
+    contextModeOf(effectiveModelParams(context.chat, context.job)),
+  );
+  const history = messages
+    .map((message) => `${message.role}: ${modelMessageText(message)}`)
+    .join("\n");
+  return [
+    providerTaskMessage(context.job),
+    "Compacted conversation context (follow the latest task and preserve state from files, todos, errors, and tool results):",
+    history,
+  ].filter(Boolean).join("\n\n");
+}
+
+function compactMessageRecap(message: ModelMessage): string {
+  const text = modelMessageText(message);
+  if (message.role !== "assistant" || !Array.isArray(message.content)) {
+    return `${message.role}: ${text}`;
+  }
+  const tools: ToolPart[] = [];
+  for (const part of message.content) {
+    if (!part || typeof part !== "object" || !("type" in part) || part.type !== "tool-call") continue;
+    tools.push({
+      id: String("toolCallId" in part ? part.toolCallId : ""),
+      name: String("toolName" in part ? part.toolName : "tool"),
+      status: "completed",
+      input: typeof ("input" in part ? part.input : undefined) === "string"
+        ? String(part.input)
+        : JSON.stringify("input" in part ? part.input ?? {} : {}),
+    });
+  }
+  const recap = tools.length ? `\nTools already executed:\n${toolRecap(tools)}` : "";
+  return `${message.role}: ${text}${recap}`;
+}
+
+function toolRecap(tools: ToolPart[]) {
+  return tools.map((item) => {
+    const input = item.input ? ` input=${item.input.slice(0, 400)}` : "";
+    const result = item.result && item.kind !== "read" ? ` result=${item.result.slice(0, 800)}` : "";
+    return `- ${item.name} (${item.status})${item.path ? ` path=${item.path}` : ""}${input}${result}`;
+  }).join("\n");
+}
+
+const COMPACTION_MARKER = "[metis-context-recap:v1]";
+
+function boundedText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  if (maxChars <= 32) return value.slice(0, maxChars);
+  const tail = Math.floor(maxChars * 0.25);
+  return `${value.slice(0, maxChars - tail - 32)} … [truncated] … ${value.slice(-tail)}`;
+}
+
+function compactIfNeeded(
+  messages: ModelMessage[],
+  contextWindow?: number,
+  contextMode: ContextMode = "normal",
+  onCompaction?: (event: CompactionEvent) => void,
+): ModelMessage[] {
+  if (!contextWindow || contextWindow <= 0 || messages.length < 2) return messages;
+  const total = messages.reduce((sum, message) => sum + estimateContextTokens(message), 0);
+  const budget = effectiveContextBudget(contextWindow, contextMode);
   if (total <= budget) return messages;
-  // Keep the most recent messages (last ~30% of the window) verbatim and
-  // compress everything before them into a single compact recap.
+
+  // A prior recap is already canonical. Re-summarizing it would make repeated
+  // compaction non-idempotent and can slowly erase the original task.
+  const head = messages.filter((message) => !modelMessageText(message).includes(COMPACTION_MARKER));
+  const source = head.length === messages.length ? messages : messages.slice(-Math.max(2, Math.floor(messages.length * 0.45)));
   const protectedTail: ModelMessage[] = [];
   let tailTokens = 0;
-  let index = messages.length;
-  while (index > 0 && tailTokens < Math.floor(contextWindow * 0.35)) {
+  let index = source.length;
+  const tailBudget = Math.floor(budget * 0.45);
+  while (index > 0 && tailTokens < tailBudget) {
     index -= 1;
-    const message = messages[index];
+    const message = source[index];
     protectedTail.unshift(message);
-    tailTokens += approxTokens(String(message.content || ""));
+    tailTokens += estimateContextTokens(message);
   }
-  const head = messages.slice(0, index);
-  if (!head.length) return messages;
-  const recap = head
-    .map((message) => compress(`${message.role}: ${message.content}`, "stacked"))
+  const oldMessages = source.slice(0, index);
+  onCompaction?.({
+    type: "compaction",
+    status: "started",
+    beforeTokens: total,
+    targetTokens: budget,
+    removedMessages: oldMessages.length,
+  });
+  const recap = oldMessages
+    .map((message) => compress(compactMessageRecap(message), "stacked"))
     .join("\n")
-    .slice(0, Math.floor(contextWindow * 0.25) * 4);
-  return [
-    { role: "user", content: `Compressed conversation history (older messages were auto-compacted to fit the context window):\n${recap}` },
+    .replace(/\s+$/g, "");
+  const recapPrefix = `Compressed conversation history ${COMPACTION_MARKER} (older messages were auto-compacted; preserve task state, files, todos, errors, and the latest tail):\n`;
+  const recapBudget = Math.max(64, (budget - tailTokens - 8) * 4);
+  let result: ModelMessage[] = [
+    { role: "user", content: `${recapPrefix}${boundedText(recap, recapBudget)}` },
     ...protectedTail,
   ];
+  // A single giant tool result can fill the protected tail by itself. Bound
+  // every message until the measured payload is within the effective budget.
+  let trimPasses = 0;
+  const maxTrimPasses = Math.max(8, result.length * 4);
+  while (result.reduce((sum, message) => sum + estimateContextTokens(message), 0) > budget && result.length > 1) {
+    const excess = result.reduce((sum, message) => sum + estimateContextTokens(message), 0) - budget;
+    let candidateIndex = -1;
+    let candidateChars = 0;
+    for (let index = 1; index < result.length; index += 1) {
+      const chars = modelMessageText(result[index]).length;
+      if (chars > candidateChars) {
+        candidateIndex = index;
+        candidateChars = chars;
+      }
+    }
+    if (candidateIndex < 0 || candidateChars <= 32) break;
+    const candidate = result[candidateIndex];
+    const allowed = Math.max(32, candidateChars - Math.max(1, excess) * 4);
+    if (allowed >= candidateChars) break;
+    result[candidateIndex] = {
+      role: candidate.role,
+      content: boundedText(modelMessageText(candidate), allowed),
+    } as ModelMessage;
+    trimPasses += 1;
+    if (trimPasses >= maxTrimPasses) break;
+  }
+  if (result.reduce((sum, message) => sum + estimateContextTokens(message), 0) > budget) {
+    const last = result.at(-1);
+    result = [{
+      role: "user",
+      content: `${recapPrefix}${boundedText(recap, Math.max(32, (budget - estimateContextTokens(last || "") - 2) * 4))}`,
+    }, ...(last ? [{ role: last.role, content: boundedText(modelMessageText(last), Math.max(32, (budget - 2) * 4)) } as ModelMessage] : [])];
+  }
+  onCompaction?.({
+    type: "compaction",
+    status: "completed",
+    beforeTokens: total,
+    targetTokens: budget,
+    afterTokens: result.reduce((sum, message) => sum + estimateContextTokens(message), 0),
+    removedMessages: oldMessages.length,
+  });
+  return result;
+}
+
+export function compactProviderMessages(
+  messages: ModelMessage[],
+  contextWindow: number,
+  contextMode: ContextMode = "normal",
+  onCompaction?: (event: CompactionEvent) => void,
+): ModelMessage[] {
+  return compactIfNeeded(messages, contextWindow, contextMode, onCompaction);
+}
+
+export function codexReasoningEffortForSelection(
+  modelId: string,
+  params?: ReadonlyArray<{ id: string; value: string }> | null,
+): "minimal" | "low" | "medium" | "high" | "xhigh" | undefined {
+  if (!/^(?:gpt[-_.]?5|codex)/i.test(modelId.trim())) return undefined;
+  const value = params?.find((param) => param.id === "effort" || param.id === "reasoning")?.value;
+  return value && ["minimal", "low", "medium", "high", "xhigh"].includes(value)
+    ? value as "minimal" | "low" | "medium" | "high" | "xhigh"
+    : undefined;
+}
+
+export function aiReasoningForSelection(
+  providerKey: string,
+  params?: ReadonlyArray<{ id: string; value: string }> | null,
+): "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | undefined {
+  const value = params?.find((param) => param.id === "effort" || param.id === "reasoning")?.value;
+  if (!value) return providerKey === "codex" ? "none" : undefined;
+  const allowed = providerKey === "anthropic" || providerKey === "google"
+    ? ["none", "low", "medium", "high"]
+    : ["none", "minimal", "low", "medium", "high", "xhigh"];
+  return allowed.includes(value)
+    ? value as "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+    : undefined;
 }
 
 function aiModel(
@@ -250,7 +554,7 @@ function aiModel(
 ): LanguageModel {
   const secret = connection.secret;
   const baseURL = connection.baseUrl;
-  if (providerKey === "openai") {
+  if (providerKey === "openai" || (providerKey === "codex" && connection.authType === "api_key")) {
     return createOpenAI({ apiKey: secret, ...(baseURL ? { baseURL } : {}) }).chat(modelId);
   }
   if (providerKey === "anthropic") {
@@ -289,6 +593,25 @@ function aiModel(
   throw new Error(`Provider ${providerKey} is not a chat API provider.`);
 }
 
+export function anthropicProviderOptionsForSelection(
+  modelId: string,
+  params?: ReadonlyArray<{ id: string; value: string }> | null,
+) {
+  const selectedWindow = contextWindowForSelection({ id: modelId, providerId: "anthropic" }, params);
+  if (selectedWindow !== 1_000_000) return undefined;
+  if (!/claude-(?:sonnet|opus)-(?:4(?:-|$)|4\.5(?:[-.]|$))/i.test(modelId)) return undefined;
+  return {
+    anthropic: {
+      anthropicBeta: ["context-1m-2025-08-07"],
+    },
+  };
+}
+
+function providerOptionsFor(context: ProviderContext) {
+  if (context.connection.providerKey !== "anthropic") return undefined;
+  return anthropicProviderOptionsForSelection(context.modelId, effectiveModelParams(context.chat, context.job));
+}
+
 function streamErrorText(value: unknown) {
   if (value instanceof Error) return value.message;
   if (typeof value === "string") return value;
@@ -299,126 +622,396 @@ function streamErrorText(value: unknown) {
   }
 }
 
+const DEFAULT_PROVIDER_STEPS = 50;
+
 async function consumeAiStream(
   result: ReturnType<typeof streamText>,
   context: ProviderContext,
+  fallbackTools: ToolSet,
+  initiatingMessages: ModelMessage[],
+  resumeEmbedded?: (messages: ModelMessage[], remainingSteps: number) => ReturnType<typeof streamText>,
+  initialSteps = DEFAULT_PROVIDER_STEPS,
 ) {
   let textProduced = false;
+  let toolsProduced = false;
   let finishReason = "";
-  let providerError = "";
-  try {
-    for await (const part of result.stream) {
-      context.onStream({
-        type: part.type,
-        ...(part.type === "text-delta" || part.type === "reasoning-delta"
-          ? { text: part.text }
-          : {}),
-        ...(part.type === "tool-call"
-          ? {
-              toolCallId: part.toolCallId,
-              toolName: part.toolName,
+  let conversation = initiatingMessages;
+  let current = result;
+  let remainingSteps = Math.max(1, Math.min(DEFAULT_PROVIDER_STEPS * 2, Math.floor(initialSteps)));
+  const loopGuard = new LoopGuard();
+  let fallbackIndex = 0;
+  const usage: Usage = {};
+
+  const addUsage = (part: { inputTokens?: number; outputTokens?: number; totalTokens?: number }) => {
+    usage.inputTokens = (usage.inputTokens || 0) + (part.inputTokens || 0);
+    usage.outputTokens = (usage.outputTokens || 0) + (part.outputTokens || 0);
+    usage.totalTokens = (usage.totalTokens || 0) + (part.totalTokens || 0);
+  };
+
+  const consumeRound = async (streamResult: ReturnType<typeof streamText>) => {
+    let providerError = "";
+    let rawText = "";
+    let pendingText = "";
+    let visibleText = "";
+    const rawToolMarkup: string[] = [];
+    const roundSignatures: string[] = [];
+    let nativeTools = false;
+
+    const emitText = (value: string) => {
+      if (!value) return;
+      textProduced = true;
+      visibleText += value;
+      context.onText(value);
+    };
+
+    const drainText = (final = false) => {
+      const XML_START = "<tool_call>";
+      const XML_END = "</tool_call>";
+      const ALT_START = "<|tool_call_begin|>";
+      const ALT_END = "<|tool_call_end|>";
+      const JSON_START = "```json";
+      const markers = [XML_START, ALT_START, JSON_START];
+      const hold = Math.max(...markers.map((marker) => marker.length)) - 1;
+
+      while (pendingText) {
+        const positions = markers
+          .map((marker) => ({ marker, index: pendingText.indexOf(marker) }))
+          .filter((entry) => entry.index >= 0)
+          .sort((a, b) => a.index - b.index);
+        const next = positions[0];
+        if (!next) {
+          if (final) {
+            const cleaned = stripRawToolMarkup(pendingText)
+              .replace(/<tool_call>[\s\S]*$/i, "")
+              .replace(/<\|tool_call_begin\|>[\s\S]*$/i, "");
+            emitText(cleaned);
+            pendingText = "";
+            return;
+          }
+          const flushLength = Math.max(0, pendingText.length - hold);
+          if (!flushLength) return;
+          const safe = pendingText.slice(0, flushLength);
+          pendingText = pendingText.slice(flushLength);
+          emitText(safe);
+          continue;
+        }
+
+        if (next.index > 0) {
+          const safe = pendingText.slice(0, next.index);
+          pendingText = pendingText.slice(next.index);
+          emitText(safe);
+          continue;
+        }
+
+        if (next.marker === JSON_START) {
+          const end = pendingText.indexOf("```", JSON_START.length);
+          if (end < 0) {
+            if (final) {
+              emitText(stripRawToolMarkup(pendingText));
+              pendingText = "";
             }
-          : {}),
-        ...(part.type === "error"
-          ? { error: streamErrorText(part.error) }
-          : {}),
-      });
-      if (part.type === "text-delta") {
-        textProduced = true;
-        context.onText(part.text);
-      } else if (part.type === "error") {
-        providerError = streamErrorText(part.error);
-      } else if (part.type === "finish") {
-        finishReason = part.finishReason;
-      } else if (part.type === "tool-call") {
-        context.onTool({
-          id: part.toolCallId,
-          name: part.toolName,
-          status: "completed",
-          kind: "other",
-          ...("input" in part && part.input !== undefined ? { input: JSON.stringify(part.input) } : {}),
-        });
-      } else if (part.type === "tool-result") {
-        context.onTool({
-          id: part.toolCallId,
-          name: part.toolName,
-          status: "completed",
-          kind: "other",
-          ...("result" in part && part.result !== undefined ? { result: JSON.stringify(part.result) } : {}),
-        });
+            return;
+          }
+          const block = pendingText.slice(0, end + 3);
+          pendingText = pendingText.slice(end + 3);
+          if (/"name"\s*:\s*"[^"]+"/.test(block)) rawToolMarkup.push(block);
+          else emitText(block);
+          continue;
+        }
+
+        const endMarker = next.marker === XML_START ? XML_END : ALT_END;
+        const end = pendingText.indexOf(endMarker, next.marker.length);
+        if (end < 0) {
+          if (final) pendingText = "";
+          return;
+        }
+        const block = pendingText.slice(0, end + endMarker.length);
+        rawToolMarkup.push(block);
+        pendingText = pendingText.slice(end + endMarker.length);
       }
+    };
+
+    try {
+      for await (const part of streamResult.stream) {
+        context.onStream({
+          type: part.type,
+          ...(part.type === "text-delta" || part.type === "reasoning-delta"
+            ? { text: part.text }
+            : {}),
+          ...(part.type === "tool-call"
+            ? {
+                toolCallId: part.toolCallId,
+                toolName: part.toolName,
+              }
+            : {}),
+          ...(part.type === "error"
+            ? { error: streamErrorText(part.error) }
+            : {}),
+        });
+        if (part.type === "text-delta") {
+          rawText += part.text;
+          pendingText += part.text;
+          drainText(false);
+        } else if (part.type === "error") {
+          providerError = streamErrorText(part.error);
+        } else if (part.type === "finish") {
+          finishReason = part.finishReason;
+        } else if (part.type === "tool-call" || part.type === "tool-input-start") {
+          nativeTools = true;
+          toolsProduced = true;
+          const name = "toolName" in part ? String(part.toolName || "") : "tool";
+          const input = "input" in part && part.input !== undefined ? JSON.stringify(part.input) : undefined;
+          roundSignatures.push(`${name}:${input || ""}`.slice(0, 800));
+          const parsedInput = input ? parseToolInput(input) : {};
+          const displayName = innerToolName(name, parsedInput);
+          const todos = todosFromToolPayload(input);
+          const kind = classifyToolKind(displayName || name, parsedInput);
+          const subagent = subagentMetadataFromTool(displayName || name, parsedInput, undefined, kind);
+          context.onTool({
+            id: "toolCallId" in part ? String(part.toolCallId) : crypto.randomUUID(),
+            name: displayName || name,
+            status: "running",
+            kind,
+            ...(typeof parsedInput.path === "string" ? { path: parsedInput.path } : {}),
+            ...(input ? { input } : {}),
+            ...(todos?.length ? { todos } : {}),
+            ...(subagent ? { subagent } : {}),
+          });
+        } else if (part.type === "tool-result") {
+          nativeTools = true;
+          toolsProduced = true;
+          const resultText = "output" in part && part.output !== undefined
+            ? JSON.stringify(part.output)
+            : "result" in part && part.result !== undefined
+              ? JSON.stringify(part.result)
+              : undefined;
+          roundSignatures.push(`${String(part.toolName)}:${resultText || ""}`.slice(0, 800));
+          const displayName = innerToolName(part.toolName, undefined, resultText);
+          const todos = todosFromToolPayload(undefined, resultText);
+          const kind = classifyToolKind(displayName || part.toolName, undefined, resultText);
+          const subagent = subagentMetadataFromTool(displayName || part.toolName, undefined, resultText, kind);
+          context.onTool({
+            id: part.toolCallId,
+            name: displayName || part.toolName,
+            status: "completed",
+            kind,
+            ...(resultText ? { result: resultText } : {}),
+            ...(todos?.length ? { todos } : {}),
+            ...(subagent ? { subagent } : {}),
+          });
+        }
+      }
+      drainText(true);
+    } catch (error) {
+      const message = streamErrorText(error);
+      context.onStream({ type: "error", error: message });
+      throw new Error(message);
     }
-  } catch (error) {
-    const message = streamErrorText(error);
-    context.onStream({ type: "error", error: message });
-    throw new Error(message);
+
+    let executions: EmbeddedToolExecution[] = [];
+    // Native tool-call parts already ran inside streamText. Do not execute the
+    // same calls again just because the transcript also contained XML/JSON.
+    if (!nativeTools && rawToolMarkup.length) {
+      executions = await executeEmbeddedToolFallbacks(
+        rawToolMarkup.join("\n"),
+        async (call, index) => {
+          const candidate = fallbackTools[call.name] as unknown as {
+            execute?: (args: Record<string, unknown>, options: Record<string, unknown>) => Promise<unknown> | unknown;
+          } | undefined;
+          if (!candidate?.execute) throw new Error(`Embedded tool ${call.name} is not available in this mode.`);
+          const callId = `fallback-${context.job.id}-${fallbackIndex + index}`;
+          const input = JSON.stringify(call.args);
+          const displayName = innerToolName(call.name, call.args);
+          const kind = classifyToolKind(displayName || call.name, call.args);
+          const inputTodos = todosFromToolPayload(input);
+          context.onTool({
+            id: callId,
+            name: displayName || call.name,
+            status: "running",
+            kind,
+            ...(typeof call.args.path === "string" ? { path: call.args.path } : {}),
+            input,
+            ...(inputTodos?.length ? { todos: inputTodos } : {}),
+          });
+          try {
+            const output = await candidate.execute(call.args, {
+              toolCallId: callId,
+              messages: conversation,
+              abortSignal: context.signal,
+              context: undefined,
+            });
+            const resultText = typeof output === "string" ? output : JSON.stringify(output);
+            const resultTodos = todosFromToolPayload(input, resultText);
+            context.onTool({
+              id: callId,
+              name: displayName || call.name,
+              status: "completed",
+              kind,
+              input,
+              ...(resultText ? { result: resultText } : {}),
+              ...(resultTodos?.length ? { todos: resultTodos } : {}),
+            });
+            return output;
+          } catch (error) {
+            const message = streamErrorText(error);
+            context.onTool({
+              id: callId,
+              name: displayName || call.name,
+              status: "error",
+              kind,
+              input,
+              result: message,
+            });
+            throw error;
+          }
+        },
+      );
+      if (executions.length) toolsProduced = true;
+      const failed = executions.find((execution) => !execution.ok);
+      if (failed) throw new Error(failed.error || `Embedded tool ${failed.name} failed.`);
+      fallbackIndex += executions.length;
+    }
+
+    let roundUsage;
+    try {
+      roundUsage = await streamResult.usage;
+    } catch (error) {
+      const message = streamErrorText(error);
+      context.onStream({ type: "error", error: message });
+      throw new Error(providerError || message);
+    }
+    if (providerError) throw new Error(providerError);
+    addUsage(roundUsage);
+    void rawText;
+    const steps = await Promise.resolve(streamResult.steps).then((value) => value).catch(() => []);
+    return {
+      executions,
+      nativeTools,
+      visibleText,
+      signature: roundSignatures.sort().join("|"),
+      stepCount: Math.max(1, steps.length),
+    };
+  };
+
+  while (remainingSteps > 0) {
+    const round = await consumeRound(current);
+    remainingSteps -= round.stepCount;
+    const loop = loopGuard.observe({
+      signature: round.signature,
+      progressed: Boolean(round.visibleText.trim() || round.executions.length),
+      failed: false,
+    });
+    if (loop.shouldStop) {
+      throw new Error(`Provider agent loop stopped: ${loop.reason || "no progress"}.`);
+    }
+    if (!round.executions.length || !resumeEmbedded || remainingSteps <= 0) break;
+    conversation = [
+      ...conversation,
+      {
+        role: "assistant",
+        content: [
+          ...(round.visibleText.trim() ? [{ type: "text" as const, text: round.visibleText }] : []),
+          ...round.executions.map((execution, index) => ({
+            type: "tool-call" as const,
+            toolCallId: `fallback-${context.job.id}-${fallbackIndex - round.executions.length + index}`,
+            toolName: execution.name,
+            input: execution.args,
+          })),
+        ],
+      },
+      {
+        role: "tool",
+        content: round.executions.map((execution, index) => ({
+          type: "tool-result" as const,
+          toolCallId: `fallback-${context.job.id}-${fallbackIndex - round.executions.length + index}`,
+          toolName: execution.name,
+          output: execution.ok
+            ? {
+                type: "text" as const,
+                value: typeof execution.result === "string"
+                  ? execution.result
+                  : JSON.stringify(execution.result ?? ""),
+              }
+            : { type: "error-text" as const, value: execution.error || "Tool failed." },
+        })),
+      },
+    ];
+    const compactedConversation = compactIfNeeded(
+      conversation,
+      resolvedContextWindow(context),
+      contextModeOf(effectiveModelParams(context.chat, context.job)),
+    );
+    current = resumeEmbedded(compactedConversation, remainingSteps);
   }
-  let usage;
-  try {
-    usage = await result.usage;
-  } catch (error) {
-    const message = streamErrorText(error);
-    context.onStream({ type: "error", error: message });
-    throw new Error(providerError || message);
-  }
-  if (providerError) throw new Error(providerError);
-  if (!textProduced) {
+
+  if (!textProduced && !toolsProduced) {
     const suffix = finishReason ? ` (finish reason: ${finishReason})` : "";
     throw new Error(`Provider returned no text output${suffix}.`);
   }
-  return {
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-    totalTokens: usage.totalTokens,
-  } satisfies Usage;
+  if (!textProduced && toolsProduced) {
+    context.onText("The provider finished its tool work.");
+  }
+  return usage;
+}
+
+function providerMcpContext(context: ProviderContext) {
+  const mode = modeById(context.job.modeId || context.chat.sessionState?.modeId);
+  return buildMcpContext({
+    chatId: context.job.chatId,
+    userId: context.job.userId,
+    jobId: context.job.id,
+    incognito: Boolean(context.job.incognito),
+    automation: Boolean(context.job.automationId),
+    modeId: mode.id,
+    modePolicy: {
+      allowedCategories: mode.allowedCategories,
+      toolOverrides: mode.toolOverrides || {},
+    },
+  });
 }
 
 function modeMcpEnv(context: ProviderContext): Record<string, string> {
-  const mode = modeById(context.chat.sessionState?.modeId);
-  const env = Object.fromEntries(
-    Object.entries({
-      MCP_CHAT_ID: context.job.chatId,
-      MCP_USER_ID: context.job.userId || "",
-      MCP_JOB_ID: context.job.id,
-      MCP_INCOGNITO: (context.job as { incognito?: boolean }).incognito ? "1" : undefined,
-      MCP_MODE_ID: mode.id,
-      MCP_MODE_POLICY: JSON.stringify({
-        allowedCategories: mode.allowedCategories,
-        toolOverrides: mode.toolOverrides || {},
-      }),
-      MCP_AGENT_CWD: getUserAgentCwd(context.job.userId),
-    }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-  );
-  return env;
+  return getMcpServers(providerMcpContext(context)).gateway.env;
 }
 
 async function agentToolsFor(context: ProviderContext): Promise<ToolSet> {
-  const mode = modeById(context.chat.sessionState?.modeId);
-  // The gateway enforces the mode policy server-side (MCP_MODE_POLICY env),
-  // so Plan/Ask modes get the bridged tool set too — restricted to their
-  // allowed categories by the gateway itself. The old `if (!canRemote) return {}`
-  // left Plan/Ask with ZERO tools on OpenAI-compatible providers.
+  const env = modeMcpEnv(context);
   try {
-    const bridged = await mcpBridgeTools(modeMcpEnv(context));
-    return { ...bridged, ...contextHubTools({ allowWrite: mode.allowedCategories.includes("memory") }) };
-  } catch (error) {
-    console.error("[runner] MCP bridge unavailable, falling back to remote tools:", error instanceof Error ? error.message : error);
-    return { ...providerRemoteTools(context), ...contextHubTools({ allowWrite: mode.allowedCategories.includes("memory") }) };
+    return await mcpBridgeTools(env);
+  } catch (first) {
+    try {
+      return await mcpBridgeTools({ ...env, MCP_GATEWAY_RETRY: String(Date.now()) });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const previous = first instanceof Error ? first.message : String(first);
+      throw new Error(`MCP gateway tools unavailable after retry (${detail}). First error: ${previous}`);
+    }
   }
 }
 
 async function runAiSdk(context: ProviderContext): Promise<ProviderResult> {
   const tools = await agentToolsFor(context);
-  const result = streamText({
+  const messages = modelMessages(
+    context.chat,
+    context.job,
+    resolvedContextWindow(context),
+    contextModeOf(effectiveModelParams(context.chat, context.job)),
+    (event) => context.onStream(event),
+  );
+  const route = routeTask(context.job.message);
+  const stream = (nextMessages: ModelMessage[], remainingSteps: number) => streamText({
     model: aiModel(context.connection.providerKey, context.modelId, context.connection),
-    instructions: providerPrompt(context.job),
-    messages: modelMessages(context.chat, context.job, resolvedContextWindow(context)),
+    instructions: providerPrompt(context.job, Object.keys(tools), false, effectiveModelParams(context.chat, context.job)),
+    messages: nextMessages,
     tools,
-    stopWhen: stepCountIs(50),
+    reasoning: aiReasoningForSelection(context.connection.providerKey, effectiveModelParams(context.chat, context.job)),
+    providerOptions: providerOptionsFor(context),
+    stopWhen: stepCountIs(remainingSteps),
+    prepareStep: ({ messages }) => ({ messages: stripProviderReasoning(messages) }),
     abortSignal: context.signal,
   });
   return {
-    usage: await consumeAiStream(result, context),
+    usage: await consumeAiStream(stream(messages, route.initialSteps), context, tools, messages, stream, route.initialSteps),
   };
 }
 
@@ -431,7 +1024,32 @@ async function runOAuthAiSdk(
   }
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "ai-chat-oauth-run-"));
   const authFile = path.join(tempDir, "oauth.json");
-  await writeFile(authFile, context.connection.secret, { encoding: "utf8", mode: 0o600 });
+  let authPayload = context.connection.secret;
+  if (providerKey === "antigravity") {
+    try {
+      const parsed = JSON.parse(authPayload) as Record<string, unknown>;
+      const token = parsed.token && typeof parsed.token === "object"
+        ? parsed.token as Record<string, unknown>
+        : undefined;
+      if (token && typeof token.access_token === "string" && typeof token.refresh_token === "string") {
+        const expiry = typeof token.expiry === "string" ? Date.parse(token.expiry) : NaN;
+        authPayload = JSON.stringify({
+          "google-gemini-cli": {
+            type: "oauth",
+            access: token.access_token,
+            refresh: token.refresh_token,
+            expires: Number.isFinite(expiry) ? expiry : Date.now() + 3_600_000,
+            ...(typeof context.connection.config.project === "string"
+              ? { projectId: context.connection.config.project }
+              : {}),
+          },
+        });
+      }
+    } catch {
+      // The provider-specific OAuth adapter will report malformed credentials.
+    }
+  }
+  await writeFile(authFile, authPayload, { encoding: "utf8", mode: 0o600 });
   try {
     if (providerKey === "antigravity") {
       await ensureAntigravityProjectId(
@@ -442,23 +1060,30 @@ async function runOAuthAiSdk(
       );
     }
     const provider = await createOAuthProvider(providerKey, authFile);
-    const oauthModelId =
-      providerKey === "codex" &&
-      ["gpt-5.4", "gpt-5-codex", "gpt-5.6-sol"].includes(context.modelId)
-        ? "gpt-5.6-terra"
-        : context.modelId;
+    const oauthModelId = context.modelId;
     const oauthTools = await agentToolsFor(context);
-    const result = streamText({
+    const messages = modelMessages(
+      context.chat,
+      context.job,
+      resolvedContextWindow(context),
+      contextModeOf(effectiveModelParams(context.chat, context.job)),
+      (event) => context.onStream(event),
+    );
+    const route = routeTask(context.job.message);
+    const stream = (nextMessages: ModelMessage[], remainingSteps: number) => streamText({
       model: provider.languageModel(oauthModelId),
-      instructions: providerPrompt(context.job),
-      messages: modelMessages(context.chat, context.job, resolvedContextWindow(context)),
+      instructions: providerPrompt(context.job, Object.keys(oauthTools), false, effectiveModelParams(context.chat, context.job)),
+      messages: nextMessages,
       tools: oauthTools,
-      stopWhen: stepCountIs(50),
+      reasoning: aiReasoningForSelection(providerKey, effectiveModelParams(context.chat, context.job)),
+      providerOptions: providerOptionsFor(context),
+      stopWhen: stepCountIs(remainingSteps),
+      prepareStep: ({ messages }) => ({ messages: stripProviderReasoning(messages) }),
       abortSignal: context.signal,
     });
-    const usage = await consumeAiStream(result, context);
+    const usage = await consumeAiStream(stream(messages, route.initialSteps), context, oauthTools, messages, stream, route.initialSteps);
     const refreshedAuth = await readFile(authFile, "utf8").catch(() => context.connection.secret);
-    if (refreshedAuth !== context.connection.secret && context.job.userId) {
+    if (refreshedAuth !== authPayload && context.job.userId) {
       updateProviderConnection(context.connection.id, context.job.userId, {
         secret: refreshedAuth,
         enabled: true,
@@ -498,7 +1123,13 @@ async function createCodexHome(
         const oauth = record && typeof record === "object"
           ? record as Record<string, unknown>
           : {};
-        if (typeof oauth.access !== "string" || typeof oauth.refresh !== "string") {
+        const idToken =
+          typeof oauth.idToken === "string"
+            ? oauth.idToken
+            : typeof oauth.id_token === "string"
+              ? oauth.id_token
+              : undefined;
+        if (typeof oauth.access !== "string" || typeof oauth.refresh !== "string" || !idToken) {
           throw new Error("Codex OAuth credentials are incomplete.");
         }
         return {
@@ -507,6 +1138,7 @@ async function createCodexHome(
           tokens: {
             access_token: oauth.access,
             refresh_token: oauth.refresh,
+            id_token: idToken,
             ...(typeof oauth.accountId === "string" ? { account_id: oauth.accountId } : {}),
           },
           last_refresh: new Date().toISOString(),
@@ -517,24 +1149,35 @@ async function createCodexHome(
   return { home, authFile, temporary: !persistentHome };
 }
 
-function codexTool(item: Record<string, unknown>): ToolPart | null {
+export function codexTool(
+  item: Record<string, unknown>,
+  status: ToolPart["status"] = "completed",
+): ToolPart | null {
   const type = asString(item.type);
   if (!type || type === "agent_message" || type === "reasoning") return null;
+  const mcpName = asString(item.tool) || asString(item.tool_name) || asString(item.name);
+  const output = item.aggregated_output ?? item.output;
+  const mcpResult = item.result && typeof item.result === "object"
+    ? JSON.stringify(item.result)
+    : undefined;
   const name =
     type === "command_execution"
       ? "Codex command"
       : type === "file_change"
         ? "Codex file change"
         : type === "mcp_tool_call"
-          ? "Codex MCP tool"
+          ? (mcpName || "call_mcp_tool")
           : `Codex ${type.replaceAll("_", " ")}`;
+  const kind = classifyToolKind(mcpName || name, item.arguments, item.output);
   return {
     id: asString(item.id) || crypto.randomUUID(),
     name,
-    status: "completed",
-    kind: type === "file_change" ? "edit" : type.includes("command") ? "shell" : "other",
+    status,
+    kind: type === "file_change" ? "edit" : type.includes("command") ? "shell" : kind,
     ...(item.command ? { input: JSON.stringify(item.command) } : {}),
-    ...(item.output ? { result: asString(item.output) } : {}),
+    ...(item.arguments ? { input: JSON.stringify(item.arguments) } : {}),
+    ...(output !== undefined ? { result: asString(output) } : {}),
+    ...(mcpResult ? { result: mcpResult } : {}),
   };
 }
 
@@ -547,6 +1190,7 @@ async function persistCodexOAuthHome(context: ProviderContext, home: {
       tokens?: {
         access_token?: string;
         refresh_token?: string;
+        id_token?: string;
         account_id?: string;
       };
     };
@@ -564,6 +1208,7 @@ async function persistCodexOAuthHome(context: ProviderContext, home: {
           type: "oauth",
           access: tokens.access_token,
           refresh: tokens.refresh_token,
+          ...(tokens.id_token || previous.idToken ? { idToken: tokens.id_token || previous.idToken } : {}),
           ...(tokens.account_id || previous.accountId
             ? { accountId: tokens.account_id || previous.accountId }
             : {}),
@@ -579,11 +1224,15 @@ async function persistCodexOAuthHome(context: ProviderContext, home: {
 
 async function runCodex(context: ProviderContext): Promise<ProviderResult> {
   const { Codex } = await import("@openai/codex-sdk");
-  const codexModel =
-    context.connection.authType === "oauth" &&
-    ["gpt-5.4", "gpt-5-codex"].includes(context.modelId)
-      ? "gpt-5.6-sol"
-      : context.modelId;
+  if (
+    (context.connection.authType === "account" || context.connection.authType === "oauth") &&
+    !context.connection.secret?.trim()
+  ) {
+    throw new Error("Codex credentials are not configured.");
+  }
+  if (context.connection.authType === "api_key" && !context.connection.secret?.trim()) {
+    throw new Error("Codex API-key authentication requires a key.");
+  }
   const persistentHome = context.connection.authType === "oauth" && context.job.userId
     ? path.join(config.dataDir, "provider-sessions", "codex", context.job.userId, context.connection.id)
     : undefined;
@@ -592,6 +1241,7 @@ async function runCodex(context: ProviderContext): Promise<ProviderResult> {
     : undefined;
   const env = inheritedEnv(codexHome ? { CODEX_HOME: codexHome.home } : {});
   const agentCwd = getUserAgentCwd(context.job.userId);
+  const mcp = getMcpServers(providerMcpContext(context)).gateway;
   const codex = new Codex({
     ...(context.connection.authType === "api_key" && context.connection.secret
       ? { apiKey: context.connection.secret }
@@ -600,21 +1250,9 @@ async function runCodex(context: ProviderContext): Promise<ProviderResult> {
       ...(codexHome ? { cli_auth_credentials_store: "file" as const } : {}),
       mcp_servers: {
         metis_ai: {
-          command: process.execPath,
-          args: [
-            path.join(config.root, "lib", "internal-mcp-server.mjs"),
-          ],
-          env: {
-            MCP_CHAT_ID: context.job.chatId,
-            MCP_USER_ID: context.job.userId || "",
-            MCP_JOB_ID: context.job.id,
-            MCP_MODE_ID: modeById(context.chat.sessionState?.modeId).id,
-            MCP_MODE_POLICY: JSON.stringify({
-              allowedCategories: modeById(context.chat.sessionState?.modeId).allowedCategories,
-              toolOverrides: modeById(context.chat.sessionState?.modeId).toolOverrides || {},
-            }),
-            MCP_AGENT_CWD: agentCwd,
-          },
+          command: mcp.command,
+          args: mcp.args,
+          env: mcp.env,
         },
       },
     },
@@ -624,7 +1262,18 @@ async function runCodex(context: ProviderContext): Promise<ProviderResult> {
     ? context.chat.agentId.slice("codex:".length)
     : undefined;
   const threadOptions = {
-    model: codexModel,
+    model: context.modelId,
+    ...(codexReasoningEffortForSelection(
+      context.modelId,
+      effectiveModelParams(context.chat, context.job),
+    )
+      ? {
+          modelReasoningEffort: codexReasoningEffortForSelection(
+            context.modelId,
+            effectiveModelParams(context.chat, context.job),
+          ),
+        }
+      : {}),
     workingDirectory: agentCwd,
     skipGitRepoCheck: true,
     sandboxMode: "workspace-write" as const,
@@ -634,7 +1283,7 @@ async function runCodex(context: ProviderContext): Promise<ProviderResult> {
     ? codex.resumeThread(previousId, threadOptions)
     : codex.startThread(threadOptions);
   try {
-    const prompt = [providerPrompt(context.job), context.job.message || "Continue the current task."]
+    const prompt = [providerPrompt(context.job, ["metis_ai"], true, effectiveModelParams(context.chat, context.job)), providerConversationPrompt(context)]
       .filter(Boolean)
       .join("\n\nUser request:\n");
     const streamed = await thread.runStreamed(
@@ -660,13 +1309,17 @@ async function runCodex(context: ProviderContext): Promise<ProviderResult> {
         throw new Error(event.error.message);
       } else if (event.type === "error") {
         throw new Error(event.message);
-      } else if (event.type === "item.completed") {
+      } else if (
+        event.type === "item.started" ||
+        event.type === "item.updated" ||
+        event.type === "item.completed"
+      ) {
         const item = asRecord(event.item);
         if (asString(item.type) === "agent_message") {
           const text = asString(item.text);
           if (text) context.onText(text);
         } else {
-          const tool = codexTool(item);
+          const tool = codexTool(item, event.type === "item.completed" ? "completed" : "running");
           if (tool) context.onTool(tool);
         }
       }
@@ -708,7 +1361,7 @@ function claudeTool(message: Record<string, unknown>): ToolPart | null {
     id: asString(tool.id) || crypto.randomUUID(),
     name: asString(tool.name) || "Claude tool",
     status: "completed",
-    kind: "other",
+    kind: classifyToolKind(asString(tool.name) || "Claude tool"),
     ...(tool.input ? { input: JSON.stringify(tool.input) } : {}),
   };
 }
@@ -726,7 +1379,9 @@ async function runClaude(context: ProviderContext): Promise<ProviderResult> {
   const options = {
     cwd: agentCwd,
     model: context.modelId,
-    tools: { type: "preset", preset: "claude_code" } as const,
+    // Do not expose Claude Code's native filesystem, shell, browser, or task
+    // tools. Metis MCP is the sole tool surface for every provider CLI.
+    tools: [] as string[],
     permissionMode: "acceptEdits" as const,
     includePartialMessages: true,
     ...(previousId ? { resume: previousId } : {}),
@@ -735,24 +1390,14 @@ async function runClaude(context: ProviderContext): Promise<ProviderResult> {
       CLAUDE_AGENT_SDK_CLIENT_APP: "metis-ai",
     }),
     abortController,
-    mcpServers: getMcpServers({
-      chatId: context.job.chatId,
-      userId: context.job.userId,
-      jobId: context.job.id,
-      modeId: modeById(context.chat.sessionState?.modeId).id,
-      modePolicy: JSON.stringify({
-        allowedCategories: modeById(context.chat.sessionState?.modeId).allowedCategories,
-        toolOverrides: modeById(context.chat.sessionState?.modeId).toolOverrides || {},
-      }),
-    }),
+    mcpServers: getMcpServers(providerMcpContext(context)),
+    systemPrompt: providerPrompt(context.job, ["mcp"], false, effectiveModelParams(context.chat, context.job)),
   };
   let sessionId: string | undefined;
   let receivedText = false;
   let usage: Usage | undefined;
   const conversation = query({
-    prompt: [providerPrompt(context.job), context.job.message || "Continue the current task"]
-      .filter(Boolean)
-      .join("\n\nUser request:\n"),
+    prompt: providerConversationPrompt(context),
     options,
   });
   try {
@@ -797,114 +1442,89 @@ async function runClaude(context: ProviderContext): Promise<ProviderResult> {
 }
 
 async function runAntigravity(context: ProviderContext): Promise<ProviderResult> {
-  const bridge = path.join(config.root, "scripts", "antigravity_bridge.py");
-  const env = inheritedEnv({
-    ...(context.connection.secret ? { GEMINI_API_KEY: context.connection.secret } : {}),
-    ...(context.connection.authType === "vertex_adc"
-      ? {
-          GOOGLE_GENAI_USE_VERTEXAI: "true",
-          ...(typeof context.connection.config.project === "string"
-            ? { GOOGLE_CLOUD_PROJECT: context.connection.config.project }
+  if (!context.job.userId) throw new Error("Antigravity requires a user id.");
+  const effortValue = [
+    ...(context.job.modelParams || []),
+    ...(context.chat.modelParams || []),
+  ].find((param) => param.id === "effort")?.value;
+  const legacyVariant = context.modelId.match(/^(gemini-\d+\.\d+-flash|gemini-\d+\.\d+-pro)-(low|medium|high)$/);
+  const supportsEffort = antigravitySupportsEffort(context.modelId);
+  const extraEnv = context.connection.authType === "oauth"
+    ? undefined
+    : Object.fromEntries(
+        Object.entries({
+          ...(context.connection.secret ? { GEMINI_API_KEY: context.connection.secret } : {}),
+          ...(context.connection.authType === "vertex_adc"
+            ? {
+                GOOGLE_GENAI_USE_VERTEXAI: "true",
+                ...(typeof context.connection.config.project === "string"
+                  ? { GOOGLE_CLOUD_PROJECT: context.connection.config.project }
+                  : {}),
+                ...(typeof context.connection.config.location === "string"
+                  ? { GOOGLE_CLOUD_LOCATION: context.connection.config.location }
+                  : {}),
+              }
             : {}),
-          ...(typeof context.connection.config.location === "string"
-            ? { GOOGLE_CLOUD_LOCATION: context.connection.config.location }
-            : {}),
-        }
-      : {}),
-  });
-  const agentCwd = getUserAgentCwd(context.job.userId);
-  const identity = getUserExecutionIdentity(context.job.userId);
-  const child = spawn(process.env.ANTIGRAVITY_PYTHON || "python3", [bridge], {
-    cwd: agentCwd,
-    env: env as NodeJS.ProcessEnv,
-    stdio: "pipe",
-    ...(identity ? { uid: identity.uid, gid: identity.gid } : {}),
-  });
-  const abortChild = () => child.kill("SIGTERM");
-  if (context.signal.aborted) abortChild();
-  else context.signal.addEventListener("abort", abortChild, { once: true });
-  let stderr = "";
-  child.stderr.on("data", (chunk: Buffer) => {
-    stderr += chunk.toString();
-  });
-  child.stdin.write(`${JSON.stringify({
-    prompt: [providerPrompt(context.job), context.job.message || "Continue the current task"]
+        }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+      );
+  await runOfficialAntigravityJob({
+    userId: context.job.userId,
+    connectionId: context.connection.id,
+    secret: context.connection.secret || "",
+    modelId: legacyVariant?.[1] || context.modelId,
+    ...(supportsEffort ? { effort: effortValue || legacyVariant?.[2] || "medium" } : {}),
+    prompt: [providerPrompt(context.job, ["antigravity", "mcp"], true, effectiveModelParams(context.chat, context.job)), providerConversationPrompt(context)]
       .filter(Boolean)
       .join("\n\nUser request:\n"),
-    model: context.modelId,
-    cwd: agentCwd,
-  })}\n`);
-  child.stdin.end();
-  const lines = createInterface({ input: child.stdout });
-  for await (const line of lines) {
-    let payload: Record<string, unknown>;
-    try {
-      payload = JSON.parse(line) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-    if (payload.type === "text") context.onText(asString(payload.text));
-    if (payload.type === "tool") {
-      context.onTool({
-        id: asString(payload.id) || crypto.randomUUID(),
-        name: asString(payload.name) || "Antigravity tool",
-        status: "completed",
-        kind: "other",
-      });
-    }
-    if (payload.type === "error") throw new Error(asString(payload.message) || "Antigravity bridge failed.");
-  }
-  const exitCode = await new Promise<number | null>((resolve) => {
-    child.once("exit", (code: number | null) => resolve(code));
+    cwd: getUserAgentCwd(context.job.userId),
+    mcp: getMcpServers(providerMcpContext(context)),
+    extraEnv,
+    signal: context.signal,
+    onText: context.onText,
+    onStream: context.onStream,
+    onTool: context.onTool,
   });
-  context.signal.removeEventListener("abort", abortChild);
-  if (context.signal.aborted) throw new Error("Provider run cancelled.");
-  if (exitCode !== 0) {
-    throw new Error(stderr.trim() || "Antigravity bridge exited unsuccessfully.");
-  }
   return {};
+}
+
+function claudeSecretIsJsonOAuth(secret?: string) {
+  const value = secret?.trim() || "";
+  if (!value.startsWith("{")) return false;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed));
+  } catch {
+    return false;
+  }
 }
 
 async function runProvider(context: ProviderContext): Promise<ProviderResult> {
   const providerKey = parseModelKey(context.job.modelId).providerKey;
-  if (
-    context.connection.authType === "oauth" &&
-    (providerKey === "codex" || providerKey === "claude-code" || providerKey === "antigravity")
-  ) {
-    if (providerKey === "antigravity") {
-      const effortValue = [
-        ...(context.job.modelParams || []),
-        ...(context.chat.modelParams || []),
-      ].find((param) => param.id === "effort")?.value;
-      const legacyVariant = context.modelId.match(/^(gemini-\d+\.\d+-flash|gemini-\d+\.\d+-pro)-(low|medium|high)$/);
-      const effort = effortValue || legacyVariant?.[2] || "medium";
-      const antigravityModel =
-        legacyVariant?.[1] || context.modelId;
-      await runOfficialAntigravityJob({
-        userId: context.job.userId!,
-        connectionId: context.connection.id,
-        secret: context.connection.secret || "",
-        modelId: antigravityModel,
-        effort,
-        prompt: [providerPrompt(context.job), context.job.message || "Continue the current task."]
-          .filter(Boolean)
-          .join("\n\nUser request:\n"),
-        signal: context.signal,
-        onText: context.onText,
-        onStream: context.onStream,
-      });
-      return {};
-    }
-    return runOAuthAiSdk(context, providerKey);
+  if (providerKey === "antigravity") return runOAuthAiSdk(context, "antigravity");
+  if (providerKey === "codex") {
+    return context.connection.authType === "api_key"
+      ? runAiSdk(context)
+      : runOAuthAiSdk(context, "codex");
   }
-  if (providerKey === "codex") return runCodex(context);
-  if (providerKey === "claude-code") return runClaude(context);
-  if (providerKey === "antigravity") return runAntigravity(context);
+  if (providerKey === "claude-code") {
+    if (context.connection.authType === "oauth" && claudeSecretIsJsonOAuth(context.connection.secret)) {
+      return runOAuthAiSdk(context, providerKey);
+    }
+    return runClaude(context);
+  }
   return runAiSdk(context);
 }
 
 export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat) {
-  const parsed = parseModelKey(job.modelId || initialChat.modelId || "");
+  const runStartedAt = Date.now();
+  const rawParsed = parseModelKey(job.modelId || initialChat.modelId || "");
+  const normalizedModelId = normalizeLegacyProviderModelId(rawParsed.providerKey, rawParsed.modelId);
+  const parsed = { ...rawParsed, modelId: normalizedModelId };
+  if (normalizedModelId !== rawParsed.modelId) {
+    const canonicalKey = modelKey(rawParsed.providerKey, normalizedModelId, rawParsed.connectionId);
+    updateJob(job.id, { modelId: canonicalKey });
+    updateChat(job.chatId, { modelId: canonicalKey }, job.userId);
+  }
   const definition = getProviderDefinition(parsed.providerKey);
   if (!definition || parsed.providerKey === "cursor") return false;
   if (!job.userId) throw new Error("A user account is required for provider connections.");
@@ -933,8 +1553,16 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
   let text = "";
   const tools: ToolPart[] = [];
   const controller = new AbortController();
+  let modelSwitchTarget: { modelId: string; modelParams?: Array<{ id: string; value: string }> } | null = null;
   const cancellationWatcher = setInterval(() => {
-    if (getJob(job.id)?.status === "cancelled") controller.abort();
+    const currentJob = getJob(job.id);
+    const pendingModelId = currentJob?.pendingModelId?.trim();
+    if (pendingModelId && pendingModelId !== job.modelId) {
+      modelSwitchTarget = { modelId: pendingModelId, modelParams: currentJob?.pendingModelParams };
+      controller.abort();
+      return;
+    }
+    if (currentJob?.status === "cancelled") controller.abort();
   }, 250);
   const emit = (event: string, data: unknown) => appendRunEvent(
     job.id,
@@ -950,7 +1578,7 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       id: assistantMessageId,
       role: "assistant",
       content: text,
-      ...(tools.length ? { tools: [...tools] } : {}),
+      ...(tools.length ? { tools: persistToolsForMessage(job.chatId, assistantMessageId, tools) } : {}),
     });
     checkpointDirty = false;
   };
@@ -968,6 +1596,36 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       if (checkpointDirty) checkpointNow();
     }, 500);
   };
+  const handoffModelSwitch = () => {
+    if (!modelSwitchTarget) return false;
+    checkpoint(true);
+    const target = modelSwitchTarget;
+    const switchedAt = new Date().toISOString();
+    updateJob(job.id, {
+      status: "switching",
+      error: undefined,
+      agentId: undefined,
+      modelId: target.modelId,
+      modelParams: target.modelParams,
+      pendingModelId: undefined,
+      pendingModelParams: undefined,
+      modelSwitchRequestedAt: undefined,
+      resumePrompt: `The user switched the active model to ${target.modelId}. Continue the in-progress task from the saved chat/tool/browser state. Do not repeat completed work.`,
+      resumeRequestedAt: switchedAt,
+    });
+    updateChat(job.chatId, {
+      modelId: target.modelId,
+      modelParams: target.modelParams || [],
+      agentId: null,
+      runStatus: "running",
+      runUpdatedAt: switchedAt,
+      queueMessage: null,
+      badge: null,
+    }, job.userId);
+    emit("status", { status: "switching_model", modelId: target.modelId });
+    return true;
+  };
+
   const onText = (value: string) => {
     if (!value) return;
     text += value;
@@ -975,20 +1633,36 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
     emit("text", { text: value });
   };
   const onTool = (tool: ToolPart) => {
-    const existingIndex = tools.findIndex((item) => item.id === tool.id);
+    // write_todos is a state surface, not an append-only tool history. Give it
+    // one stable id per run so every update replaces the same Tasks card in
+    // persistence and in the live SSE UI instead of creating ghost checklists.
+    const normalizedTool = tool.kind === "todo"
+      ? { ...tool, id: `todo-${job.id}` }
+      : tool;
+    let existingIndex = tools.findIndex((item) => item.id === normalizedTool.id);
+    if (existingIndex < 0 && normalizedTool.status !== "running") {
+      existingIndex = tools.findLastIndex((item) =>
+        item.status === "running" && item.name === normalizedTool.name,
+      );
+      if (existingIndex >= 0) {
+        normalizedTool.id = tools[existingIndex].id;
+      }
+    }
     if (existingIndex >= 0) {
-      tools[existingIndex] = { ...tools[existingIndex], ...tool };
+      tools[existingIndex] = { ...tools[existingIndex], ...normalizedTool };
     } else {
-      tools.push(tool);
+      tools.push(normalizedTool);
     }
     checkpoint(true);
     emit("tool", {
-      callId: tool.id,
-      name: tool.name,
-      status: tool.status,
-      kind: tool.kind,
-      ...(tool.input ? { input: tool.input } : {}),
-      ...(tool.result ? { result: tool.result } : {}),
+      callId: normalizedTool.id,
+      name: normalizedTool.name,
+      status: normalizedTool.status,
+      kind: normalizedTool.kind,
+      ...(normalizedTool.input ? { input: normalizedTool.input } : {}),
+      ...(normalizedTool.result ? { result: normalizedTool.result } : {}),
+      ...(normalizedTool.todos?.length ? { todos: normalizedTool.todos } : {}),
+      ...(normalizedTool.subagent ? { subagent: normalizedTool.subagent } : {}),
     });
   };
 
@@ -1010,9 +1684,16 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       signal: controller.signal,
       onText,
       onTool,
-      onStream: (data) => emit("stream", data),
+      onStream: (data) => emit(data.type === "compaction" ? "compaction" : "stream", data),
     });
-    const cancelled = controller.signal.aborted || getJob(job.id)?.status === "cancelled";
+    if (modelSwitchTarget && handoffModelSwitch()) return true;
+    const durableStatus = getJob(job.id)?.status;
+    if (durableStatus === "interrupted") {
+      checkpoint();
+      emit("status", { status: "interrupted", message: "Run was interrupted before the provider finished." });
+      return true;
+    }
+    const cancelled = controller.signal.aborted || durableStatus === "cancelled";
     if (cancelled) {
       updateChat(job.chatId, {
         runStatus: "cancelled",
@@ -1024,7 +1705,42 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       return true;
     }
     if (!text.trim()) text = "The provider completed without returning a textual response.";
+    finalizeAlternativeTools(tools);
+    if (modeById(job.modeId || chat.sessionState?.modeId).id === "plan" && text.trim()) {
+      const current = getChat(job.chatId, job.userId);
+      const existingPlan = current?.workspaces?.find((workspace) => workspace.type === "plan");
+      if (!existingPlan && current) {
+        const timestamp = new Date().toISOString();
+        const workspace = {
+          id: crypto.randomUUID(),
+          type: "plan" as const,
+          name: "Plan",
+          content: text.trim().slice(0, 100_000),
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          version: 1,
+        };
+        updateChat(job.chatId, {
+          workspaces: [...(current.workspaces || []), workspace].slice(-20),
+        }, job.userId);
+        text = `${text.trim()}\n\n[Plan: ${workspace.name}](workspace://plan/${workspace.id})`;
+        appendRunEvent(job.id, job.chatId, job.userId, "workspace", { workspace });
+      }
+    }
+    recordSignal({
+      modelId: parsed.modelId,
+      category: telemetryCategory(job.message),
+      success: true,
+      totalLatencyMs: Math.max(0, Date.now() - runStartedAt),
+      inputTokens: result.usage?.inputTokens,
+      outputTokens: result.usage?.outputTokens,
+      toolCallCount: tools.length,
+      toolFailures: tools.some((tool) => tool.status === "error"),
+      createdAt: new Date().toISOString(),
+    });
     checkpoint();
+    const measuredInputTokens = result.usage?.inputTokens;
+    const inputTokens = measuredInputTokens ?? estimateProviderInputTokens(chat, job, parsed.modelId);
     chat = updateChat(job.chatId, {
       ...(result.agentId ? { agentId: result.agentId } : {}),
       runStatus: "completed",
@@ -1035,11 +1751,12 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       id: assistantMessageId,
       role: "assistant",
       content: text,
-      ...(tools.length ? { tools } : {}),
+      ...(tools.length ? { tools: persistToolsForMessage(job.chatId, assistantMessageId, tools) } : {}),
       runMetadata: {
         providerId: definition.key,
         modelId: parsed.modelId,
-        ...(result.usage?.inputTokens !== undefined ? { inputTokens: result.usage.inputTokens } : {}),
+        inputTokens,
+        ...(measuredInputTokens === undefined ? { inputTokensEstimated: true } : {}),
         ...(result.usage?.outputTokens !== undefined ? { outputTokens: result.usage.outputTokens } : {}),
         ...(result.usage?.totalTokens !== undefined ? { totalTokens: result.usage.totalTokens } : {}),
         completedAt: new Date().toISOString(),
@@ -1056,22 +1773,42 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       ...(result.agentId ? { agentId: result.agentId } : {}),
     });
   } catch (error) {
-    const cancelled = controller.signal.aborted || getJob(job.id)?.status === "cancelled";
+    if (modelSwitchTarget && handoffModelSwitch()) return true;
+    const durableStatus = getJob(job.id)?.status;
+    const interrupted = durableStatus === "interrupted";
+    const cancelled = controller.signal.aborted || durableStatus === "cancelled";
     const message = cancelled
       ? "Provider run cancelled."
-      : error instanceof Error
-        ? error.message
-        : "Provider run failed.";
-    void logError({
-      level: "error",
-      source: "worker",
-      chatId: job.chatId,
-      userId: job.userId || undefined,
-      message: `Provider run failed (${definition.key}): ${message}`,
-      stack: error instanceof Error ? error.stack : undefined,
-      context: { jobId: job.id, provider: definition.key, modelId: parsed.modelId },
+      : interrupted
+        ? "Provider run interrupted."
+        : error instanceof Error
+          ? error.message
+          : "Provider run failed.";
+    finalizeAlternativeTools(tools);
+    recordSignal({
+      modelId: parsed.modelId,
+      category: telemetryCategory(job.message),
+      success: false,
+      totalLatencyMs: Math.max(0, Date.now() - runStartedAt),
+      toolCallCount: tools.length,
+      toolFailures: true,
+      createdAt: new Date().toISOString(),
     });
-    if (cancelled) {
+    if (!cancelled && !interrupted) {
+      void logError({
+        level: "error",
+        source: "worker",
+        chatId: job.chatId,
+        userId: job.userId || undefined,
+        message: `Provider run failed (${definition.key}): ${message}`,
+        stack: error instanceof Error ? error.stack : undefined,
+        context: { jobId: job.id, provider: definition.key, modelId: parsed.modelId },
+      });
+    }
+    if (interrupted) {
+      checkpoint();
+      emit("status", { status: "interrupted", message });
+    } else if (cancelled) {
       updateChat(job.chatId, { runStatus: "cancelled", runUpdatedAt: new Date().toISOString() }, job.userId);
       updateJob(job.id, { status: "cancelled", error: message });
       emit("done", { status: "cancelled", provider: definition.key });
@@ -1081,7 +1818,7 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
         role: "assistant",
         content: text,
         errorMessage: message,
-        ...(tools.length ? { tools } : {}),
+        ...(tools.length ? { tools: persistToolsForMessage(job.chatId, assistantMessageId, tools) } : {}),
       });
       updateChat(job.chatId, {
         runStatus: "error",

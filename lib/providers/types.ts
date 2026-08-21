@@ -19,6 +19,13 @@ export type ProviderCapabilities = {
   vision: boolean;
   agent: boolean;
   modelDiscovery: boolean;
+  reasoning?: boolean;
+  fast?: boolean;
+  mcp?: boolean;
+  browser?: boolean;
+  skills?: boolean;
+  subagents?: boolean;
+  usage?: boolean;
 };
 
 export type ProviderModelParameter = {

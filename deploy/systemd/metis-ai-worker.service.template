@@ -1,6 +1,9 @@
 [Unit]
-Description=Metis AI worker
+Description=Metis AI Worker
 After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -10,10 +13,18 @@ WorkingDirectory=YOUR_INSTALL_DIR
 EnvironmentFile=YOUR_INSTALL_DIR/.env
 Environment=HOME=YOUR_HOME
 Environment=NODE_ENV=production
+Environment=NODE_OPTIONS=--max-old-space-size=4096
 Environment=PATH=YOUR_NODE_BIN_DIR:YOUR_INSTALL_DIR/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
+MemoryHigh=5G
+MemoryMax=6G
+CPUQuota=500%
+TasksMax=1024
+KillMode=control-group
 ExecStart=YOUR_NODE_BIN YOUR_INSTALL_DIR/node_modules/tsx/dist/cli.mjs YOUR_INSTALL_DIR/worker.ts
 Restart=always
 RestartSec=3
+TimeoutStopSec=15s
+SuccessExitStatus=143
 
 [Install]
 WantedBy=multi-user.target

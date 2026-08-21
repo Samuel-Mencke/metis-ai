@@ -16,12 +16,14 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:production": "bash scripts/build-production-slot.sh",
     "start": "tsx server.mjs",
     "lint": "eslint .",
     "test": "pnpm run test:providers && pnpm run test:shared && tsx --test scripts/security.test.ts tests/installers.test.ts",
     "test:providers": "tsx --test tests/providers.test.ts tests/uploads.test.ts tests/modes.test.ts",
-    "test:shared": "tsx --test tests/shared-context.test.ts tests/recovery.test.ts tests/agent-trace.test.ts tests/context-window.test.ts tests/tool-call-display.test.ts tests/worker-scheduler.test.ts tests/tool-search.test.ts tests/composer-send.test.ts",
-    "typecheck": "tsc --noEmit"
+    "test:shared": "tsx --test tests/automations.test.ts tests/shared-context.test.ts tests/recovery.test.ts tests/agent-trace.test.ts tests/agent-transcript.test.ts tests/cursor-session-recovery.test.ts tests/persistence-limits.test.ts tests/context-window.test.ts tests/model-params.test.ts tests/usage-display.test.ts tests/discovery-context.test.ts tests/tool-call-display.test.ts tests/worker-scheduler.test.ts tests/tool-search.test.ts tests/composer-send.test.ts tests/tool-parity.test.ts tests/model-aliases.test.ts tests/provider-mcp-routing.test.ts",
+    "typecheck": "tsc --noEmit",
+    "audit:capabilities": "tsx scripts/capability-audit.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.33",

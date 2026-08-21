@@ -7,9 +7,17 @@ import { config } from "@/lib/config";
 import { updateOAuthFlow } from "@/lib/oauth-flows";
 import { updateProviderConnection } from "@/lib/provider-connections";
 import { waitForOAuthManualCode } from "@/lib/providers/oauth";
+import { classifyTranscriptTool } from "@/lib/agent-transcript";
+import { todosFromToolPayload } from "@/lib/tool-call-display";
+import type { McpServerMap } from "@/lib/mcp";
+import type { ToolPart } from "@/lib/store";
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function antigravitySupportsEffort(modelId: string) {
+  return /^(?:gemini|gpt-oss)(?:[-_.]|$)/i.test(modelId.trim());
 }
 
 function stripTerminalControl(value: string) {
@@ -17,6 +25,101 @@ function stripTerminalControl(value: string) {
     .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\r/g, "");
+}
+
+export function antigravityMcpConfig(mcp: McpServerMap) {
+  return {
+    mcpServers: Object.fromEntries(
+      Object.entries(mcp).map(([id, server]) => [
+        id,
+        {
+          command: server.command,
+          args: server.args,
+          env: server.env,
+        },
+      ]),
+    ),
+  };
+}
+
+export function antigravityCliSettings() {
+  return {
+    enableTelemetry: false,
+    toolPermission: "always-proceed",
+  };
+}
+
+export async function writeAntigravitySessionFiles(tempHome: string, mcp?: McpServerMap) {
+  const geminiConfig = path.join(tempHome, ".gemini", "config");
+  const cliDir = path.join(tempHome, ".gemini", "antigravity-cli");
+  await mkdir(geminiConfig, { recursive: true, mode: 0o700 });
+  await mkdir(cliDir, { recursive: true, mode: 0o700 });
+  await writeFile(
+    path.join(cliDir, "settings.json"),
+    `${JSON.stringify(antigravityCliSettings(), null, 2)}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+  if (!mcp) return;
+  const payload = `${JSON.stringify(antigravityMcpConfig(mcp), null, 2)}\n`;
+  await writeFile(path.join(geminiConfig, "mcp_config.json"), payload, { encoding: "utf8", mode: 0o600 });
+  await writeFile(path.join(cliDir, "mcp_config.json"), payload, { encoding: "utf8", mode: 0o600 });
+}
+
+const TOOL_LINE = /(?:calling|called|using|ran)\s+(?:mcp\s+)?tool[:\s]+[`"]?([A-Za-z0-9_./-]+)[`"]?/i;
+
+export function parseAntigravityCliChunk(chunk: string): {
+  text: string;
+  tools: ToolPart[];
+} {
+  const tools: ToolPart[] = [];
+  const lines = chunk.split("\n");
+  const textLines: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      textLines.push(line);
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      if (parsed.type === "tool" || parsed.type === "tool_call" || parsed.type === "mcp_tool_call") {
+        const name = String(parsed.name || parsed.toolName || parsed.tool || "Antigravity tool");
+        const input = typeof parsed.input === "string"
+          ? parsed.input
+          : parsed.input
+            ? JSON.stringify(parsed.input)
+            : undefined;
+        const result = typeof parsed.result === "string" ? parsed.result : undefined;
+        const todos = todosFromToolPayload(input, result);
+        const kind = classifyTranscriptTool(name, input, result);
+        tools.push({
+          id: kind === "todo" ? "todo" : String(parsed.id || parsed.toolCallId || crypto.randomUUID()),
+          name,
+          status: String(parsed.status || "completed"),
+          kind,
+          ...(input ? { input } : {}),
+          ...(result ? { result } : {}),
+          ...(todos?.length ? { todos } : {}),
+        });
+        continue;
+      }
+    } catch {
+      // Plain CLI text.
+    }
+    const match = trimmed.match(TOOL_LINE);
+    if (match?.[1]) {
+      tools.push({
+        id: crypto.randomUUID(),
+        name: match[1],
+        status: "completed",
+        kind: classifyTranscriptTool(match[1]),
+      });
+      continue;
+    }
+    if (/ERROR: logging before google\.Init/i.test(trimmed)) continue;
+    textLines.push(line);
+  }
+  return { text: textLines.join("\n"), tools };
 }
 
 function findAuthorizationUrl(value: string) {
@@ -238,9 +341,13 @@ export async function runOfficialAntigravityJob(context: {
   modelId: string;
   effort?: string;
   prompt: string;
+  cwd?: string;
+  mcp?: McpServerMap;
+  extraEnv?: Record<string, string>;
   signal: AbortSignal;
   onText: (value: string) => void;
   onStream: (data: Record<string, unknown>) => void;
+  onTool?: (tool: ToolPart) => void;
 }) {
   const tempHome = await mkdtemp(path.join(os.tmpdir(), "ai-chat-agy-run-"));
   const tokenFile = path.join(
@@ -255,7 +362,11 @@ export async function runOfficialAntigravityJob(context: {
     throw new Error(`Official Antigravity CLI was not found at ${command}.`);
   }
   await mkdir(path.dirname(tokenFile), { recursive: true, mode: 0o700 });
-  await writeFile(tokenFile, context.secret, { encoding: "utf8", mode: 0o600 });
+  const secretLooksLikeOAuthJson = context.secret.trim().startsWith("{");
+  if (secretLooksLikeOAuthJson) {
+    await writeFile(tokenFile, context.secret, { encoding: "utf8", mode: 0o600 });
+  }
+  await writeAntigravitySessionFiles(tempHome, context.mcp);
 
   const terminal = pty.spawn(
     command,
@@ -272,7 +383,7 @@ export async function runOfficialAntigravityJob(context: {
       name: "xterm-256color",
       cols: 1000,
       rows: 50,
-      cwd: config.agentCwd,
+      cwd: context.cwd || config.agentCwd,
       env: {
         ...process.env,
         HOME: tempHome,
@@ -284,6 +395,7 @@ export async function runOfficialAntigravityJob(context: {
         SSH_CONNECTION: "198.51.100.10 50000 198.51.100.20 22",
         SSH_CLIENT: "198.51.100.10 50000 22",
         SSH_TTY: "/dev/pts/0",
+        ...(context.extraEnv || {}),
       } as Record<string, string>,
     },
   );
@@ -302,7 +414,11 @@ export async function runOfficialAntigravityJob(context: {
   terminal.onData((chunk) => {
     const cleanChunk = stripTerminalControl(chunk);
     output = `${output}${cleanChunk}`.slice(-100_000);
-    if (cleanChunk.trim()) context.onStream({ type: "cli-output", text: cleanChunk });
+    if (!cleanChunk.trim()) return;
+    context.onStream({ type: "cli-output", text: cleanChunk });
+    const parsed = parseAntigravityCliChunk(cleanChunk);
+    for (const tool of parsed.tools) context.onTool?.(tool);
+    if (parsed.text.trim()) context.onText(parsed.text);
   });
   try {
     const exitCode = await exit;
@@ -315,15 +431,15 @@ export async function runOfficialAntigravityJob(context: {
           : "Official Antigravity CLI run failed.",
       );
     }
-    const refreshed = await readFile(tokenFile, "utf8").catch(() => context.secret);
-    if (refreshed !== context.secret) {
-      updateProviderConnection(context.connectionId, context.userId, {
-        secret: refreshed,
-        enabled: true,
-      });
+    if (secretLooksLikeOAuthJson) {
+      const refreshed = await readFile(tokenFile, "utf8").catch(() => context.secret);
+      if (refreshed !== context.secret) {
+        updateProviderConnection(context.connectionId, context.userId, {
+          secret: refreshed,
+          enabled: true,
+        });
+      }
     }
-    const text = output.trim();
-    if (text) context.onText(text);
   } finally {
     context.signal.removeEventListener("abort", killOnAbort);
     await rm(tempHome, { recursive: true, force: true }).catch(() => undefined);

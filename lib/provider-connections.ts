@@ -6,6 +6,7 @@ import type {
   ProviderAuthType,
   ProviderConnection,
   ProviderModel,
+  ProviderModelDefinition,
 } from "@/lib/providers/types";
 
 type ConnectionRow = {
@@ -41,6 +42,16 @@ export type ProviderConnectionInput = {
 export type ProviderConnectionWithSecret = ProviderConnection & {
   secret?: string;
 };
+
+export function providerAuthPriority(authType: ProviderAuthType) {
+  return ({
+    oauth: 0,
+    account: 1,
+    api_key: 2,
+    local: 3,
+    vertex_adc: 4,
+  } as Record<ProviderAuthType, number>)[authType] ?? 99;
+}
 
 function parseConfig(value: string) {
   try {
@@ -153,7 +164,16 @@ export function listProviderConnections(ownerId: string, includeDisabled = true)
      WHERE owner_id = ?
        AND COALESCE(json_extract(config, '$.pendingOAuthFlow'), 0) != 1
        ${includeDisabled ? "" : "AND enabled = 1"}
-     ORDER BY provider_key ASC, label COLLATE NOCASE ASC`,
+     ORDER BY provider_key ASC,
+              CASE auth_type
+                WHEN 'oauth' THEN 0
+                WHEN 'account' THEN 1
+                WHEN 'api_key' THEN 2
+                WHEN 'local' THEN 3
+                WHEN 'vertex_adc' THEN 4
+                ELSE 99
+              END ASC,
+              label COLLATE NOCASE ASC`,
   ).all(ownerId) as ConnectionRow[];
   return rows.map(rowToConnection);
 }
@@ -179,7 +199,18 @@ export function findActiveConnection(ownerId: string, providerKey: string) {
             created_at, updated_at
      FROM provider_connections
      WHERE owner_id = ? AND provider_key = ? AND enabled = 1
-     ORDER BY updated_at DESC
+     ORDER BY CASE
+                WHEN auth_type = 'oauth' AND secret_blob IS NOT NULL THEN 0
+                WHEN auth_type = 'account' AND secret_blob IS NOT NULL THEN 1
+                WHEN auth_type = 'api_key' AND secret_blob IS NOT NULL THEN 2
+                WHEN auth_type = 'local' THEN 3
+                WHEN auth_type = 'vertex_adc' THEN 4
+                WHEN auth_type = 'oauth' THEN 5
+                WHEN auth_type = 'account' THEN 6
+                WHEN auth_type = 'api_key' THEN 7
+                ELSE 99
+              END ASC,
+              updated_at DESC
      LIMIT 1`,
   ).get(ownerId, providerKey) as ConnectionRow | undefined;
   return row ? rowToConnection(row) : null;
@@ -301,7 +332,11 @@ export function markProviderConnection(
 
 export function saveProviderModels(
   connectionId: string,
-  models: Array<Pick<ProviderModel, "id" | "displayName" | "description" | "capabilities" | "contextWindow">>,
+  models: Array<Pick<ProviderModel, "id" | "displayName" | "description" | "capabilities" | "contextWindow"> & {
+    parameters?: ProviderModelDefinition["parameters"];
+    defaultParams?: ProviderModelDefinition["defaultParams"];
+    tags?: string[];
+  }>,
 ) {
   const db = getDatabase();
   transaction(() => {
@@ -313,12 +348,18 @@ export function saveProviderModels(
     );
     const discoveredAt = new Date().toISOString();
     for (const model of models.slice(0, 500)) {
+      const capabilities = {
+        ...(model.capabilities ?? {}),
+        ...(model.parameters ? { __parameters: model.parameters } : {}),
+        ...(model.defaultParams ? { __defaultParams: model.defaultParams } : {}),
+        ...(model.tags ? { __tags: model.tags } : {}),
+      };
       insert.run(
         connectionId,
         model.id,
         model.displayName.slice(0, 200),
         model.description?.slice(0, 500) ?? null,
-        JSON.stringify(model.capabilities ?? {}),
+        JSON.stringify(capabilities),
         typeof model.contextWindow === "number" && Number.isFinite(model.contextWindow) && model.contextWindow > 0
           ? Math.round(model.contextWindow)
           : null,
@@ -362,7 +403,12 @@ export function listProviderModels(connectionId: string) {
         : typeof capabilities.contextWindow === "number" && capabilities.contextWindow > 0
           ? { contextWindow: capabilities.contextWindow }
           : {}),
-      capabilities,
+      capabilities: Object.fromEntries(
+        Object.entries(capabilities).filter(([key]) => !key.startsWith("__")),
+      ),
+      ...(Array.isArray(capabilities.__parameters) ? { parameters: capabilities.__parameters } : {}),
+      ...(Array.isArray(capabilities.__defaultParams) ? { defaultParams: capabilities.__defaultParams } : {}),
+      ...(Array.isArray(capabilities.__tags) ? { tags: capabilities.__tags } : {}),
       discoveredAt: value.discoveredAt,
     };
   });

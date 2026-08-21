@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { tool, jsonSchema, type ToolSet } from "ai";
 import { config } from "@/lib/config";
+import { sanitizeJsonSchema } from "@/lib/providers/tool-schema";
 
 /**
  * Bridges the internal Metis MCP gateway (77+ tools: shell, files, browser,
@@ -119,11 +120,83 @@ const INIT_PARAMS = {
   clientInfo: { name: "metis-ai-sdk-bridge", version: "1.0.0" },
 };
 
-/** Filter to a safe, generally useful subset for non-SDK providers. */
+/** Tools that need extra chat wiring or hang a non-Cursor provider. */
 const DEFAULT_EXCLUDE = new Set([
-  "provide_file", // needs chat upload context wiring
-  "ask_user", "request_mode_change", "wait", "subagent_status", // interactive flows handled by SDK paths
+  "provide_file",
+  "wait",
 ]);
+
+/** Cursor-analog core surface. Everything else is reached via search_tools/call_mcp_tool. */
+export const CORE_MCP_TOOL_ALLOWLIST = [
+  "read_file",
+  "edit_file",
+  "write_file",
+  "delete_file",
+  "list_directory",
+  "execute_command",
+  "git_status",
+  "git_diff",
+  "repo_search",
+  "inspect_codebase",
+  "find_symbol",
+  "write_todos",
+  "create_plan",
+  "edit_plan",
+  "list_workspaces",
+  "browser_navigate",
+  "browser_snapshot",
+  "browser_batch",
+  "browser_form_state",
+  "browser_wait_for",
+  "browser_fill_form",
+  "browser_click",
+  "browser_type",
+  "browser_extract_text",
+  "browser_download",
+  "browser_screenshot",
+  "browser_tabs",
+  "browser_press",
+  "browser_scroll",
+  "browser_hover",
+  "browser_select_option",
+  "browser_upload_file",
+  "web_search",
+  "web_fetch",
+  "context_profile",
+  "context_search",
+  "context_remember",
+  "search_tools",
+  "call_mcp_tool",
+  "list_mcp_servers",
+  "ask_user",
+  "request_mode_change",
+  "delegate_subagent",
+  "subagent_status",
+  "list_recent_errors",
+  "read_error_log_detail",
+  "list_remote_clients",
+  "list_notes",
+  "search_notes",
+  "create_note",
+  "update_note",
+  "list_memories",
+  "add_memory",
+  "edit_memory",
+  "list_server_tools",
+  "ensure_capability",
+] as const;
+
+export function selectBridgeTools(names: string[], options: { include?: string[]; exclude?: string[] } = {}) {
+  const exclude = new Set([...DEFAULT_EXCLUDE, ...(options.exclude || [])]);
+  const include = new Set(options.include?.length ? options.include : CORE_MCP_TOOL_ALLOWLIST);
+  include.add("search_tools");
+  include.add("call_mcp_tool");
+  return names.filter((name) => {
+    if (!name || exclude.has(name)) return false;
+    if (include.has(name)) return true;
+    return !options.include?.length && name.startsWith("browser_");
+  });
+}
 
 export async function mcpBridgeTools(
   env: Record<string, string>,
@@ -134,12 +207,10 @@ export async function mcpBridgeTools(
     return result?.tools || [];
   });
 
-  const exclude = new Set([...DEFAULT_EXCLUDE, ...(options.exclude || [])]);
-  const include = options.include ? new Set(options.include) : null;
+  const allowed = new Set(selectBridgeTools(definitions.map((item) => item.name), options));
   const tools: ToolSet = {};
   for (const definition of definitions) {
-    if (!definition.name || exclude.has(definition.name)) continue;
-    if (include && !include.has(definition.name)) continue;
+    if (!allowed.has(definition.name)) continue;
     const bridgedExecute = async (args: Record<string, unknown>) => {
       const result = await withFreshGateway(env, async (gateway) => {
         return callGateway(gateway, "tools/call", { name: definition.name, arguments: args || {} }, 300_000);
@@ -153,11 +224,10 @@ export async function mcpBridgeTools(
       if (recordWithError?.isError) throw new Error(text || `Tool ${definition.name} failed`);
       return text || result || "";
     };
+    const schema = sanitizeJsonSchema(definition.inputSchema || { type: "object", properties: {} });
     tools[definition.name] = tool({
-      description: (definition.description || definition.name).slice(0, 2_000),
-      parameters: jsonSchema(
-        ((definition.inputSchema || { type: "object", properties: {} }) as unknown) as Parameters<typeof jsonSchema>[0],
-      ),
+      description: (definition.description || definition.name).slice(0, 500),
+      parameters: jsonSchema(schema as Parameters<typeof jsonSchema>[0]),
       execute: bridgedExecute,
     } as never) as ToolSet[string];
   }

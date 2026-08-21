@@ -6,6 +6,7 @@ import net from "node:net";
 import path from "node:path";
 import { chromium, type BrowserContext, type Frame, type Locator, type Page } from "playwright";
 import { config } from "@/lib/config";
+import { getUserAgentCwd } from "@/lib/mcp";
 
 const MAX_SNAPSHOT_LENGTH = 120_000;
 const SESSION_IDLE_MS = 30 * 60 * 1000;
@@ -207,6 +208,25 @@ const sessions = new Map<string, BrowserContextState>();
 const actionLocks = new Map<string, Promise<void>>();
 const allowedAddressCache = new Map<string, { expiresAt: number }>();
 const browserProfilesDir = path.join(config.dataDir, "browser-profiles");
+const BROWSER_ACTION_QUEUE_TIMEOUT_MS = 90_000;
+const BROWSER_ACTION_TIMEOUT_MS = 120_000;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return new Promise<T>((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(
+      (value) => {
+        if (timer) clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        if (timer) clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
 
 function envList(name: string) {
   return (process.env[name] || "")
@@ -256,7 +276,10 @@ async function assertAllowedUrl(rawUrl: string) {
 
   const cached = allowedAddressCache.get(hostname);
   if (!cached || cached.expiresAt <= Date.now()) {
-    const addresses = await dns.lookup(hostname, { all: true });
+    const addresses = await Promise.race([
+      dns.lookup(hostname, { all: true }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Browser DNS lookup timed out")), 5_000)),
+    ]);
     if (!addresses.length || addresses.some(({ address }) => isPrivateAddress(address))) {
       throw new Error("Browser target resolves to a private or unavailable network address");
     }
@@ -576,7 +599,11 @@ async function collectFormState(page: Page): Promise<{ text: string; controls: B
 async function pageInfo(state: BrowserContextState, tabId: string) {
   const page = state.tabs.get(tabId)!;
   const url = page.url();
-  const faviconHref = await page.locator('link[rel~="icon"], link[rel="shortcut icon"]').first().getAttribute("href").catch(() => null);
+  const faviconHref = await withTimeout(
+    page.locator('link[rel~="icon"], link[rel="shortcut icon"]').first().getAttribute("href"),
+    5_000,
+    "Timed out reading browser page metadata",
+  ).catch(() => null);
   let favicon: string | undefined;
   if (faviconHref) {
     try {
@@ -587,7 +614,12 @@ async function pageInfo(state: BrowserContextState, tabId: string) {
   } else if (url && url !== "about:blank") {
     favicon = `${new URL(url).origin}/favicon.ico`;
   }
-  return { id: tabId, url, title: await page.title().catch(() => "New tab"), favicon };
+  return {
+    id: tabId,
+    url,
+    title: await withTimeout(page.title(), 5_000, "Timed out reading browser page title").catch(() => "New tab"),
+    favicon,
+  };
 }
 
 async function resultFor(state: BrowserContextState, tabId: string): Promise<BrowserResult> {
@@ -627,7 +659,11 @@ export async function captureBrowserFrame(
     url: url === "about:blank" ? "" : url,
     title: info.title,
     viewport: page.viewportSize() || DEFAULT_VIEWPORT,
-    data: await page.screenshot({ type: "jpeg", quality: Math.max(35, Math.min(90, quality)) }),
+    data: await page.screenshot({
+      type: "jpeg",
+      quality: Math.max(35, Math.min(90, quality)),
+      timeout: 30_000,
+    }),
   };
 }
 
@@ -799,6 +835,11 @@ async function performBrowserActionUnlocked(ownerId: string, chatId: string, act
   } else if (action.action === "upload_file") {
     if (!action.selector || !action.filePath) throw new Error("A selector and file path are required for upload_file");
     const local = path.resolve(String(action.filePath));
+    const workspace = path.resolve(getUserAgentCwd(ownerId));
+    const relative = path.relative(workspace, local);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new Error("Browser uploads must use a file inside the agent workspace.");
+    }
     if (!fs.existsSync(local)) throw new Error(`File not found: ${local}`);
     const { locator } = await findSelectorLocator(page, action.selector, action.frame);
     await locator.setInputFiles(local, { timeout: 15_000 });
@@ -845,7 +886,7 @@ async function performBrowserActionUnlocked(ownerId: string, chatId: string, act
   // reasoning is actually needed, avoiding base64+JPEG work after every click.
   const SCREENSHOT_ACTIONS = ["screenshot", "navigate", "click", "type", "reload", "back", "forward", "select_tab", "scroll", "resize", "drag", "select_option", "upload_file"];
   if (SCREENSHOT_ACTIONS.includes(action.action) && action.includeScreenshot !== false) {
-    result.screenshot = (await page.screenshot({ type: "jpeg", quality: 60 })).toString("base64");
+    result.screenshot = (await page.screenshot({ type: "jpeg", quality: 60, timeout: 30_000 })).toString("base64");
   }
   if (action.action === "snapshot") {
     result.snapshot = await collectFrameText(page, "snapshot");
@@ -871,7 +912,11 @@ export async function performBrowserAction(ownerId: string, chatId: string, acti
   const gate = new Promise<void>((resolve) => { release = resolve; });
   const queued = previous.then(() => gate);
   actionLocks.set(key, queued);
-  await previous;
+  await withTimeout(
+    previous,
+    BROWSER_ACTION_QUEUE_TIMEOUT_MS,
+    "A previous browser action exceeded the queue wait limit.",
+  );
   try {
     // A killed Chromium (e.g. OOM or external kill) leaves a zombie session:
     // process gone, CDP pipe dead, calls resolving never. Detect that up front
@@ -881,7 +926,11 @@ export async function performBrowserAction(ownerId: string, chatId: string, acti
       sessions.delete(key);
       void closeBrowserSession(ownerId, chatId).catch(() => undefined);
     }
-    return await performBrowserActionUnlocked(ownerId, chatId, action);
+    return await withTimeout(
+      performBrowserActionUnlocked(ownerId, chatId, action),
+      BROWSER_ACTION_TIMEOUT_MS,
+      "Browser action exceeded the execution time limit.",
+    );
   } finally {
     release();
     if (actionLocks.get(key) === queued) actionLocks.delete(key);
@@ -912,18 +961,25 @@ export async function closeBrowserSession(ownerId: string, chatId: string) {
   if (!state) return;
   sessions.delete(key);
   await Promise.all([...state.tabs.values()].map((page) => page.close().catch(() => undefined)));
+  if (![...sessions.values()].some((candidate) => candidate.ownerId === ownerId)) {
+    persistentContexts.delete(ownerId);
+    await state.context.close().catch(() => undefined);
+  }
 }
 
 export async function cleanupBrowserSessions() {
   const cutoff = Date.now() - SESSION_IDLE_MS;
-  const owners = new Set([...sessions.values()].map((state) => state.ownerId));
+  for (const [key, state] of [...sessions.entries()]) {
+    if (state.lastUsed >= cutoff) continue;
+    sessions.delete(key);
+    await Promise.all([...state.tabs.values()].map((page) => page.close().catch(() => undefined)));
+  }
+  const owners = new Set([...persistentContexts.keys()]);
   for (const ownerId of owners) {
-    const ownerSessions = [...sessions.entries()].filter(([, state]) => state.ownerId === ownerId);
-    if (!ownerSessions.length || ownerSessions.some(([, state]) => state.lastUsed >= cutoff)) continue;
-    const context = ownerSessions[0][1].context;
-    await context.close().catch(() => undefined);
-    for (const [key] of ownerSessions) sessions.delete(key);
+    if ([...sessions.values()].some((state) => state.ownerId === ownerId)) continue;
+    const context = await persistentContexts.get(ownerId)?.catch(() => undefined);
     persistentContexts.delete(ownerId);
+    await context?.close().catch(() => undefined);
   }
 }
 

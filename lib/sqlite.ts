@@ -164,6 +164,8 @@ export function getDatabase(): DatabaseSync {
     PRAGMA temp_store = MEMORY;
     PRAGMA cache_size = -32768;
     PRAGMA busy_timeout = 10000;
+    PRAGMA wal_autocheckpoint = 1000;
+    PRAGMA journal_size_limit = 67108864;
     PRAGMA foreign_keys = ON;
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS users (
@@ -249,6 +251,19 @@ export function getDatabase(): DatabaseSync {
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS chats_owner_updated ON chats(owner_id, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS tool_revert_snapshots (
+      chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+      message_id TEXT NOT NULL,
+      tool_id TEXT NOT NULL,
+      path TEXT,
+      before_text TEXT,
+      after_text TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (chat_id, message_id, tool_id)
+    );
+    CREATE INDEX IF NOT EXISTS tool_revert_snapshots_chat
+      ON tool_revert_snapshots(chat_id, message_id);
     CREATE TABLE IF NOT EXISTS memories (
       id TEXT PRIMARY KEY,
       owner_id TEXT REFERENCES users(id) ON DELETE CASCADE,
@@ -278,6 +293,9 @@ export function getDatabase(): DatabaseSync {
       mode_id TEXT,
       model_id TEXT,
       extended_model_id TEXT,
+      creator TEXT NOT NULL DEFAULT 'user' CHECK (creator IN ('user', 'agent')),
+      max_run_minutes INTEGER NOT NULL DEFAULT 1440,
+      graph_json TEXT,
       schedule_kind TEXT NOT NULL CHECK (schedule_kind IN ('once', 'interval')),
       schedule_value TEXT NOT NULL,
       timezone TEXT NOT NULL DEFAULT 'UTC',
@@ -299,6 +317,7 @@ export function getDatabase(): DatabaseSync {
       job_id TEXT,
       chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
       status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'error', 'cancelled')),
+      trigger_type TEXT NOT NULL DEFAULT 'scheduled' CHECK (trigger_type IN ('scheduled', 'manual')),
       started_at TEXT,
       completed_at TEXT,
       result_preview TEXT,
@@ -459,6 +478,10 @@ export function getDatabase(): DatabaseSync {
     "ALTER TABLE automations ADD COLUMN mode_id TEXT",
     "ALTER TABLE automations ADD COLUMN model_id TEXT",
     "ALTER TABLE automations ADD COLUMN extended_model_id TEXT",
+    "ALTER TABLE automations ADD COLUMN creator TEXT NOT NULL DEFAULT 'user'",
+    "ALTER TABLE automations ADD COLUMN max_run_minutes INTEGER NOT NULL DEFAULT 1440",
+    "ALTER TABLE automations ADD COLUMN graph_json TEXT",
+    "ALTER TABLE automation_runs ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'scheduled'",
     "ALTER TABLE provider_models ADD COLUMN context_window INTEGER",
   ]) {
     try {

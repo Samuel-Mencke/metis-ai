@@ -6,7 +6,16 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: [".next/**", "node_modules/**", "data/**", "public/**", "next-env.d.ts"],
+    ignores: [
+      ".next/**",
+      ".next-a/**",
+      ".next-b/**",
+      ".next-staging/**",
+      "node_modules/**",
+      "data/**",
+      "public/**",
+      "next-env.d.ts",
+    ],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,

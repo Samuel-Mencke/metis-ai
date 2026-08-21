@@ -201,9 +201,19 @@ mkdir -p "$data_dir" "$agent_cwd"
   printf 'AI_CHAT_ROOT=%q\n' "$install_dir"
   printf 'AI_CHAT_INSTALL_DIR=%q\n' "$install_dir"
   printf 'AI_CHAT_PUBLIC_URL=%q\n' "$public_url"
+  printf 'AI_CHAT_INTERNAL_ORIGIN=%q\n' "http://127.0.0.1:$port"
   printf 'AI_CHAT_SERVICE_NAME=%q\n' "$service_name"
   printf 'AI_CHAT_MCP_STATE_DIR=%q\n' "$data_dir/mcp-state"
   printf 'AI_CHAT_INTERNAL_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-question"
+  printf 'AI_CHAT_WORKSPACE_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-workspace"
+  printf 'AI_CHAT_CHAT_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-chat"
+  printf 'AI_CHAT_NOTES_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-notes"
+  printf 'AI_CHAT_MEMORY_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-memory"
+  printf 'AI_CHAT_BROWSER_URL=%q\n' "http://127.0.0.1:$port/api/internal/browser"
+  printf 'AI_CHAT_AGENT_STATE_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-agent-state"
+  printf 'AI_CHAT_SUBAGENT_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-subagent"
+  printf 'AI_CHAT_AUTOMATION_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-automation"
+  printf 'AI_CHAT_FILE_URL=%q\n' "http://127.0.0.1:$port/api/internal/mcp-file"
   printf 'AI_CHAT_SECRETS_KEY=%q\n' "$secrets_key"
   printf 'MCP_PORT=%q\n' "$mcp_port"
   printf 'MCP_PUBLIC_URL=%q\n' "http://127.0.0.1:$mcp_port"
@@ -222,7 +232,7 @@ chmod 600 "$install_dir/.env"
   pnpm install --frozen-lockfile
   METIS_AI_BOOTSTRAP_USERNAME="$username" METIS_AI_BOOTSTRAP_PASSWORD="$password" METIS_AI_BOOTSTRAP_OPTIONAL=1 \
     pnpm exec tsx scripts/bootstrap-user.ts
-  pnpm build
+  pnpm run build:production
 )
 
 if command -v systemctl >/dev/null 2>&1; then
@@ -243,6 +253,12 @@ EnvironmentFile=$install_dir/.env
 Environment=HOME=$HOME
 Environment=NODE_ENV=production
 Environment=PATH=$node_home/bin:$install_dir/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
+Environment=NEXT_DIST_DIR=.next-a
+MemoryHigh=1536M
+MemoryMax=2G
+TasksMax=512
+KillMode=control-group
+ExecStartPre=$install_dir/scripts/ensure-production-build.sh
 ExecStart=$node_bin $install_dir/node_modules/tsx/dist/cli.mjs $install_dir/server.mjs
 Restart=always
 RestartSec=5
@@ -264,6 +280,12 @@ EnvironmentFile=$install_dir/.env
 Environment=HOME=$HOME
 Environment=NODE_ENV=production
 Environment=PATH=$node_home/bin:$install_dir/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
+Environment=NODE_OPTIONS=--max-old-space-size=4096
+MemoryHigh=5G
+MemoryMax=6G
+CPUQuota=500%
+TasksMax=1024
+KillMode=control-group
 ExecStart=$node_bin $install_dir/node_modules/tsx/dist/cli.mjs $install_dir/worker.ts
 Restart=always
 RestartSec=3
@@ -285,6 +307,10 @@ EnvironmentFile=$install_dir/.env
 Environment=HOME=$HOME
 Environment=NODE_ENV=production
 Environment=PATH=$node_home/bin:$install_dir/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
+MemoryHigh=768M
+MemoryMax=1G
+TasksMax=256
+KillMode=control-group
 ExecStart=$node_bin $install_dir/lib/mcp-core/gateway-core.mjs
 Restart=always
 RestartSec=3

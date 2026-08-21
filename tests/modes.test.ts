@@ -7,7 +7,7 @@ test("built-in modes have the intended permission boundaries", () => {
   assert.deepEqual(modeById("agent").allowedCategories.sort(), [
     "browser", "memory", "plan", "read", "remote", "subagent", "terminal", "write",
   ]);
-  assert.deepEqual(modeById("plan").allowedCategories.sort(), ["browser", "plan", "read"]);
+  assert.deepEqual(modeById("plan").allowedCategories.sort(), ["browser", "memory", "plan", "read", "subagent"]);
   assert.deepEqual(modeById("ask").allowedCategories.sort(), ["browser", "read"]);
 });
 

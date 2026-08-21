@@ -2,6 +2,7 @@ import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { checkGatewayHealth } from "@/lib/mcp";
 import { listProviderConnections } from "@/lib/provider-connections";
 import { getUserAgentCwd } from "@/lib/mcp";
+import { readWorkerHeartbeat } from "@/lib/worker-health";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,6 +10,7 @@ export const dynamic = "force-dynamic";
 export async function GET(req: Request) {
   const authed = await isAuthenticated(req);
   const gateway = await checkGatewayHealth();
+  const worker = readWorkerHeartbeat();
   const ownerId = await getAuthenticatedUserId(req);
   const connections = ownerId ? listProviderConnections(ownerId) : [];
   const hasCursorSdkConnection = connections.some(
@@ -28,5 +30,6 @@ export async function GET(req: Request) {
       lastError: connection.lastError,
     })),
     mcp: gateway,
-  });
+    worker,
+  }, { status: worker.ok ? 200 : 503 });
 }

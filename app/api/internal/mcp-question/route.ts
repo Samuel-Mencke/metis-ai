@@ -1,9 +1,9 @@
-import { appendRunEvent, updateJob } from "@/lib/db-jobs";
+import { appendRunEvent, getJob, updateJob } from "@/lib/db-jobs";
 import {
   createPendingQuestion,
   getPendingQuestion,
 } from "@/lib/db-questions";
-import { getChat, updateChat } from "@/lib/db-store";
+import { canTransitionRunStatus, getChat, updateChat } from "@/lib/db-store";
 import { bearerTokenMatches } from "@/lib/security";
 
 export const runtime = "nodejs";
@@ -70,8 +70,21 @@ export async function POST(req: Request) {
   const answers = await pending.promise;
   const resolved = getPendingQuestion(pending.questionId, userId);
   if (!resolved || resolved.status !== "answered") {
-    updateJob(jobId, { status: resolved?.status === "cancelled" ? "cancelled" : "interrupted", error: resolved?.status === "expired" ? "The question expired before it was answered." : "The question was cancelled." });
-    updateChat(chatId, { runStatus: resolved?.status === "cancelled" ? "cancelled" : "interrupted", pendingQuestion: null }, userId);
+    const nextJobStatus = resolved?.status === "cancelled" ? "cancelled" : "interrupted";
+    const currentJob = getJob(jobId);
+    if (currentJob && ["queued", "running", "switching", "waiting_input", "waiting_for_user"].includes(currentJob.status)) {
+      updateJob(jobId, {
+        status: nextJobStatus,
+        error: resolved?.status === "expired" ? "The question expired before it was answered." : "The question was cancelled.",
+      });
+    }
+    const currentChat = getChat(chatId, userId);
+    if (
+      currentChat?.pendingQuestion?.questionId === pending.questionId &&
+      canTransitionRunStatus(currentChat.runStatus || "idle", nextJobStatus)
+    ) {
+      updateChat(chatId, { runStatus: nextJobStatus, pendingQuestion: null }, userId);
+    }
     appendRunEvent(jobId, chatId, userId, "status", { status: resolved?.status || "interrupted", questionId: pending.questionId });
     throw new Error(resolved?.status === "expired" ? "The user question expired." : "The user question was cancelled.");
   }

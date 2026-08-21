@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { getDatabase, transaction } from "@/lib/sqlite";
+import { getDatabase, isSqliteBusyError, transaction } from "@/lib/sqlite";
 
 export type RemotePolicyMode = "restricted" | "approval_required" | "full_access";
 export type RemoteClientStatus = "online" | "offline" | "revoked";
@@ -53,6 +53,13 @@ export type RemoteAuditEntry = {
 
 const iso = () => new Date().toISOString();
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+const REMOTE_SEEN_WRITE_INTERVAL_MS = 60_000;
+const remoteSeenWrittenAt = new Map<string, number>();
+
+function ignoreBusyTelemetry(error: unknown, operation: string) {
+  if (!isSqliteBusyError(error)) throw error;
+  console.warn(`[remote-client] sqlite busy; skipped ${operation}`);
+}
 const safeJson = <T>(value: unknown, fallback: T): T => {
   try {
     return JSON.parse(String(value)) as T;
@@ -170,22 +177,49 @@ export function authenticateRemoteClient(id: string, credential: string) {
   const expected = Buffer.from(row.secretHash);
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return null;
   const now = iso();
-  getDatabase().prepare("UPDATE remote_client_credentials SET last_used_at = ? WHERE client_id = ? AND secret_hash = ?")
-    .run(now, id, row.secretHash);
-  markRemoteClientSeen(id);
+  try {
+    getDatabase().prepare("UPDATE remote_client_credentials SET last_used_at = ? WHERE client_id = ? AND secret_hash = ?")
+      .run(now, id, row.secretHash);
+  } catch (error) {
+    // Credential usage timestamps are telemetry. A busy database must not
+    // reject an otherwise valid remote-client authentication.
+    ignoreBusyTelemetry(error, "credential last-used update");
+  }
+  markRemoteClientSeen(id, undefined, true);
   return { clientId: id, ownerId: row.ownerId };
 }
 
-export function markRemoteClientSeen(id: string, address?: string) {
-  const now = iso();
-  getDatabase().prepare(
-    "UPDATE remote_clients SET status = 'online', last_seen_at = ?, address = COALESCE(?, address), updated_at = ? WHERE id = ? AND revoked_at IS NULL",
-  ).run(now, address ?? null, now, id);
+export function markRemoteClientSeen(id: string, address?: string, force = false) {
+  const nowMs = Date.now();
+  const lastWrittenAt = remoteSeenWrittenAt.get(id) || 0;
+  if (!force && nowMs - lastWrittenAt < REMOTE_SEEN_WRITE_INTERVAL_MS) return false;
+  const now = new Date(nowMs).toISOString();
+  try {
+    getDatabase().prepare(
+      "UPDATE remote_clients SET status = 'online', last_seen_at = ?, address = COALESCE(?, address), updated_at = ? WHERE id = ? AND revoked_at IS NULL",
+    ).run(now, address ?? null, now, id);
+    remoteSeenWrittenAt.set(id, nowMs);
+    return true;
+  } catch (error) {
+    // Heartbeats are advisory presence telemetry. Never let them become an
+    // uncaught WebSocket exception or take down unrelated agent streams.
+    ignoreBusyTelemetry(error, "heartbeat presence update");
+    return false;
+  }
 }
 
 export function markRemoteClientOffline(id: string) {
-  getDatabase().prepare("UPDATE remote_clients SET status = 'offline', updated_at = ? WHERE id = ? AND revoked_at IS NULL")
-    .run(iso(), id);
+  remoteSeenWrittenAt.delete(id);
+  try {
+    getDatabase().prepare("UPDATE remote_clients SET status = 'offline', updated_at = ? WHERE id = ? AND revoked_at IS NULL")
+      .run(iso(), id);
+    return true;
+  } catch (error) {
+    // last_seen_at is still enough to detect stale clients if this best-effort
+    // status write loses a race with another SQLite writer.
+    ignoreBusyTelemetry(error, "offline presence update");
+    return false;
+  }
 }
 
 export function updateRemoteClient(id: string, ownerId: string, patch: {

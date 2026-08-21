@@ -9,6 +9,7 @@ import {
   withOverallBudget,
   withTimeout,
 } from "../lib/mcp-core/tool-search.mjs";
+import { localWebSearch } from "../lib/mcp-core/local-search.mjs";
 
 test("scoreToolHaystack counts overlapping query words", () => {
   assert.equal(scoreToolHaystack("github issues", "github github issues"), 2);
@@ -64,9 +65,36 @@ test("withTimeout rejects slow work", async () => {
 
 test("withOverallBudget returns partial fallback instead of hanging", async () => {
   const result = await withOverallBudget(
-    new Promise(() => undefined),
+    new Promise<never>(() => undefined),
     20,
     (reason) => ({ tools: [], errors: [{ server: "*", error: reason }] }),
   );
   assert.equal(result.errors[0].error, "search_budget_exceeded");
+});
+
+test("localWebSearch queries SearXNG JSON and normalizes results", async () => {
+  let requestedUrl = "";
+  const result = await localWebSearch({
+    query: "Kleinanzeigen Leipzig Server",
+    numResults: 1,
+    endpoint: "http://127.0.0.1:8888/search",
+    fetchImpl: async (url) => {
+      requestedUrl = String(url);
+      return new Response(JSON.stringify({
+        results: [
+          { title: "Server", url: "https://example.test/server", content: "32 GB RAM", engine: "brave" },
+          { title: "Second", url: "https://example.test/second" },
+        ],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  assert.match(requestedUrl, /q=Kleinanzeigen\+Leipzig\+Server/);
+  assert.equal(result.source, "local-searxng");
+  assert.deepEqual(result.results, [{
+    title: "Server",
+    url: "https://example.test/server",
+    content: "32 GB RAM",
+    engine: "brave",
+  }]);
 });

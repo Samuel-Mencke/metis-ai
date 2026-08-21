@@ -7,7 +7,10 @@ export type UsageWindow = {
 export type UsageProvider = {
   key: string;
   name: string;
-  status: "live" | "stale" | "error" | "no_auth";
+  connectionId?: string;
+  modelId?: string;
+  source?: "provider" | "dashboard" | "local";
+  status: "live" | "stale" | "error" | "no_auth" | "unsupported";
   planLabel?: string;
   windows: UsageWindow[];
   extra?: Record<string, string | number | null>;
@@ -17,6 +20,14 @@ export type UsageProvider = {
 export type UsageSnapshot = {
   providers: UsageProvider[];
   fetchedAt: string;
+};
+
+export type UsageSelection = {
+  providerId?: string | null;
+  providerName?: string | null;
+  connectionLabel?: string | null;
+  connectionId?: string | null;
+  modelId?: string | null;
 };
 
 const WEEKLY = /week/i;
@@ -31,6 +42,38 @@ export function usageKeyForProvider(providerId?: string | null): string | null {
   if (key === "antigravity") return "antigravity";
   if (key === "zai" || key === "z.ai" || key === "z-ai" || key === "glm") return "zai";
   return null;
+}
+
+export function usageKeyForSelection(selection: UsageSelection): string | null {
+  const direct = usageKeyForProvider(selection.providerId);
+  if (direct) return direct;
+  if (selection.connectionId) return `connection:${selection.connectionId}`;
+  const haystack = [selection.providerId, selection.providerName, selection.connectionLabel, selection.modelId]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  if (!haystack) return null;
+
+  // The local Samuel gateway exposes several plan-backed aliases through a
+  // generic OpenAI-compatible connection. Resolve those aliases to the real
+  // quota owner so the footer follows the backend that is actually billed.
+  const localGateway = /samuel ai gateway/i.test(selection.connectionLabel || "");
+  const model = (selection.modelId || "").toLowerCase();
+  if (localGateway && /^agy[-_.]/i.test(model)) return "antigravity";
+  if (localGateway && /^gpt[-_.]?5(?:[.\-_]|$)/i.test(model)) return "codex";
+  if (/\bz\.?ai\b|\bz-ai\b|\bglm(?:[-_. ]?\d)?/i.test(haystack)) return "zai";
+  if (/\bantigravity\b/i.test(haystack)) return "antigravity";
+  if (/\bcodex\b/i.test(haystack)) return "codex";
+  if (/\bcursor\b/i.test(haystack)) return "cursor";
+  return null;
+}
+
+function normalizedUsageModelId(value?: string | null) {
+  const raw = (value || "").trim().toLowerCase();
+  if (!raw) return "";
+  const parts = raw.split(":");
+  const leaf = parts.length >= 3 ? parts.slice(2).join(":") : parts.length === 2 ? parts[1] : raw;
+  return leaf.replace(/[^a-z0-9]+/g, "");
 }
 
 export function windowsWithData(windows: UsageWindow[]): Array<UsageWindow & { usedPercent: number }> {
@@ -76,25 +119,43 @@ export function parseCursorUsageBody(body: unknown): {
   planLabel?: string;
   extra?: Record<string, string | number | null>;
 } | null {
-  const root = body && typeof body === "object" ? (body as Record<string, unknown>) : null;
+  const rawRoot = body && typeof body === "object" ? (body as Record<string, unknown>) : null;
+  const root = rawRoot && rawRoot.data && typeof rawRoot.data === "object"
+    ? rawRoot.data as Record<string, unknown>
+    : rawRoot;
   if (!root) return null;
   const asRecord = (value: unknown) =>
     value && typeof value === "object" ? (value as Record<string, unknown>) : null;
-  const asFinitePercent = (value: unknown) => {
+  const asFiniteNumber = (value: unknown) => {
     const n = typeof value === "number" ? value : Number(value);
-    if (!Number.isFinite(n)) return null;
-    return Math.round(Math.min(100, Math.max(0, n)));
+    return Number.isFinite(n) ? n : null;
+  };
+  const asFinitePercent = (value: unknown) => {
+    const n = asFiniteNumber(value);
+    return n === null ? null : Math.round(Math.min(100, Math.max(0, n)));
   };
   const individual = asRecord(root.individualUsage);
-  const plan = asRecord(individual?.plan) || asRecord(root.planUsage) || asRecord(root.plan);
-  const onDemand = asRecord(individual?.onDemand) || asRecord(root.onDemand);
+  const plan = asRecord(individual?.plan)
+    || asRecord(individual?.planUsage)
+    || asRecord(individual?.includedUsage)
+    || asRecord(individual?.included)
+    || asRecord(root.planUsage)
+    || asRecord(root.plan)
+    || asRecord(root.usage);
+  const onDemand = asRecord(individual?.onDemand)
+    || asRecord(individual?.onDemandUsage)
+    || asRecord(individual?.extraUsage)
+    || asRecord(individual?.credits)
+    || asRecord(root.onDemand)
+    || asRecord(root.onDemandUsage)
+    || asRecord(root.extraUsage)
+    || asRecord(root.credits);
   const membership = typeof root.membershipType === "string" ? root.membershipType : undefined;
-  let resetsAt: string | null = typeof root.billingCycleEnd === "string" ? root.billingCycleEnd : null;
-  if (!resetsAt) {
-    const n = typeof root.billingCycleEnd === "number" ? root.billingCycleEnd : Number(root.billingCycleEnd);
-    if (Number.isFinite(n) && n > 0) {
-      resetsAt = new Date(n > 1e12 ? n : n * 1000).toISOString();
-    }
+  const resetValue = root.billingCycleEnd ?? root.billing_cycle_end ?? root.resetAt ?? root.reset_at;
+  let resetsAt: string | null = typeof resetValue === "string" ? resetValue : null;
+  const resetNumber = asFiniteNumber(resetValue);
+  if (!resetsAt && resetNumber !== null && resetNumber > 0) {
+    resetsAt = new Date(resetNumber > 1e12 ? resetNumber : resetNumber * 1000).toISOString();
   }
   const windows: UsageWindow[] = [];
   const push = (label: string, usedPercent: number | null) => {
@@ -102,25 +163,57 @@ export function parseCursorUsageBody(body: unknown): {
     windows.push({ label, usedPercent, resetsAt });
   };
   if (plan) {
-    push("monthly", asFinitePercent(plan.totalPercentUsed));
-    push("auto", asFinitePercent(plan.autoPercentUsed));
-    push("api", asFinitePercent(plan.apiPercentUsed));
+    push("included", asFinitePercent(
+      plan.totalPercentUsed ??
+      plan.total_percent_used ??
+      plan.percentUsed ??
+      plan.includedPercentUsed ??
+      plan.included_percent_used,
+    ));
+    push("auto", asFinitePercent(plan.autoPercentUsed ?? plan.auto_percent_used));
+    push("api", asFinitePercent(plan.apiPercentUsed ?? plan.api_percent_used));
     if (!windows.length) {
-      const used = typeof plan.used === "number" ? plan.used : null;
-      const limit = typeof plan.limit === "number" ? plan.limit : null;
-      if (used !== null && limit && limit > 0) {
+      const used = asFiniteNumber(plan.used ?? plan.usedAmount);
+      const limit = asFiniteNumber(plan.limit ?? plan.total);
+      if (used !== null && limit !== null && limit > 0) {
         push("monthly", Math.round((used / limit) * 100));
       }
     }
   }
-  if (onDemand && typeof onDemand.used === "number" && typeof onDemand.limit === "number" && onDemand.limit > 0) {
-    push("on-demand", Math.round((onDemand.used / onDemand.limit) * 100));
+  if (onDemand) {
+    const used = asFiniteNumber(onDemand.used ?? onDemand.usedAmount);
+    const limit = asFiniteNumber(onDemand.limit ?? onDemand.total);
+    const percent = asFinitePercent(
+      onDemand.percentUsed ??
+      onDemand.percentage ??
+      onDemand.onDemandPercentUsed ??
+      onDemand.on_demand_percent_used,
+    );
+    if (percent !== null) push("on-demand", percent);
+    else if (used !== null && limit !== null && limit > 0) push("on-demand", Math.round((used / limit) * 100));
   }
   if (!windows.length) return null;
   const extra: Record<string, string | number | null> = {};
-  if (typeof plan?.used === "number") extra.planUsed = plan.used;
-  if (typeof plan?.limit === "number") extra.planLimit = plan.limit;
-  if (typeof onDemand?.used === "number") extra.onDemandUsed = onDemand.used;
+  const planUsed = asFiniteNumber(plan?.used ?? plan?.usedAmount);
+  const planLimit = asFiniteNumber(plan?.limit ?? plan?.total);
+  const onDemandUsed = asFiniteNumber(onDemand?.used ?? onDemand?.usedAmount);
+  const onDemandLimit = asFiniteNumber(onDemand?.limit ?? onDemand?.total);
+  const includedUsed = asFiniteNumber(plan?.used ?? plan?.usedAmount ?? plan?.includedUsed);
+  const includedLimit = asFiniteNumber(plan?.limit ?? plan?.total ?? plan?.includedLimit);
+  if (planUsed !== null) extra.planUsed = planUsed;
+  if (planLimit !== null) extra.planLimit = planLimit;
+  if (onDemandUsed !== null) extra.onDemandUsed = onDemandUsed;
+  if (includedUsed !== null) extra.includedUsed = includedUsed;
+  if (includedLimit !== null) extra.includedLimit = includedLimit;
+  if (onDemandLimit !== null) extra.onDemandLimit = onDemandLimit;
+  const money = [
+    ["onDemandUsedUsd", onDemand?.usedUsd ?? onDemand?.used_usd ?? onDemand?.spend],
+    ["onDemandLimitUsd", onDemand?.limitUsd ?? onDemand?.limit_usd ?? onDemand?.budget],
+  ] as const;
+  for (const [key, value] of money) {
+    const number = asFiniteNumber(value);
+    if (number !== null) extra[key] = number;
+  }
   return {
     windows,
     planLabel: membership ? membership.charAt(0).toUpperCase() + membership.slice(1) : undefined,
@@ -130,13 +223,45 @@ export function parseCursorUsageBody(body: unknown): {
 
 export function matchUsageProvider(
   providers: UsageProvider[],
-  providerId?: string | null,
+  selection?: string | UsageSelection | null,
 ): UsageProvider | null {
-  const key = usageKeyForProvider(providerId);
-  if (!key) return null;
-  const found = providers.find((provider) => provider.key === key);
-  if (!found) return null;
-  if (found.status === "error" || found.status === "no_auth") return null;
-  if (!selectPrimaryUsageWindow(found.windows)) return null;
-  return found;
+  const normalized = typeof selection === "string"
+    ? { providerId: selection }
+    : selection || {};
+  const key = usageKeyForSelection(normalized);
+  const modelKey = normalizedUsageModelId(normalized.modelId);
+  if (normalized.connectionId && modelKey) {
+    const exact = providers.find((provider) =>
+      provider.connectionId === normalized.connectionId &&
+      normalizedUsageModelId(provider.modelId || (typeof provider.extra?.model === "string" ? provider.extra.model : "")) === modelKey,
+    );
+    if (exact) return exact;
+  }
+  if (key && modelKey) {
+    const exact = providers.find((provider) =>
+      provider.key === key &&
+      normalizedUsageModelId(provider.modelId || (typeof provider.extra?.model === "string" ? provider.extra.model : "")) === modelKey,
+    );
+    if (exact) return exact;
+  }
+  if (normalized.connectionId) {
+    const connection = providers.find((provider) => provider.connectionId === normalized.connectionId);
+    if (connection) return connection;
+  }
+  if (key) {
+    const official = providers.find((provider) => provider.key === key);
+    if (official) return official;
+  }
+
+  // If the selected backend has no official percentage/quota API, still expose
+  // Metis' read-only recent telemetry for that exact model. The gauge stays
+  // neutral because this is activity data, not a made-up quota percentage.
+  if (!modelKey) return null;
+  return providers.find((provider) => {
+    if (!provider.key.startsWith("gateway:") && !provider.key.startsWith("local:")) return false;
+    const candidate = normalizedUsageModelId(
+      typeof provider.extra?.model === "string" ? provider.extra.model : provider.key.split(":").slice(2).join(":"),
+    );
+    return candidate === modelKey;
+  }) || null;
 }

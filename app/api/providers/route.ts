@@ -1,3 +1,4 @@
+import { getVerifiedProviderCapabilities } from "@/lib/providers/registry";
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import {
   listProviderConnections,
@@ -18,7 +19,7 @@ function publicProviders() {
     kind: provider.kind,
     authTypes: provider.authTypes,
     defaultBaseUrl: provider.defaultBaseUrl,
-    capabilities: provider.capabilities,
+    capabilities: getVerifiedProviderCapabilities(provider.key)?.verified ?? provider.capabilities,
     models: provider.models,
     setupHint: provider.setupHint,
   }));

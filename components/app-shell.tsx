@@ -12,7 +12,7 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import {
   ArrowUp,
   ArrowDown,
@@ -23,6 +23,7 @@ import {
   MemoryStick,
   Network,
   ArrowLeft,
+  ArrowRight,
   Archive,
   ArchiveRestore,
   Check,
@@ -99,16 +100,32 @@ import {
   type ModelParamSelection,
 } from "@/components/settings-panel";
 import { ThinkingBlock } from "@/components/thinking-block";
-import { ContextUsageCircle, PlanUsageGauge, usePlanUsageSnapshot, usageForSelectedProvider } from "@/components/quota-gauges";
-import { contextWindowForModel, resolveContextTotal } from "@/lib/context-window";
+import { ContextUsageText, PlanUsageGauge, usePlanUsageSnapshot, usageForSelectedProvider } from "@/components/quota-gauges";
+import {
+  contextPressure,
+  contextWindowForModel,
+  contextWindowForSelection,
+  estimateContextTokens,
+  resolveContextTotal,
+} from "@/lib/context-window";
 import { ToolCallGroup, type ToolCallData } from "@/components/tool-call-chip";
-import { layoutAssistantParts, remoteClientHostnameMap } from "@/lib/tool-call-display";
+import { classifyToolKind, layoutAssistantParts, remoteClientHostnameMap, todosFromToolPayload } from "@/lib/tool-call-display";
+import { stripTranscriptDump } from "@/lib/agent-transcript";
+import { planLooksParallelizable } from "@/lib/modes";
 import {
   composerLiveText,
   decideComposerSend,
   isDuplicateComposerSend,
+  shouldAutoDrainQueue,
   shouldIgnoreComposerEnter,
 } from "@/lib/composer-send";
+import { getMetisDeviceId } from "@/lib/metis-device";
+import {
+  clearClientChatSnapshots,
+  deleteClientChatSnapshot,
+  readClientChatSnapshot,
+  writeClientChatSnapshot,
+} from "@/lib/client-chat-cache";
 import {
   installGlobalClientTelemetry,
   reportClientError,
@@ -155,6 +172,7 @@ type RunMetadata = {
   connectionId?: string;
   outputTokens?: number;
   inputTokens?: number;
+  inputTokensEstimated?: boolean;
   totalTokens?: number;
   costUsd?: number;
   completedAt: string;
@@ -174,6 +192,10 @@ function formatMetricBytes(value: number | null | undefined) {
   let unit = 0;
   while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit += 1; }
   return `${amount.toFixed(amount >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatMetricNumber(value: number) {
+  return Math.max(0, Math.round(value)).toLocaleString();
 }
 
 function MetricSparkline({ values, color }: { values: number[]; color: string }) {
@@ -234,6 +256,7 @@ type ToolPart = {
   result?: string;
   subagent?: {
     agentId?: string;
+    chatId?: string;
     title?: string;
     mode?: string;
     model?: string;
@@ -245,6 +268,15 @@ type ToolPart = {
 
 type MsgPart =
   | { type: "thinking"; content: string; done?: boolean; durationMs?: number }
+  | {
+      type: "compaction";
+      status: "started" | "completed" | "error";
+      beforeTokens?: number;
+      targetTokens?: number;
+      afterTokens?: number;
+      removedMessages?: number;
+      message?: string;
+    }
   | ({ type: "tool"; } & ToolPart)
   | { type: "text"; content: string };
 
@@ -279,6 +311,7 @@ type Msg = {
   suggestions?: Suggestion[];
   runMetadata?: RunMetadata;
   references?: ReferenceItem[];
+  serverSequence?: number;
 };
 
 type SourceLink = {
@@ -681,7 +714,7 @@ const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 420;
 const WORKSPACE_WIDTH_STORAGE_KEY = `${clientConfig.storagePrefix}_workspace_width_compact`;
 const WORKSPACE_MIN_WIDTH = 280;
-const WORKSPACE_MAX_WIDTH = 720;
+const WORKSPACE_MAX_WIDTH = 1120;
 const NOTIFICATIONS_STORAGE_KEY = `${clientConfig.storagePrefix}_notifications_enabled`;
 const SOUND_CUES_STORAGE_KEY = `${clientConfig.storagePrefix}_sound_cues_enabled`;
 const FINISH_SOUND_STORAGE_KEY = `${clientConfig.storagePrefix}_finish_sound`;
@@ -739,6 +772,30 @@ function saveFinishSound(sound: FinishSound | null) {
 
 function chatHref(id: string | null): string {
   return id ? `/?c=${encodeURIComponent(id)}` : "/";
+}
+
+async function fetchReadWithRetry(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  maxAttempts = 3,
+): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (init.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    try {
+      const response = await fetch(input, init);
+      // 5xx responses can be transient during a worker/database handoff. GETs
+      // are safe to retry; 4xx responses are semantic and should surface once.
+      if (response.status < 500 || attempt === maxAttempts) return response;
+      try { await response.body?.cancel(); } catch { /* best effort */ }
+    } catch (error) {
+      if ((error as Error)?.name === "AbortError") throw error;
+      lastError = error;
+      if (attempt === maxAttempts) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+  }
+  throw lastError instanceof Error ? lastError : new Error("Read request failed");
 }
 
 async function readJsonResponse<T>(response: Response): Promise<T> {
@@ -873,7 +930,7 @@ function extractMessageSources(message: Msg): SourceLink[] {
 }
 
 function stripAssistantControlBlocks(content: string) {
-  return content
+  return stripTranscriptDump(content)
     .replace(/```sources\s*[\s\S]*?```/gi, "")
     .replace(/```suggestions\s*[\s\S]*?```/gi, "")
     .replace(/```chat(?:\s+[^\n]*)?\s*[\s\S]*?```/gi, "")
@@ -915,25 +972,23 @@ function modelDisplayName(model: ModelInfo) {
   return model.displayName;
 }
 
-function McpSupportIndicator({ providerId }: { providerId?: string }) {
-  if (providerId !== "antigravity") return null;
-  return (
-    <TooltipProvider>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span
-            className="inline-flex size-4 shrink-0 items-center justify-center rounded-full border border-amber-500/40 text-[10px] font-bold text-amber-500"
-            aria-label="MCP tools are not supported for this provider"
-          >
-            !
-          </span>
-        </TooltipTrigger>
-        <TooltipContent>
-          MCP tools are not supported for this provider. Remote clients and MCP actions are unavailable.
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  );
+function contextSelectionLabel(model: ModelInfo, params: ModelParamSelection[]) {
+  const parameter = model.parameters?.find((entry) => entry.id === "context");
+  if (!parameter) return undefined;
+  const value = params.find((entry) => entry.id === "context")?.value
+    || model.defaultParams?.find((entry) => entry.id === "context")?.value;
+  return parameter.values.find((entry) => entry.value === value)?.displayName || value;
+}
+
+function runMatchesModel(
+  run: RunMetadata,
+  selection: { providerKey: string; modelId: string; connectionId?: string },
+) {
+  if (typeof run.modelId !== "string" || !run.modelId) return false;
+  if (run.providerId && run.providerId !== selection.providerKey) return false;
+  if (run.connectionId && run.connectionId !== selection.connectionId) return false;
+  const runModelId = parseModelKey(run.modelId).modelId;
+  return runModelId === selection.modelId || run.modelId === selection.modelId;
 }
 
 type ChatSnapshot = {
@@ -972,6 +1027,64 @@ type BrowserContext = {
   updatedAt: string;
 };
 
+function BrowserAgentCursor({ kind }: { kind: string }) {
+  return (
+    <span className="metis-browser-agent-cursor-shape" data-kind={kind} aria-hidden="true">
+      <svg viewBox="0 0 52 48" role="presentation" focusable="false">
+        <defs>
+          <linearGradient id="metis-browser-cursor-glass" x1="7" y1="4" x2="39" y2="42" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stopColor="rgba(255,255,255,0.76)" />
+            <stop offset="0.35" stopColor="rgba(226,234,239,0.44)" />
+            <stop offset="0.72" stopColor="rgba(151,164,173,0.27)" />
+            <stop offset="1" stopColor="rgba(89,100,108,0.20)" />
+          </linearGradient>
+          <linearGradient id="metis-browser-cursor-edge" x1="5" y1="3" x2="45" y2="40" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stopColor="rgba(255,255,255,0.94)" />
+            <stop offset="0.5" stopColor="rgba(218,228,234,0.48)" />
+            <stop offset="1" stopColor="rgba(101,113,122,0.62)" />
+          </linearGradient>
+          <radialGradient id="metis-browser-cursor-glow" cx="0" cy="0" r="1" gradientTransform="translate(15 11) rotate(44) scale(27 18)" gradientUnits="userSpaceOnUse">
+            <stop stopColor="rgba(255,255,255,0.44)" />
+            <stop offset="1" stopColor="rgba(255,255,255,0)" />
+          </radialGradient>
+        </defs>
+        <path
+          d="M6.2 4.1C3.55 3.48 1.58 6.12 2.63 8.64L15.1 42.18c.93 2.5 4.35 2.73 5.6.37l6.42-12.13c2.53-4.78 6.8-8.4 11.91-10.09l10.12-3.34c2.92-.96 3.02-5.06.16-6.16L6.2 4.1Z"
+          fill="url(#metis-browser-cursor-glass)"
+          stroke="url(#metis-browser-cursor-edge)"
+          strokeWidth="1.15"
+          strokeLinejoin="round"
+        />
+        <path
+          d="M6.8 5.6 18.2 39.4c.45 1.32 2.22 1.46 2.9.24l5.1-9.2c2.75-4.98 7.33-8.72 12.76-10.42l8.57-2.69"
+          fill="none"
+          stroke="rgba(255,255,255,0.32)"
+          strokeWidth="1"
+          strokeLinecap="round"
+        />
+        <path d="M5.2 4.8 48.1 12.4 38.7 16.1 9.6 8.5Z" fill="url(#metis-browser-cursor-glow)" opacity=".72" />
+      </svg>
+      {kind === "click" ? <span className="metis-browser-agent-cursor-click" /> : null}
+      {kind === "scroll" ? <span className="metis-browser-agent-cursor-scroll"><span /></span> : null}
+    </span>
+  );
+}
+
+function fitBrowserFrame(
+  containerWidth: number,
+  containerHeight: number,
+  viewportWidth: number,
+  viewportHeight: number,
+) {
+  if (containerWidth <= 0 || containerHeight <= 0 || viewportWidth <= 0 || viewportHeight <= 0) {
+    return { width: 0, height: 0 };
+  }
+  const scale = Math.min(containerWidth / viewportWidth, containerHeight / viewportHeight);
+  return {
+    width: Math.max(1, Math.floor(viewportWidth * scale)),
+    height: Math.max(1, Math.floor(viewportHeight * scale)),
+  };
+}
 function BrowserTabIcon({ tab }: { tab: BrowserTab }) {
   return (
     <span className="relative size-3.5 shrink-0" aria-hidden="true">
@@ -999,45 +1112,49 @@ type DiffLine = {
 };
 
 function buildDiffLines(before: string, after: string): DiffLine[] {
+  if (before === after) return [];
   const oldLines = before.split("\n");
   const newLines = after.split("\n");
-  const lcs = Array.from(
-    { length: oldLines.length + 1 },
-    () => new Uint32Array(newLines.length + 1),
-  );
-
-  for (let oldIndex = oldLines.length - 1; oldIndex >= 0; oldIndex -= 1) {
-    for (let newIndex = newLines.length - 1; newIndex >= 0; newIndex -= 1) {
-      lcs[oldIndex][newIndex] =
-        oldLines[oldIndex] === newLines[newIndex]
-          ? lcs[oldIndex + 1][newIndex + 1] + 1
-          : Math.max(lcs[oldIndex + 1][newIndex], lcs[oldIndex][newIndex + 1]);
-    }
+  let start = 0;
+  while (start < oldLines.length && start < newLines.length && oldLines[start] === newLines[start]) {
+    start += 1;
+  }
+  let oldEnd = oldLines.length;
+  let newEnd = newLines.length;
+  while (oldEnd > start && newEnd > start && oldLines[oldEnd - 1] === newLines[newEnd - 1]) {
+    oldEnd -= 1;
+    newEnd -= 1;
   }
 
+  const context = 3;
+  const from = Math.max(0, start - context);
+  const toOld = Math.min(oldLines.length, oldEnd + context);
+  const toNew = Math.min(newLines.length, newEnd + context);
   const lines: DiffLine[] = [];
-  let oldIndex = 0;
-  let newIndex = 0;
-  while (oldIndex < oldLines.length || newIndex < newLines.length) {
-    if (
-      oldIndex < oldLines.length &&
-      newIndex < newLines.length &&
-      oldLines[oldIndex] === newLines[newIndex]
-    ) {
-      lines.push({ text: `  ${oldLines[oldIndex]}`, kind: "context" });
-      oldIndex += 1;
-      newIndex += 1;
-    } else if (
-      newIndex < newLines.length &&
-      (oldIndex >= oldLines.length ||
-        lcs[oldIndex][newIndex + 1] >= lcs[oldIndex + 1][newIndex])
-    ) {
-      lines.push({ text: `+ ${newLines[newIndex]}`, kind: "add" });
-      newIndex += 1;
-    } else {
-      lines.push({ text: `- ${oldLines[oldIndex]}`, kind: "remove" });
-      oldIndex += 1;
+  for (let index = from; index < start; index += 1) {
+    lines.push({ text: `  ${oldLines[index]}`, kind: "context" });
+  }
+
+  const maxChangedLines = 300;
+  const removed = oldLines.slice(start, oldEnd);
+  const added = newLines.slice(start, newEnd);
+  const appendBounded = (values: string[], kind: "add" | "remove", prefix: string) => {
+    if (values.length <= maxChangedLines) {
+      for (const value of values) lines.push({ text: `${prefix}${value}`, kind });
+      return;
     }
+    const head = Math.floor(maxChangedLines * 0.6);
+    const tail = maxChangedLines - head;
+    for (const value of values.slice(0, head)) lines.push({ text: `${prefix}${value}`, kind });
+    lines.push({ text: `  … ${values.length - maxChangedLines} changed lines omitted …`, kind: "context" });
+    for (const value of values.slice(-tail)) lines.push({ text: `${prefix}${value}`, kind });
+  };
+  appendBounded(removed, "remove", "- ");
+  appendBounded(added, "add", "+ ");
+
+  const sharedTail = Math.min(toOld - oldEnd, toNew - newEnd);
+  for (let offset = 0; offset < sharedTail; offset += 1) {
+    lines.push({ text: `  ${oldLines[oldEnd + offset]}`, kind: "context" });
   }
   return lines;
 }
@@ -1046,8 +1163,8 @@ function DiffViewer({ active }: { active: ActiveDiff }) {
   const before = active.diff?.before ?? "";
   const after = active.diff?.after ?? "";
   const lines = buildDiffLines(before, after);
-  let additions = lines.filter((line) => line.kind === "add").length;
-  let deletions = lines.filter((line) => line.kind === "remove").length;
+  let additions = active.diff?.additions ?? lines.filter((line) => line.kind === "add").length;
+  let deletions = active.diff?.deletions ?? lines.filter((line) => line.kind === "remove").length;
   if (!additions && !deletions && active.input) {
     try {
       const parsed = JSON.parse(active.input) as {
@@ -1318,6 +1435,12 @@ function mapApiMessages(
       (m.id === latestAssistantId || /^⚠\s*/.test(m.content))
       ? m.content.replace(/^⚠\s*/, "").trim() || "Agent run failed."
       : "";
+    const toolsById = new Map((m.tools || []).map((tool) => [tool.id, tool]));
+    const persistedParts = (m.parts as MsgPart[] | undefined)?.map((part) => {
+      if (part.type !== "tool") return part;
+      const fullTool = toolsById.get(part.id);
+      return fullTool ? { ...fullTool, ...part, type: "tool" as const } : part;
+    });
     const base = {
       id: m.id,
       role: m.role,
@@ -1328,7 +1451,7 @@ function mapApiMessages(
       thinking: m.thinking,
       thinkingDone: Boolean(m.thinking),
       tools: m.tools,
-      parts: m.parts as MsgPart[] | undefined,
+      parts: persistedParts,
       references: m.references,
       suggestions: normalizeSuggestions(m.suggestions),
       runMetadata: m.runMetadata,
@@ -1367,6 +1490,8 @@ function mergeMessages(current: Msg[], incoming: Msg[]): Msg[] {
     byId.set(message.id, message);
   });
   return [...byId.values()].sort((a, b) => {
+    const sequenceOrder = (a.serverSequence || 0) - (b.serverSequence || 0);
+    if (sequenceOrder) return sequenceOrder;
     const createdAtOrder = (a.createdAt || "").localeCompare(b.createdAt || "");
     return createdAtOrder || (order.get(a.id) || 0) - (order.get(b.id) || 0);
   });
@@ -1607,7 +1732,6 @@ function FileShareEmbed({
 }
 
 export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const routeChatId = searchParams.get("c");
   const routeView = searchParams.get("view");
@@ -1622,6 +1746,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [authError, setAuthError] = useState("");
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const workspaceDefaultCwd = status?.agentCwd?.trim() || defaultCwd.trim() || clientConfig.defaultCwd;
+  const chatCacheScope = status?.agentCwd?.trim() || clientConfig.storagePrefix;
 
   const [chats, setChats] = useState<ChatIndexEntry[]>([]);
   const [chatsLoaded, setChatsLoaded] = useState(false);
@@ -1696,20 +1821,22 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   ]);
   const [activeBrowserTabId, setActiveBrowserTabId] = useState("browser-1");
   const [browserLoading, setBrowserLoading] = useState(false);
-  const sendInFlightRef = useRef(false);
+  const sendInFlightKeysRef = useRef<Set<string>>(new Set());
+  const buildPlanInFlightRef = useRef(false);
+  const creatingChatRef = useRef<Promise<string | null> | null>(null);
+  const [sendLockTick, setSendLockTick] = useState(0);
   const lastSendFingerprintRef = useRef<{ text: string; at: number }>({ text: "", at: 0 });
-  const [agentBrowserActivity, setAgentBrowserActivity] = useState<Array<{ action: string; url: string; ts: number }>>([]);
-  const agentBrowserActiveRef = useRef(false);
-  const [agentPointer, setAgentPointer] = useState<{ x: number; y: number; kind: string; detail?: string; ts: number } | null>(null);
-  const [browserFollowAgent, setBrowserFollowAgent] = useState(true);
-  const browserFollowAgentRef = useRef(true);
   const [browserHistory, setBrowserHistory] = useState<Array<{ id: number; url: string; title: string | null; ts: number }>>([]);
+  const [agentPointer, setAgentPointer] = useState<{ x: number; y: number; kind: string; ts: number } | null>(null);
+  const agentPointerHideTimerRef = useRef<number | null>(null);
   const [browserHistoryOpen, setBrowserHistoryOpen] = useState(false);
   const [browserError, setBrowserError] = useState("");
   const [browserViewport, setBrowserViewport] = useState({ width: 1280, height: 800 });
+  const [browserFrameSize, setBrowserFrameSize] = useState({ width: 0, height: 0 });
   const [browserWidthInput, setBrowserWidthInput] = useState("1280");
   const [browserHeightInput, setBrowserHeightInput] = useState("800");
   const [browserRealtime, setBrowserRealtime] = useState(true);
+  const [browserEnabled, setBrowserEnabled] = useState(true);
   const [compressionEnabled, setCompressionEnabled] = useState(false);
   const [compressionMode, setCompressionMode] = useState<"lite" | "standard" | "aggressive" | "ultra" | "rtk" | "stacked">("stacked");
   const [compressionToolResults, setCompressionToolResults] = useState(true);
@@ -1730,10 +1857,17 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [monitorData, setMonitorData] = useState<MonitorPayload>({ current: null, history: [] });
   const browserSocketRef = useRef<WebSocket | null>(null);
   const browserStreamObjectUrlRef = useRef<string | null>(null);
-  const browserLastFrameAtRef = useRef(0);
   const browserViewportRef = useRef<HTMLDivElement | null>(null);
   const browserScreenshotRef = useRef<HTMLImageElement | null>(null);
   const browserScreenshotPlaceholderRef = useRef<HTMLDivElement | null>(null);
+  const browserPointerGestureRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+    startedAt: number;
+  } | null>(null);
   const browserInputDirtyRef = useRef(false);
   const browserNavigationVersionRef = useRef(0);
   const [workspaceWidth, setWorkspaceWidth] = useState(() => {
@@ -1760,9 +1894,9 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [editValue, setEditValue] = useState("");
 
   const [input, setInput] = useState("");
-  const setInputGuarded = useCallback((value: string) => {
+  const setInputGuarded = useCallback((value: string, reason?: "submitted" | "queued") => {
     setInput((prev) => {
-      if (prev && !value) {
+      if (prev && !value && !reason) {
         reportUxEvent("composer_reset_while_nonempty", {
           prevLength: prev.length,
           busy: busyRef.current,
@@ -1870,8 +2004,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   useEffect(() => {
     if (typeof window === "undefined" || window.innerWidth < 768) return;
     const syncSidebarForWorkspace = () => {
+      const browserWidth = Math.min(1040, Math.max(workspaceWidth, window.innerWidth * 0.68));
+      const effectiveWorkspaceWidth = workspaceTab === "browser" ? browserWidth : workspaceWidth;
       const needsSpace = workspaceOpen && !workspaceFullscreen &&
-        window.innerWidth < sidebarWidth + workspaceWidth + 640;
+        window.innerWidth < sidebarWidth + effectiveWorkspaceWidth + 640;
       if (needsSpace && desktopSidebarOpen) {
         workspaceAutoCollapsedSidebarRef.current = true;
         setDesktopSidebarOpen(false);
@@ -1883,7 +2019,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     syncSidebarForWorkspace();
     window.addEventListener("resize", syncSidebarForWorkspace);
     return () => window.removeEventListener("resize", syncSidebarForWorkspace);
-  }, [desktopSidebarOpen, sidebarWidth, workspaceFullscreen, workspaceOpen, workspaceWidth]);
+  }, [desktopSidebarOpen, sidebarWidth, workspaceFullscreen, workspaceOpen, workspaceTab, workspaceWidth]);
 
   useEffect(() => {
     if (desktopSidebarOpen) {
@@ -1919,6 +2055,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const activeChatIdRef = useRef<string | null>(null);
   const activeBrowserTabIdRef = useRef("browser-1");
   const chatCacheRef = useRef<Map<string, ChatSnapshot>>(new Map());
+  const chatPrefetchInFlightRef = useRef<Set<string>>(new Set());
   const loadedChatIdsRef = useRef<Set<string>>(new Set());
   const serverSnapshotVersionRef = useRef<Map<string, string>>(new Map());
   const pendingFilesRef = useRef<PendingFile[]>([]);
@@ -1926,7 +2063,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const pendingQuestionIdRef = useRef<string | null>(null);
   const draftInputRef = useRef("");
   const draftInputLoadedRef = useRef(false);
-  const notifiedPlanRef = useRef<string | null>(null);
+  const notifiedPlanRef = useRef<Set<string>>(new Set());
   const swipeRef = useRef<{ x: number; y: number; ignored: boolean } | null>(null);
   const chatLoadRequestRef = useRef(0);
   const chatLoadAbortRef = useRef<AbortController | null>(null);
@@ -1943,6 +2080,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     defaultModelId,
     defaultModelParams,
     modelParams,
+    modeId,
     queuedMessages,
     workspaces,
     browserTabs,
@@ -2159,6 +2297,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       defaultModelId,
       defaultModelParams,
       modelParams,
+      modeId,
       queuedMessages,
       workspaces,
       browserTabs,
@@ -2183,6 +2322,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     defaultModelId,
     defaultModelParams,
     modelParams,
+    modeId,
     queuedMessages,
     workspaces,
     browserTabs,
@@ -2425,6 +2565,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         activeWorkspaceId: s.activeWorkspaceId,
         workspaceOpen: s.workspaceOpen,
         workspaceWidth: s.workspaceWidth,
+        modeId: s.modeId,
       },
       messageOffset: 0,
       hasEarlierMessages: s.hasEarlierMessages || s.messages.length > cachedMessages.length,
@@ -2455,6 +2596,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           activeWorkspaceId: s.activeWorkspaceId,
           workspaceOpen: s.workspaceOpen,
           workspaceWidth: s.workspaceWidth,
+          modeId: s.modeId,
         },
       }),
     });
@@ -2463,10 +2605,13 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const navigateChat = useCallback(
     (id: string | null, replace = false) => {
       const href = chatHref(id);
-      if (replace) router.replace(href, { scroll: false });
-      else router.push(href, { scroll: false });
+      // Chat/view switches only change the query string. Using the native
+      // History API keeps this an instant SPA state change instead of asking
+      // the App Router to perform a navigation that can race local chat state.
+      if (replace) window.history.replaceState(null, "", href);
+      else window.history.pushState(null, "", href);
     },
-    [router],
+    [],
   );
 
   const isDraft = !activeChatId;
@@ -2637,7 +2782,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       const data = await readJsonResponse<{ error?: string; screenshot?: string; url?: string; tabId?: string; tabs?: BrowserTab[]; viewport?: { width: number; height: number } }>(response);
       if (!response.ok) throw new Error(data.error || "Browser action failed");
       if (activeChatIdRef.current !== chatId) return null;
-      if (data.screenshot) showBrowserScreenshot(`data:image/png;base64,${data.screenshot}`);
+      if (data.screenshot) showBrowserScreenshot(`data:image/jpeg;base64,${data.screenshot}`);
       if (data.tabs) setBrowserTabs(data.tabs);
       if (data.tabId) setActiveBrowserTabId(data.tabId);
       if (data.viewport) {
@@ -2667,7 +2812,14 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   function navigateBrowser(url: string) {
     const rawUrl = url.trim();
     if (!rawUrl) return;
-    const nextUrl = /^[a-z][a-z\d+.-]*:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+    const explicitScheme = /^[a-z][a-z\d+.-]*:\/\//i.test(rawUrl);
+    const looksLikeHost = /^(localhost|(?:\d{1,3}\.){3}\d{1,3}|[^\s]+\.[^\s]+)(?::\d+)?(?:[/?#].*)?$/i.test(rawUrl);
+    const nextUrl = explicitScheme
+      ? rawUrl
+      : looksLikeHost
+        ? `${/^(localhost|(?:\d{1,3}\.){3}\d{1,3})(?::|\/|$)/i.test(rawUrl) ? "http" : "https"}://${rawUrl}`
+        : `https://www.google.com/search?q=${encodeURIComponent(rawUrl)}`;
+    browserInputDirtyRef.current = false;
     browserNavigationVersionRef.current += 1;
     setBrowserError("");
     if (!sendBrowserStreamAction("navigate", { url: nextUrl })) {
@@ -2706,13 +2858,61 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     window.open(url, "_blank", "noopener,noreferrer");
   }
 
-  function clickBrowserScreenshot(event: ReactPointerEvent<HTMLImageElement>) {
+  function clickBrowserAt(element: HTMLImageElement, clientX: number, clientY: number) {
     if (!browserScreenshotRef.current?.src) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    const x = ((event.clientX - rect.left) / rect.width) * browserViewport.width;
-    const y = ((event.clientY - rect.top) / rect.height) * browserViewport.height;
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const x = Math.max(0, Math.min(browserViewport.width, ((clientX - rect.left) / rect.width) * browserViewport.width));
+    const y = Math.max(0, Math.min(browserViewport.height, ((clientY - rect.top) / rect.height) * browserViewport.height));
     browserViewportRef.current?.focus();
     if (!sendBrowserStreamAction("click", { x, y })) void performBrowserAction("click", { x, y });
+  }
+
+  function beginBrowserPointer(event: ReactPointerEvent<HTMLImageElement>) {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    browserPointerGestureRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      startedAt: Date.now(),
+    };
+  }
+
+  function moveBrowserPointer(event: ReactPointerEvent<HTMLImageElement>) {
+    const gesture = browserPointerGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    gesture.lastX = event.clientX;
+    gesture.lastY = event.clientY;
+  }
+
+  function endBrowserPointer(event: ReactPointerEvent<HTMLImageElement>) {
+    const gesture = browserPointerGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    browserPointerGestureRef.current = null;
+    const dx = event.clientX - gesture.startX;
+    const dy = event.clientY - gesture.startY;
+    const distance = Math.hypot(dx, dy);
+    const elapsed = Date.now() - gesture.startedAt;
+
+    // A short tap is a page click. A swipe scrolls the remote page. This keeps
+    // the same direct manipulation model on mouse, iPad, and phones.
+    if (distance < 9 && elapsed < 700) {
+      clickBrowserAt(event.currentTarget, event.clientX, event.clientY);
+      return;
+    }
+    if (Math.abs(dy) >= 7) {
+      const rect = event.currentTarget.getBoundingClientRect();
+      const viewportDelta = rect.height > 0
+        ? (gesture.startY - event.clientY) * (browserViewport.height / rect.height)
+        : (gesture.startY - event.clientY);
+      const deltaY = Math.max(-1600, Math.min(1600, viewportDelta));
+      if (!sendBrowserStreamAction("scroll", { deltaY })) void performBrowserAction("scroll", { deltaY });
+    }
   }
 
   function pressBrowserKey(event: KeyboardEvent<HTMLDivElement>) {
@@ -2740,18 +2940,20 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   }
 
   useEffect(() => {
-    if (workspaceTab !== "browser" || !activeChatId || loadingChatId) return;
+    if (workspaceTab !== "browser" || !browserEnabled || !activeChatId || loadingChatId) return;
     let reconnectTimer: number | null = null;
     let disposed = false;
+    const screenshotNode = browserScreenshotRef.current;
+    const placeholderNode = browserScreenshotPlaceholderRef.current;
     const connect = () => {
       if (disposed) return;
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const query = new URLSearchParams({
         chatId: activeChatId,
         tabId: activeBrowserTabId,
-        fps: String(browserFps),
         quality: "70",
         realtime: browserRealtime ? "1" : "0",
+        fps: String(browserFps),
         width: String(browserDefaultViewport.width),
         height: String(browserDefaultViewport.height),
       });
@@ -2781,7 +2983,6 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         }
         const blob = event.data instanceof Blob ? event.data : new Blob([event.data], { type: "image/jpeg" });
         showBrowserStreamFrame(blob);
-        browserLastFrameAtRef.current = Date.now();
       };
       socket.onclose = () => {
         if (browserSocketRef.current === socket) browserSocketRef.current = null;
@@ -2789,99 +2990,119 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       };
     };
     connect();
-    let fallbackRequestPending = false;
-    const fallbackTimer = window.setInterval(() => {
-      if (!browserRealtime || !activeChatId || loadingChatId) return;
-      const socket = browserSocketRef.current;
-      const frameIsFresh = Date.now() - browserLastFrameAtRef.current < 2500;
-      if (socket?.readyState === WebSocket.OPEN && frameIsFresh) return;
-      if (fallbackRequestPending) return;
-      fallbackRequestPending = true;
-      void fetch(
-        `/api/browser?chatId=${encodeURIComponent(activeChatId)}&tabId=${encodeURIComponent(activeBrowserTabId)}&action=screenshot&format=image`,
-        { cache: "no-store" },
-      )
-        .then((response) => (response.ok ? response.blob() : null))
-        .then((blob) => {
-          if (!blob || disposed) return;
-          showBrowserStreamFrame(blob);
-          browserLastFrameAtRef.current = Date.now();
-        })
-        .catch(() => undefined)
-        .finally(() => {
-          fallbackRequestPending = false;
-        });
-    }, 1000);
     return () => {
       disposed = true;
-      window.clearInterval(fallbackTimer);
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
       if (browserSocketRef.current) browserSocketRef.current.close();
       browserSocketRef.current = null;
       if (browserStreamObjectUrlRef.current) URL.revokeObjectURL(browserStreamObjectUrlRef.current);
       browserStreamObjectUrlRef.current = null;
-      if (browserScreenshotRef.current) {
-        browserScreenshotRef.current.removeAttribute("src");
-        browserScreenshotRef.current.style.display = "none";
+      if (screenshotNode) {
+        screenshotNode.removeAttribute("src");
+        screenshotNode.style.display = "none";
       }
-      if (browserScreenshotPlaceholderRef.current) {
-        browserScreenshotPlaceholderRef.current.style.display = "flex";
-      }
+      if (placeholderNode) placeholderNode.style.display = "flex";
     };
-  // The stream intentionally follows the active browser tab.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceTab, activeChatId, activeBrowserTabId, browserRealtime, browserFps, browserDefaultViewport, loadingChatId]);
+  }, [workspaceTab, activeChatId, activeBrowserTabId, browserDefaultViewport, loadingChatId, browserEnabled, browserRealtime, browserFps]);
 
-  // Live feed of agent browser activity: appends to the activity log and
-  // auto-opens the workspace browser tab when the agent starts browsing.
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const source = new EventSource("/api/browser/live");
+    if (workspaceTab !== "browser") return;
+    const node = browserViewportRef.current;
+    if (!node) return;
+
+    const update = () => {
+      const rect = node.getBoundingClientRect();
+      const next = fitBrowserFrame(
+        rect.width,
+        rect.height,
+        browserViewport.width,
+        browserViewport.height,
+      );
+      setBrowserFrameSize((current) =>
+        current.width === next.width && current.height === next.height ? current : next,
+      );
+    };
+
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    window.addEventListener("resize", update);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", update);
+    };
+  }, [browserViewport.height, browserViewport.width, workspaceFullscreen, workspaceTab, workspaceWidth]);
+
+  // Subscribe only while the current chat has a genuinely active run. Browser
+  // events from paused/waiting/completed runs and other chats must never move the UI.
+  const activeBrowserAgentRun = Boolean(
+    activeChatId &&
+      !chats.some((chat) =>
+        chat.id === activeChatId &&
+        ["paused", "waiting_input", "waiting_for_user", "completed", "cancelled", "failed", "interrupted", "error"].includes(chat.runStatus || ""),
+      ) &&
+      (busy || runningChatIds.includes(activeChatId) || chats.some((chat) => chat.id === activeChatId && chat.runStatus === "running")),
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !browserEnabled || !activeChatId || !activeBrowserAgentRun) return;
+    const chatId = activeChatId;
+    const source = new EventSource(`/api/browser/live?chatId=${encodeURIComponent(chatId)}`);
     source.onmessage = (event) => {
       try {
-        const data = JSON.parse(event.data) as { type?: string; action?: string; url?: string; ts?: number; tabId?: string; x?: number; y?: number; pointerKind?: string; detail?: string };
-        if (data.type === "action" || data.type === "navigation") {
-          const entry = { action: data.action || data.type || "", url: data.url || "", ts: data.ts || Date.now() };
-          agentBrowserActiveRef.current = true;
-          setAgentBrowserActivity((current) => [...current.slice(-49), entry]);
+        const data = JSON.parse(event.data) as {
+          type?: string; source?: string; action?: string; url?: string; ts?: number; tabId?: string;
+          x?: number; y?: number; pointerKind?: string;
+        };
+        if (data.source !== "agent") return;
+        if (data.type === "pointer" && typeof data.x === "number" && typeof data.y === "number") {
           setWorkspaceOpen(true);
           setWorkspaceTab("browser");
-          if (browserFollowAgentRef.current && data.tabId && data.tabId !== activeBrowserTabIdRef.current) {
-            setActiveBrowserTabId(data.tabId);
-          }
-          if (data.type === "navigation" && activeChatIdRef.current) {
-            void fetch(`/api/browser/history?chatId=${encodeURIComponent(activeChatIdRef.current)}`)
-              .then((r) => (r.ok ? r.json() : null))
-              .then((d) => { if (d?.history) setBrowserHistory(d.history); })
-              .catch(() => undefined);
-          }
-        } else if (data.type === "pointer" && typeof data.x === "number" && typeof data.y === "number") {
-          setAgentPointer({ x: data.x, y: data.y, kind: data.pointerKind || "click", detail: data.detail, ts: data.ts || Date.now() });
-          if (browserFollowAgentRef.current) {
-            setWorkspaceOpen(true);
-            setWorkspaceTab("browser");
-          }
+          setAgentPointer({
+            x: Math.max(0, Math.min(1, data.x)),
+            y: Math.max(0, Math.min(1, data.y)),
+            kind: data.pointerKind || "move",
+            ts: data.ts || Date.now(),
+          });
+          if (agentPointerHideTimerRef.current) window.clearTimeout(agentPointerHideTimerRef.current);
+          agentPointerHideTimerRef.current = window.setTimeout(() => {
+            setAgentPointer(null);
+            agentPointerHideTimerRef.current = null;
+          }, 1350);
+          return;
+        }
+        if (data.type !== "action" && data.type !== "navigation") return;
+        // The event itself is proof that the active run is using the browser now.
+        // No follow mode: the browser simply mirrors that one active run.
+        setWorkspaceOpen(true);
+        setWorkspaceTab("browser");
+        if (data.tabId && data.tabId !== activeBrowserTabIdRef.current) setActiveBrowserTabId(data.tabId);
+        if (data.type === "navigation") {
+          void fetch(`/api/browser/history?chatId=${encodeURIComponent(chatId)}`)
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d) => { if (d?.history) setBrowserHistory(d.history); })
+            .catch(() => undefined);
         }
       } catch { /* ignore malformed */ }
     };
-    return () => source.close();
-  }, []);
-
-  // Fade the agent pointer overlay out after 1.2s.
-  useEffect(() => {
-    if (!agentPointer) return;
-    const timer = window.setTimeout(() => setAgentPointer(null), 1200);
-    return () => window.clearTimeout(timer);
-  }, [agentPointer]);
+    return () => {
+      source.close();
+      if (agentPointerHideTimerRef.current) {
+        window.clearTimeout(agentPointerHideTimerRef.current);
+        agentPointerHideTimerRef.current = null;
+      }
+      setAgentPointer(null);
+    };
+  }, [activeBrowserAgentRun, activeChatId, browserEnabled]);
 
   // Load persisted navigation history when the browser workspace tab opens.
   useEffect(() => {
-    if (workspaceTab !== "browser" || !activeChatId) return;
+    if (workspaceTab !== "browser" || !browserEnabled || !activeChatId) return;
     void fetch(`/api/browser/history?chatId=${encodeURIComponent(activeChatId)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => { if (d?.history) setBrowserHistory(d.history); })
       .catch(() => undefined);
-  }, [workspaceTab, activeChatId]);
+  }, [workspaceTab, activeChatId, browserEnabled]);
 
   useEffect(() => {
     if (workspaceTab !== "monitor") return;
@@ -3019,8 +3240,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
 
   const loadChats = useCallback(async () => {
     try {
-      const res = await fetch("/api/chats", { cache: "no-store" });
-      if (!res.ok) return;
+      const res = await fetchReadWithRetry("/api/chats", { cache: "no-store" });
+      if (!res.ok) throw new Error("Failed to load chats");
       const data = (await res.json()) as { chats: ChatIndexEntry[] };
       setChats(data.chats);
       const serverUnreadIds = data.chats
@@ -3058,6 +3279,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           : `${question.questions.length} questions need your input.`;
         notifyAttention(chat.id, question.questionId, body);
       }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to load chats");
     } finally {
       setChatsLoaded(true);
     }
@@ -3111,16 +3334,17 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   }
 
   const loadModels = useCallback(async () => {
-    const res = await fetch("/api/models", { cache: "no-store" });
-    if (!res.ok) return;
-    const data = (await res.json()) as {
+    try {
+      const res = await fetch("/api/models", { cache: "no-store" });
+      if (!res.ok) throw new Error("Failed to load models");
+      const data = (await res.json()) as {
       models: ModelInfo[];
       defaultModelId?: string;
       providers?: ConfiguredModelProvider[];
-    };
-    setModels(data.models);
-    setConfiguredModelProviders(data.providers || []);
-    setModelsLoaded(true);
+      };
+      setModels(data.models);
+      setConfiguredModelProviders(data.providers || []);
+      setModelsLoaded(true);
 
     const savedModel =
       typeof window !== "undefined"
@@ -3149,7 +3373,11 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     const filtered = (savedParams ?? []).filter((p) => allowed.has(p.id));
     const nextParams = filtered.length > 0 ? filtered : meta?.defaultParams ?? [];
     setDefaultModelParams((current) => current.length ? current : nextParams);
-    if (!activeChatIdRef.current) setModelParams(nextParams);
+      if (!activeChatIdRef.current) setModelParams(nextParams);
+    } catch (error) {
+      setModelsLoaded(true);
+      toast.error(error instanceof Error ? error.message : "Failed to load models");
+    }
   }, []);
 
   useEffect(() => {
@@ -3168,7 +3396,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           favoriteModelKeys?: string[];
           modelAliases?: Record<string, string>;
           browserRealtime?: boolean;
-          browserFollowAgent?: boolean;
+          featureFlags?: { browser?: boolean };
           browserFps?: number;
           browserViewportWidth?: number;
           browserViewportHeight?: number;
@@ -3222,9 +3450,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         if (typeof settings.browserRealtime === "boolean") {
           setBrowserRealtime(settings.browserRealtime);
         }
-        if (typeof settings.browserFollowAgent === "boolean") {
-          setBrowserFollowAgent(settings.browserFollowAgent);
-          browserFollowAgentRef.current = settings.browserFollowAgent;
+        if (typeof settings.featureFlags?.browser === "boolean") {
+          setBrowserEnabled(settings.featureFlags.browser);
         }
         if (settings.compression) {
           setCompressionEnabled(Boolean(settings.compression.enabled));
@@ -3346,17 +3573,19 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   }
 
   function updateBrowserSettings(next: {
+    browserEnabled?: boolean;
     browserRealtime?: boolean;
     browserFps?: number;
     browserViewportWidth?: number;
     browserViewportHeight?: number;
-    browserFollowAgent?: boolean;
   }) {
-    if (next.browserRealtime !== undefined) setBrowserRealtime(next.browserRealtime);
-    if (next.browserFollowAgent !== undefined) {
-      setBrowserFollowAgent(next.browserFollowAgent);
-      browserFollowAgentRef.current = next.browserFollowAgent;
+    if (next.browserEnabled !== undefined) {
+      setBrowserEnabled(next.browserEnabled);
+      if (!next.browserEnabled && workspaceTab === "browser") {
+        setWorkspaceTab("plan");
+      }
     }
+    if (next.browserRealtime !== undefined) setBrowserRealtime(next.browserRealtime);
     if (next.browserFps !== undefined) setBrowserFps(next.browserFps);
     if (next.browserViewportWidth !== undefined || next.browserViewportHeight !== undefined) {
       setBrowserDefaultViewport((current) => ({
@@ -3367,7 +3596,12 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     void fetch("/api/preferences", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(next),
+      body: JSON.stringify({
+        ...next,
+        ...(next.browserEnabled !== undefined
+          ? { featureFlags: { browser: next.browserEnabled } }
+          : {}),
+      }),
     });
   }
 
@@ -3589,6 +3823,47 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     [activeChatIncognito, navigateChat, persistActiveSnapshot],
   );
 
+  const prefetchChat = useCallback(async (id: string) => {
+    if (!id || activeChatIdRef.current === id || chatCacheRef.current.has(id) || chatPrefetchInFlightRef.current.has(id)) return;
+    chatPrefetchInFlightRef.current.add(id);
+    try {
+      const diskCached = await readClientChatSnapshot<ChatSnapshot>(chatCacheScope, id);
+      if (diskCached?.messages?.length) {
+        chatCacheRef.current.set(id, diskCached);
+        return;
+      }
+      const res = await fetchReadWithRetry(`/api/chats/${id}?messageLimit=${CHAT_MESSAGE_LOAD_LIMIT}&messageOffset=0`, { cache: "no-store" });
+      if (!res.ok || activeChatIdRef.current === id) return;
+      const data = (await res.json()) as ChatPage;
+      const mid = data.chat.modelId || localStorage.getItem(MODEL_STORAGE_KEY) || "";
+      const snap: ChatSnapshot = {
+        messages: mapApiMessages(data.chat.messages, data.chat.runStatus),
+        chatTitle: data.chat.title,
+        incognito: Boolean(data.chat.incognito),
+        updatedAt: data.chat.updatedAt,
+        agentId: data.chat.agentId,
+        modelId: mid,
+        modelParams: Array.isArray(data.chat.modelParams) ? data.chat.modelParams : [],
+        queuedMessages: Array.isArray(data.chat.queuedMessages) ? data.chat.queuedMessages : [],
+        workspaces: workspacesFromChat(data.chat),
+        browserContext: normalizeBrowserContext(data.chat.browserContext, data.chat.id),
+        sessionState: data.chat.sessionState || {},
+        runStatus: data.chat.runStatus,
+        queueMessage: data.chat.queueMessage,
+        pendingQuestion: data.chat.pendingQuestion,
+        messageOffset: data.messageOffset ?? 0,
+        hasEarlierMessages: Boolean(data.hasEarlierMessages),
+      };
+      if (snap.incognito) return;
+      chatCacheRef.current.set(id, snap);
+      void writeClientChatSnapshot(chatCacheScope, id, snap);
+    } catch {
+      // Prefetch is opportunistic; normal chat loading remains the fallback.
+    } finally {
+      chatPrefetchInFlightRef.current.delete(id);
+    }
+  }, [chatCacheScope]);
+
   const loadChat = useCallback(
     async (id: string, opts?: { skipNav?: boolean; forceReload?: boolean }) => {
       setNotesOpen(false);
@@ -3614,7 +3889,21 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       chatLoadAbortRef.current = controller;
       const requestId = ++chatLoadRequestRef.current;
       clearUnread(id);
-      const cached = chatCacheRef.current.get(id);
+      let cached = chatCacheRef.current.get(id);
+      if (!cached && !opts?.forceReload && !activeChatIncognito) {
+        const diskCached = await Promise.race([
+          readClientChatSnapshot<ChatSnapshot>(chatCacheScope, id),
+          new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 75)),
+        ]);
+        if (
+          diskCached?.messages?.length &&
+          activeChatIdRef.current === id &&
+          chatLoadRequestRef.current === requestId
+        ) {
+          cached = diskCached;
+          chatCacheRef.current.set(id, diskCached);
+        }
+      }
       const hasUsableCachedMessages = Boolean(cached?.messages.length);
       if (
         alreadyActive &&
@@ -3665,7 +3954,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         // Soft revalidate in background without clearing UI
         void (async () => {
           try {
-            const res = await fetch(
+            const res = await fetchReadWithRetry(
               `/api/chats/${id}?messageLimit=${CHAT_MESSAGE_LOAD_LIMIT}&messageOffset=0`,
               { cache: "no-store", signal: controller.signal },
             );
@@ -3690,7 +3979,9 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               modelParams: Array.isArray(data.chat.modelParams)
                 ? data.chat.modelParams
                 : cached.modelParams,
-              queuedMessages: cached.queuedMessages,
+              queuedMessages: Array.isArray(data.chat.queuedMessages)
+                ? data.chat.queuedMessages
+                : [],
               workspaces: workspacesFromChat(data.chat),
               browserContext: normalizeBrowserContext(data.chat.browserContext, id),
               sessionState: data.chat.sessionState || cached.sessionState,
@@ -3701,6 +3992,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               hasEarlierMessages: Boolean(data.hasEarlierMessages),
             };
             chatCacheRef.current.set(id, next);
+            void writeClientChatSnapshot(chatCacheScope, id, next);
             if (
               activeChatIdRef.current !== id ||
               chatLoadRequestRef.current !== requestId
@@ -3764,7 +4056,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       }
 
       try {
-        const res = await fetch(
+        const res = await fetchReadWithRetry(
           `/api/chats/${id}?messageLimit=${CHAT_MESSAGE_LOAD_LIMIT}&messageOffset=0`,
           { cache: "no-store", signal: controller.signal },
         );
@@ -3804,6 +4096,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         hasEarlierMessages: Boolean(data.hasEarlierMessages),
       };
       chatCacheRef.current.set(data.chat.id, snap);
+      if (!snap.incognito) void writeClientChatSnapshot(chatCacheScope, data.chat.id, snap);
       applySnapshot(data.chat.id, snap);
       setLoadingChatId(null);
       return true;
@@ -3817,8 +4110,16 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         }
       }
     },
-    [acceptServerSnapshot, activeChatIncognito, applySnapshot, clearUnread, modelParamsByModel, navigateChat, persistActiveSnapshot],
+    [acceptServerSnapshot, activeChatIncognito, applySnapshot, chatCacheScope, clearUnread, modelParamsByModel, navigateChat, persistActiveSnapshot],
   );
+
+  useEffect(() => {
+    if (!chatsLoaded || !chats.length) return;
+    const timer = window.setTimeout(() => {
+      for (const chat of chats.slice(0, 3)) void prefetchChat(chat.id);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [chats, chatsLoaded, prefetchChat]);
 
   const loadEarlierMessages = useCallback(async () => {
     const id = activeChatIdRef.current;
@@ -3828,7 +4129,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     setLoadingEarlierMessages(true);
     try {
       const nextOffset = messageOffset + CHAT_MESSAGE_LOAD_LIMIT;
-      const res = await fetch(
+      const res = await fetchReadWithRetry(
         `/api/chats/${id}?messageLimit=${CHAT_MESSAGE_LOAD_LIMIT}&messageOffset=${nextOffset}`,
         { cache: "no-store" },
       );
@@ -3863,7 +4164,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           ? scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight < 48
           : false;
         try {
-          const res = await fetch(
+          const res = await fetchReadWithRetry(
             `/api/chats/${activeChatId}?messageLimit=${CHAT_MESSAGE_LOAD_LIMIT}&messageOffset=${nextOffset}`,
             { cache: "no-store" },
           );
@@ -3997,7 +4298,6 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     });
     setModelId(nextId);
     localStorage.setItem(MODEL_STORAGE_KEY, nextId);
-    setAgentId(undefined);
     setModelParams(nextParams);
     localStorage.setItem(PARAMS_STORAGE_KEY, JSON.stringify(nextParams));
     if (activeChatId) {
@@ -4076,8 +4376,12 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       return;
     }
     const refreshBackgroundRun = async () => {
+      // The foreground send stream already carries text/tool/status deltas.
+      // Polling the same chat in parallel used to repeatedly deserialize the
+      // entire latest page and could overwrite fresher optimistic state.
+      if (runtimeRef.current.has(activeChatId) || document.visibilityState === "hidden") return;
       try {
-        const res = await fetch(
+        const res = await fetchReadWithRetry(
           `/api/chats/${activeChatId}?messageLimit=${CHAT_MESSAGE_LOAD_LIMIT}&messageOffset=0`,
           { cache: "no-store" },
         );
@@ -4085,6 +4389,11 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         const data = (await res.json()) as { chat: Chat };
         if (!acceptServerSnapshot(activeChatId, data.chat.updatedAt)) return;
         setMessages((current) => mergeMessages(current, mapApiMessages(data.chat.messages, data.chat.runStatus)));
+        setQueuedMessages(
+          Array.isArray(data.chat.queuedMessages)
+            ? data.chat.queuedMessages.map((message) => ({ ...message, files: [] }))
+            : [],
+        );
         if (data.chat.modelId) setModelId(data.chat.modelId);
         const serverModeId = data.chat.sessionState?.modeId || "agent";
         setModeId(serverModeId);
@@ -4142,16 +4451,20 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         /* retry on the next interval */
       }
     };
+    const currentChatRunsRemotely = chats.some(
+      (chat) => chat.id === activeChatId &&
+        (chat.runStatus === "running" || chat.runStatus === "waiting_input" || chat.runStatus === "waiting_for_user"),
+    );
     const interval = window.setInterval(() => {
       void refreshBackgroundRun();
-    }, 5000);
+    }, currentChatRunsRemotely || busy ? 2000 : 15000);
     return () => window.clearInterval(interval);
-  }, [acceptServerSnapshot, activeChatId, authed, loadChats, loadingChatId, modelParamsByModel, pendingQuestion]);
+  }, [acceptServerSnapshot, activeChatId, authed, busy, chats, loadChats, loadingChatId, modelParamsByModel, pendingQuestion]);
 
   useEffect(() => {
     if (!authed) return;
     const refresh = () => {
-      void loadChats();
+      if (document.visibilityState !== "hidden") void loadChats();
     };
     window.addEventListener("focus", refresh);
     document.addEventListener("visibilitychange", refresh);
@@ -4171,6 +4484,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     const openLinkedUrl = (event: Event) => {
       const url = (event as CustomEvent<unknown>).detail;
       if (typeof url !== "string" || !/^https?:\/\//i.test(url)) return;
+      if (!browserEnabled) return;
       setWorkspaceTab("browser");
       setWorkspaceOpen(true);
       openBrowserTab(url);
@@ -4203,6 +4517,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         return;
       }
       if (reference.kind === "browser" && reference.path) {
+        if (!browserEnabled) return;
         navigateBrowser(reference.path);
         setWorkspaceTab("browser");
         setWorkspaceOpen(true);
@@ -4217,7 +4532,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         return;
       }
       if (reference.kind === "file" && targetChatId) {
-        const response = await fetch(
+        const response = await fetchReadWithRetry(
           `/api/chats/${targetChatId}?messageLimit=100&messageOffset=0`,
           { cache: "no-store" },
         );
@@ -4240,7 +4555,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       let workspace = workspaces.find((item) => item.id === detail.id);
       if (!workspace && activeChatIdRef.current) {
         try {
-          const response = await fetch(
+          const response = await fetchReadWithRetry(
             `/api/chats/${activeChatIdRef.current}?messageLimit=${CHAT_MESSAGE_LOAD_LIMIT}&messageOffset=${messageOffset}`,
             { cache: "no-store" },
           );
@@ -4281,7 +4596,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       window.removeEventListener("ai-chat:open-workspace", openLinkedWorkspace);
       window.removeEventListener("ai-chat:open-note", openLinkedNote);
     };
-  }, [activeChatId, loadChat, messageOffset, navigateBrowser, terminalTabs, workspaces]);
+  }, [activeChatId, browserEnabled, loadChat, messageOffset, navigateBrowser, terminalTabs, workspaces]);
 
   useEffect(() => {
     if (!authed) return;
@@ -4410,6 +4725,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         activeWorkspaceId,
         workspaceOpen,
         workspaceWidth,
+        modeId,
       },
       runStatus: pendingQuestion
         ? "waiting_input"
@@ -4440,10 +4756,38 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     activeWorkspaceId,
     workspaceOpen,
     workspaceWidth,
+    modeId,
     busy,
     pendingQuestion,
     messageOffset,
     hasEarlierMessages,
+  ]);
+
+  // Persist the warm snapshot after activity settles. This makes returning to
+  // a chat instant even after a page reload while the server snapshot is
+  // revalidated in the background. Never persist incognito chats.
+  useEffect(() => {
+    if (!activeChatId || activeChatIncognito) return;
+    const timer = window.setTimeout(() => {
+      const snapshot = chatCacheRef.current.get(activeChatId);
+      if (snapshot) void writeClientChatSnapshot(chatCacheScope, activeChatId, snapshot);
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeChatId,
+    activeChatIncognito,
+    messages,
+    chatTitle,
+    modelId,
+    modelParams,
+    modeId,
+    queuedMessages,
+    workspaces,
+    browserTabs,
+    activeBrowserTabId,
+    busy,
+    pendingQuestion,
+    chatCacheScope,
   ]);
 
   useEffect(() => {
@@ -4467,7 +4811,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
 
   useEffect(() => {
     setShowScrollDown(false);
-    notifiedPlanRef.current = null;
+    notifiedPlanRef.current.clear();
   }, [activeChatId, paneKey]);
 
   useEffect(() => {
@@ -4643,6 +4987,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     setMessages([]);
     setChats([]);
     chatCacheRef.current.clear();
+    void clearClientChatSnapshots();
     setUnreadChatIds([]);
     saveUnreadChatIds([]);
     navigateChat(null, true);
@@ -4654,6 +4999,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       if (id && activeChatIncognito) {
         await fetch(`/api/chats/${id}`, { method: "DELETE" });
         chatCacheRef.current.delete(id);
+        void deleteClientChatSnapshot(chatCacheScope, id);
         await openDraft();
       } else {
         setIncognito(false);
@@ -4668,63 +5014,75 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
 
   async function ensureChatId(): Promise<string | null> {
     if (activeChatIdRef.current) return activeChatIdRef.current;
-    const browserContext = normalizeBrowserContext(
-      {
-        tabs: stateRef.current.browserTabs,
-        activeTabId: stateRef.current.activeBrowserTabId,
-        sessionKey: "draft",
-        updatedAt: new Date().toISOString(),
-      },
-      "draft",
-    );
-    const res = await fetch("/api/chats", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        browserContext,
+    if (creatingChatRef.current) return creatingChatRef.current;
+    const createPromise = (async () => {
+      const browserContext = normalizeBrowserContext(
+        {
+          tabs: stateRef.current.browserTabs,
+          activeTabId: stateRef.current.activeBrowserTabId,
+          sessionKey: "draft",
+          updatedAt: new Date().toISOString(),
+        },
+        "draft",
+      );
+      const res = await fetch("/api/chats", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          browserContext,
+          modelId: stateRef.current.modelId,
+          modelParams: stateRef.current.modelParams,
+          incognito,
+          modeId,
+        }),
+      });
+      if (!res.ok) return null;
+      const data = (await res.json()) as { chat: Chat };
+      chatCacheRef.current.set(data.chat.id, {
+        messages: stateRef.current.messages,
+        chatTitle: data.chat.title,
+        incognito: Boolean(data.chat.incognito),
+        agentId: undefined,
         modelId: stateRef.current.modelId,
         modelParams: stateRef.current.modelParams,
-        incognito,
-        modeId,
-      }),
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { chat: Chat };
-    setActiveChatId(data.chat.id);
-    activeChatIdRef.current = data.chat.id;
-    setActiveChatIncognito(Boolean(data.chat.incognito));
-    setChatTitle(data.chat.title);
-    chatCacheRef.current.set(data.chat.id, {
-      messages: stateRef.current.messages,
-      chatTitle: data.chat.title,
-      incognito: Boolean(data.chat.incognito),
-      agentId: undefined,
-      modelId: stateRef.current.modelId,
-      modelParams: stateRef.current.modelParams,
-      queuedMessages: stateRef.current.queuedMessages.map(({ id, text, referenceText, references }) => ({
-        id,
-        text,
-        ...(referenceText ? { referenceText } : {}),
-        ...(references?.length ? { references } : {}),
-      })),
-      workspaces: [],
-      browserContext: normalizeBrowserContext(data.chat.browserContext, data.chat.id),
-      sessionState: {
-        terminalCwd: stateRef.current.remoteTerminalCwd,
-        fileCwd: stateRef.current.remoteFileCwd,
-        terminalTabs: stateRef.current.terminalTabs,
-        activeTerminalTabId: stateRef.current.activeTerminalTabId || undefined,
-        workspaceTab: stateRef.current.workspaceTab,
-        activeWorkspaceId: stateRef.current.activeWorkspaceId,
-        workspaceOpen: stateRef.current.workspaceOpen,
-        workspaceWidth: stateRef.current.workspaceWidth,
-      },
-      messageOffset: 0,
-      hasEarlierMessages: false,
-    });
-    navigateChat(data.chat.id, true);
-    await loadChats();
-    return data.chat.id;
+        queuedMessages: stateRef.current.queuedMessages.map(({ id, text, referenceText, references }) => ({
+          id,
+          text,
+          ...(referenceText ? { referenceText } : {}),
+          ...(references?.length ? { references } : {}),
+        })),
+        workspaces: [],
+        browserContext: normalizeBrowserContext(data.chat.browserContext, data.chat.id),
+        sessionState: {
+          terminalCwd: stateRef.current.remoteTerminalCwd,
+          fileCwd: stateRef.current.remoteFileCwd,
+          terminalTabs: stateRef.current.terminalTabs,
+          activeTerminalTabId: stateRef.current.activeTerminalTabId || undefined,
+          workspaceTab: stateRef.current.workspaceTab,
+          activeWorkspaceId: stateRef.current.activeWorkspaceId,
+          workspaceOpen: stateRef.current.workspaceOpen,
+          workspaceWidth: stateRef.current.workspaceWidth,
+        },
+        messageOffset: 0,
+        hasEarlierMessages: false,
+      });
+      const stillOnDraft = !activeChatIdRef.current;
+      if (stillOnDraft) {
+        setActiveChatId(data.chat.id);
+        activeChatIdRef.current = data.chat.id;
+        setActiveChatIncognito(Boolean(data.chat.incognito));
+        setChatTitle(data.chat.title);
+        navigateChat(data.chat.id, true);
+      }
+      void loadChats();
+      return data.chat.id;
+    })();
+    creatingChatRef.current = createPromise;
+    try {
+      return await createPromise;
+    } finally {
+      if (creatingChatRef.current === createPromise) creatingChatRef.current = null;
+    }
   }
 
   function openRename(id: string, currentTitle: string) {
@@ -4761,6 +5119,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         return;
       }
       chatCacheRef.current.delete(id);
+      void deleteClientChatSnapshot(chatCacheScope, id);
       clearUnread(id);
       if (activeChatId === id) openDraft();
       setDeleteTarget(null);
@@ -4858,7 +5217,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     setChatLogsLoading(true);
     setChatLogsCategory("all");
     try {
-      const res = await fetch(`/api/chats/${encodeURIComponent(id)}/logs`, { cache: "no-store" });
+      const res = await fetchReadWithRetry(`/api/chats/${encodeURIComponent(id)}/logs`, { cache: "no-store" });
       const data = (await res.json().catch(() => ({}))) as { logs?: ChatLogEntry[]; error?: string };
       if (!res.ok) throw new Error(data.error || "Failed to load chat logs");
       setChatLogs(data.logs || []);
@@ -4878,6 +5237,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     if (!chatId || reverting) return false;
     const keepMessage = options.keepMessage === true;
     setReverting(true);
+    queueDrainBlockedRef.current = true;
     try {
       const res = await fetch(`/api/chats/${chatId}/revert`, {
         method: "POST",
@@ -4915,6 +5275,9 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       );
       setLiveStatus("");
       setBusySynced(false);
+      sendInFlightKeysRef.current.delete(chatId);
+      sendInFlightKeysRef.current.delete("__draft__");
+      lastSendFingerprintRef.current = { text: "", at: 0 };
       setPendingFiles((prev) => {
         for (const file of prev) {
           if (file.previewUrl) URL.revokeObjectURL(file.previewUrl);
@@ -4991,6 +5354,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       return false;
     } finally {
       setReverting(false);
+      queueDrainBlockedRef.current = false;
+      setSendLockTick((value) => value + 1);
     }
   }
 
@@ -5275,7 +5640,9 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   }
 
   function queueCurrentMessage(text: string, files: PendingFile[]) {
-    setQueuedMessages((current) => [
+    setQueuedMessages((current) => {
+      if (text && current.some((item) => item.text === text)) return current;
+      return [
       ...current,
       {
         id: `q-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -5285,8 +5652,9 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         ...(references.length ? { references: [...references] } : {}),
         ...(restoredAttachments.length ? { storedAttachments: [...restoredAttachments] } : {}),
       },
-    ]);
-    setInputGuarded("");
+    ];
+    });
+    setInputGuarded("", "queued");
     setReferenceText("");
     setReferences([]);
     clearPendingFiles();
@@ -5294,17 +5662,26 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  function sendQueuedMessage(message: QueuedMessage) {
+  async function sendQueuedMessage(message: QueuedMessage) {
     if (queuedSendRef.current.has(message.id)) return;
+    const activeId = activeChatIdRef.current;
+    const activeRuntime = activeId ? runtimeRef.current.get(activeId) : undefined;
+    const sendLockKey = activeId || "__draft__";
+    if (busy || activeRuntime || sendInFlightKeysRef.current.has(sendLockKey) || pendingQuestion) {
+      // "Send next" must never cancel the run that is currently applying the
+      // user's earlier changes. Move this item to the front; the normal/server
+      // FIFO drains it as soon as the current run becomes terminal.
+      setQueuedMessages((current) => [
+        message,
+        ...current.filter((item) => item.id !== message.id),
+      ]);
+      setLiveStatus("Queued follow-up will run next.");
+      return;
+    }
     queuedSendRef.current.add(message.id);
     queueDrainBlockedRef.current = true;
-    const activeId = activeChatIdRef.current;
-    if (activeId) runtimeRef.current.get(activeId)?.abortController.abort();
-    if (activeId) clearChatRunning(activeId);
-    setBusySynced(false);
-    setLiveStatus("");
-    window.setTimeout(() => {
-      void send(
+    try {
+      await send(
         undefined,
         message.text,
         message.files,
@@ -5314,12 +5691,12 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         message.id,
         () => setQueuedMessages((current) => current.filter((item) => item.id !== message.id)),
         message.storedAttachments,
-      )
-        .finally(() => {
-          queuedSendRef.current.delete(message.id);
-          queueDrainBlockedRef.current = false;
-        });
-    }, 0);
+      );
+    } finally {
+      queuedSendRef.current.delete(message.id);
+      queueDrainBlockedRef.current = false;
+      setSendLockTick((value) => value + 1);
+    }
   }
 
   function editQueuedMessage(message: QueuedMessage) {
@@ -5378,17 +5755,26 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     plan: { title: string; content: string; workspaceLink?: string },
     options: { multiAgent?: boolean } = {},
   ) {
-    if (busy || reverting) return;
-    await selectMode("agent");
-    setWorkspaceTab("plan");
-    setWorkspaceOpen(true);
-    const named = plan.workspaceLink
-      ? `[${plan.title}](${plan.workspaceLink})`
-      : `"${plan.title}"`;
-    const prompt = options.multiAgent
-      ? `Build ${named} using parallel subagents for independent streams. Keep this chat as coordinator: give each subagent a tight scoped prompt, do not overlap files, then synthesize. After spawning, mention each as [Name](subagent://Name) so they open on click. Follow the plan already open in the side panel — do not paste it again.`
-      : `Build ${named}. Follow the plan already open in the side panel and implement it. If you spawn subagents, mention them as [Name](subagent://Name).`;
-    void send(undefined, prompt, [], true);
+    // React `busy` can lag by a render. Guard Build with refs as well so a
+    // double-click or stale plan card cannot submit the same implementation
+    // run twice before the disabled state paints.
+    const sendLockKey = activeChatIdRef.current || "__draft__";
+    if (busyRef.current || sendInFlightKeysRef.current.has(sendLockKey) || buildPlanInFlightRef.current || reverting) return;
+    buildPlanInFlightRef.current = true;
+    try {
+      await selectMode("agent");
+      setWorkspaceTab("plan");
+      setWorkspaceOpen(true);
+      const named = plan.workspaceLink
+        ? `[${plan.title}](${plan.workspaceLink})`
+        : `"${plan.title}"`;
+      const prompt = options.multiAgent
+        ? `Build ${named} using parallel subagents for independent streams. Keep this chat as coordinator: give each subagent a tight scoped prompt, do not overlap files, then synthesize. After spawning, mention each as [Name](subagent://Name) so they open on click. Follow the plan already open in the side panel — do not paste it again.`
+        : `Build ${named}. Follow the plan already open in the side panel and implement it. If you spawn subagents, mention them as [Name](subagent://Name).`;
+      await send(undefined, prompt, [], true);
+    } finally {
+      buildPlanInFlightRef.current = false;
+    }
   }
 
   function toggleWorkspace() {
@@ -5397,35 +5783,29 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   }
 
   async function cancelSubagent() {
-    const chatId = activeChatIdRef.current;
-    if (!chatId || cancellingSubagent) return;
+    const childChatId = selectedSubagent?.subagent?.chatId;
+    if (!childChatId || cancellingSubagent) return;
     setCancellingSubagent(true);
     try {
       const response = await fetch("/api/chat/cancel", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chatId }),
+        body: JSON.stringify({ chatId: childChatId }),
       });
       const data = (await response.json().catch(() => ({}))) as { error?: string };
       if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-      runtimeRef.current.get(chatId)?.abortController.abort();
-      clearChatRunning(chatId);
-      setBusySynced(false);
       setActiveSubagent((current) => current ? { ...current, status: "cancelled" } : current);
-      setMessages((messages) =>
-        messages.map((message) => ({
-          ...message,
-          parts: (message.parts ?? partsFromFlat(message)).map((part) =>
-            part.type === "tool" && part.status === "running"
-              ? { ...part, status: "cancelled" }
-              : part,
-          ),
-        })).map((message) => ({ ...message, ...withSyncedFlat(message.parts ?? []) })),
-      );
-      setLiveStatus("Agent cancelled");
-      toast.info("Agent cancelled");
+      setMessages((current) => current.map((message) => ({
+        ...message,
+        parts: (message.parts ?? partsFromFlat(message)).map((part) =>
+          part.type === "tool" && part.id === selectedSubagent.id
+            ? { ...part, status: "cancelled" }
+            : part,
+        ),
+      })).map((message) => ({ ...message, ...withSyncedFlat(message.parts ?? []) })));
+      toast.info("Subagent cancelled");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not cancel agent");
+      toast.error(error instanceof Error ? error.message : "Could not cancel subagent");
     } finally {
       setCancellingSubagent(false);
     }
@@ -5442,6 +5822,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     onAccepted?: () => void,
     storedAttachmentsOverride?: MsgAttachment[],
   ) {
+    if (reverting) return;
     if (
       e &&
       "key" in e &&
@@ -5471,11 +5852,13 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       pendingQuestionIdRef.current = null;
     }
     const duplicate = isDuplicateComposerSend(text, lastSendFingerprintRef.current);
+    const sendLockKey = activeChatIdRef.current || "__draft__";
+    const sendInFlightForChat = sendInFlightKeysRef.current.has(sendLockKey);
     const action = decideComposerSend({
       force,
       isOverride,
       hasContent: hasComposerContent,
-      sendInFlight: sendInFlightRef.current,
+      sendInFlight: sendInFlightForChat,
       busy,
       waitingForQuestion: Boolean(pendingQuestion),
       duplicate,
@@ -5483,7 +5866,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     if (action === "ignore") return;
     if (action === "queue") {
       reportUxEvent("send_rejected", {
-        reason: duplicate ? "duplicate_fingerprint" : decideReasonForAction(action, { sendInFlightRef, busy, pendingQuestion, hasComposerContent }),
+        reason: duplicate ? "duplicate_fingerprint" : decideReasonForAction(action, { sendInFlight: sendInFlightForChat, busy, pendingQuestion, hasComposerContent }),
       });
     }
     if (text) lastSendFingerprintRef.current = { text, at: Date.now() };
@@ -5491,8 +5874,17 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       queueCurrentMessage(text, filesToSend);
       return;
     }
-    sendInFlightRef.current = true;
+    setBusySynced(true);
+    sendInFlightKeysRef.current.add(sendLockKey);
     const sendStartedAt = Date.now();
+    let submitLockReleased = false;
+    const releaseSubmitLock = () => {
+      if (submitLockReleased) return;
+      submitLockReleased = true;
+      sendInFlightKeysRef.current.delete(sendLockKey);
+      setSendLockTick((value) => value + 1);
+    };
+    let sendSucceeded = false;
     try {
       await sendInner(
         e,
@@ -5502,14 +5894,21 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         referenceTextOverride,
         referencesOverride,
         messageIdOverride,
-        onAccepted,
+        () => {
+          // The POST has been accepted. Keep the run itself scoped through
+          // runtimeRef/busy, but do not hold a global composer lock for the
+          // entire SSE stream: that incorrectly queues messages in other chats.
+          releaseSubmitLock();
+          onAccepted?.();
+        },
         storedAttachmentsOverride,
       );
+      sendSucceeded = true;
     } finally {
-      sendInFlightRef.current = false;
-      reportUxEvent("send_completed", {
+      releaseSubmitLock();
+      reportUxEvent("send_stream_completed", {
         durationMs: Date.now() - sendStartedAt,
-        ok: true,
+        ok: sendSucceeded,
       });
     }
   }
@@ -5517,13 +5916,13 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   function decideReasonForAction(
     action: string,
     ctx: {
-      sendInFlightRef: { current: boolean };
+      sendInFlight: boolean;
       busy: boolean;
       pendingQuestion: unknown;
       hasComposerContent: boolean;
     },
   ): string {
-    if (ctx.sendInFlightRef.current) return "lock_held";
+    if (ctx.sendInFlight) return "lock_held";
     if (ctx.pendingQuestion) return "pending_question";
     if (ctx.busy) return "busy";
     if (!ctx.hasComposerContent) return "empty";
@@ -5557,34 +5956,38 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     }
     if (
       (pendingQuestion && !isOverride) ||
-      (!hasComposerContent) ||
-      (busy && force === false && !isOverride)
+      (!hasComposerContent)
     ) {
-      if (!isOverride && hasComposerContent && (busy || pendingQuestion)) {
+      if (!isOverride && hasComposerContent && pendingQuestion) {
         reportUxEvent("send_queued", {
-          reason: pendingQuestion ? "pending_question" : "busy",
+          reason: "pending_question",
         });
         queueCurrentMessage(text, filesToSend);
+        setBusySynced(false);
       } else if (!hasComposerContent) {
         reportUxEvent("send_rejected", { reason: "empty" });
       }
+      if (!hasComposerContent) setBusySynced(false);
       return;
     }
     if (!modelId.trim()) {
       reportUxEvent("send_rejected", { reason: "no_model" });
       toast.error("Select a model first");
+      setBusySynced(false);
       return;
     }
 
+    setBusySynced(true);
     const chatId = await ensureChatId();
     if (!chatId) {
       reportUxEvent("send_rejected", { reason: "chat_create_failed" });
       toast.error("Could not create chat");
+      setBusySynced(false);
       return;
     }
 
     if (!isOverride) {
-      setInputGuarded("");
+      setInputGuarded("", "submitted");
       draftInputRef.current = "";
       window.setTimeout(() => textareaRef.current?.focus(), 0);
       void fetch("/api/preferences", {
@@ -5599,7 +6002,6 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
     if (!force) queueDrainBlockedRef.current = false;
-    setBusySynced(true);
     setRecoveryStatus(null);
     setLiveStatus("");
 
@@ -5673,11 +6075,15 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
 
       let res = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Metis-Device-Id": getMetisDeviceId(),
+        },
         body: JSON.stringify({
           chatId,
           messageId: userMsg.id,
           message: text,
+          streamDeviceId: getMetisDeviceId() || undefined,
           referenceText: !incognito ? ((referenceTextOverride ?? referenceText) || undefined) : undefined,
           references: referencesToSend.length ? referencesToSend : undefined,
           agentId: agentId || undefined,
@@ -5709,6 +6115,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         return;
       }
 
+      let runJobId: string | undefined;
       if (res.status !== 202) onAccepted?.();
       if (res.status === 202) {
         const queued = (await res.json().catch(() => ({}))) as { jobId?: string; queueMessage?: string };
@@ -5717,21 +6124,66 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           setLiveStatus(queued.queueMessage);
         }
         if (!queued.jobId) throw new Error("The server did not return a job id");
+        runJobId = queued.jobId;
         res = await fetch(
-          `/api/runs?chatId=${encodeURIComponent(chatId)}&jobId=${encodeURIComponent(queued.jobId)}&events=1&stream=1`,
-          { cache: "no-store", signal: ac.signal },
+          `/api/runs?chatId=${encodeURIComponent(chatId)}&jobId=${encodeURIComponent(queued.jobId)}&events=1&stream=1&deviceId=${encodeURIComponent(getMetisDeviceId())}`,
+          { cache: "no-store", signal: ac.signal, headers: { "X-Metis-Device-Id": getMetisDeviceId() } },
         );
         if (!res.ok) throw new Error(`Stream connection failed (HTTP ${res.status})`);
       }
 
-      const reader = res.body?.getReader();
+      let reader = res.body?.getReader();
       if (!reader) throw new Error("No response body");
-      const decoder = new TextDecoder();
+      let decoder = new TextDecoder();
       let buffer = "";
+      let lastEventId = 0;
+      let terminalEventSeen = false;
+      let reconnectAttempts = 0;
+
+      const reconnectRunStream = async () => {
+        if (!runJobId || ac.signal.aborted) return false;
+        while (reconnectAttempts < 6 && !ac.signal.aborted) {
+          reconnectAttempts += 1;
+          if (activeChatIdRef.current === chatId) setLiveStatus("Reconnecting to agent…");
+          await new Promise((resolve) => window.setTimeout(resolve, Math.min(2_000, 250 * (2 ** (reconnectAttempts - 1)))));
+          try {
+            const next = await fetch(
+              `/api/runs?chatId=${encodeURIComponent(chatId)}&jobId=${encodeURIComponent(runJobId)}&events=1&stream=1&after=${lastEventId}&deviceId=${encodeURIComponent(getMetisDeviceId())}`,
+              {
+                cache: "no-store",
+                signal: ac.signal,
+                headers: { "X-Metis-Device-Id": getMetisDeviceId() },
+              },
+            );
+            if (!next.ok) throw new Error(`Stream reconnect failed (HTTP ${next.status})`);
+            const nextReader = next.body?.getReader();
+            if (!nextReader) throw new Error("No response body while reconnecting");
+            reader = nextReader;
+            decoder = new TextDecoder();
+            buffer = "";
+            return true;
+          } catch (reconnectError) {
+            if ((reconnectError as Error).name === "AbortError") throw reconnectError;
+            if (reconnectAttempts >= 6) throw reconnectError;
+          }
+        }
+        return false;
+      };
 
       while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+        let readResult: ReadableStreamReadResult<Uint8Array>;
+        try {
+          readResult = await reader.read();
+        } catch (streamError) {
+          if (await reconnectRunStream()) continue;
+          throw streamError;
+        }
+        const { done, value } = readResult;
+        if (done) {
+          if (!terminalEventSeen && await reconnectRunStream()) continue;
+          break;
+        }
+        reconnectAttempts = 0;
         buffer += decoder.decode(value, { stream: true });
         const parts = buffer.split("\n\n");
         buffer = parts.pop() || "";
@@ -5739,8 +6191,13 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         for (const part of parts) {
           const lines = part.split("\n");
           let event = "message";
+          let eventId = 0;
           let data = "";
           for (const line of lines) {
+            if (line.startsWith("id:")) {
+              const parsedId = Number(line.slice(3).trim());
+              if (Number.isFinite(parsedId) && parsedId > 0) eventId = parsedId;
+            }
             if (line.startsWith("event:")) event = line.slice(6).trim();
             if (line.startsWith("data:")) data += line.slice(5).trim();
           }
@@ -5751,6 +6208,18 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           } catch {
             continue;
           }
+          if (eventId > lastEventId) lastEventId = eventId;
+          const sequence = typeof payload.sequence === "number" ? payload.sequence : eventId;
+          if (sequence > 0 && runtimeRef.current.get(chatId)?.generation === generation) {
+            setMessages((messages) =>
+              messages.map((message) =>
+                message.id === asstId && (message.serverSequence || 0) < sequence
+                  ? { ...message, serverSequence: sequence }
+                  : message,
+              ),
+            );
+          }
+          if (event === "done" || event === "error") terminalEventSeen = true;
           if (runtimeRef.current.get(chatId)?.generation !== generation) continue;
 
           if (
@@ -5888,6 +6357,31 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                 };
               }),
             );
+          } else if (event === "compaction") {
+            const status = payload.status === "error"
+              ? "error"
+              : payload.status === "completed"
+                ? "completed"
+                : "started";
+            const nextCompaction: MsgPart = {
+              type: "compaction",
+              status,
+              beforeTokens: typeof payload.beforeTokens === "number" ? payload.beforeTokens : undefined,
+              targetTokens: typeof payload.targetTokens === "number" ? payload.targetTokens : undefined,
+              afterTokens: typeof payload.afterTokens === "number" ? payload.afterTokens : undefined,
+              removedMessages: typeof payload.removedMessages === "number" ? payload.removedMessages : undefined,
+              message: typeof payload.message === "string" ? payload.message : undefined,
+            };
+            setMessages((m) =>
+              m.map((x) => {
+                if (x.id !== asstId) return x;
+                const parts = [...(x.parts ?? partsFromFlat(x))];
+                const index = parts.findIndex((part) => part.type === "compaction");
+                if (index >= 0) parts[index] = nextCompaction;
+                else parts.push(nextCompaction);
+                return { ...x, parts };
+              }),
+            );
           } else if (
             event === "tool" &&
             (typeof payload.callId === "string" || typeof payload.call_id === "string")
@@ -5902,8 +6396,6 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                 : "running";
             const detail =
               typeof payload.detail === "string" ? payload.detail : undefined;
-            const kind =
-              typeof payload.kind === "string" ? payload.kind as ToolPart["kind"] : undefined;
             const path =
               typeof payload.path === "string" ? payload.path : undefined;
             const diff =
@@ -5919,7 +6411,12 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             const todos =
               Array.isArray(payload.todos)
                 ? payload.todos as ToolPart["todos"]
-                : undefined;
+                : todosFromToolPayload(input, result);
+            const resolvedKind =
+              (typeof payload.kind === "string" && payload.kind !== "mcp" && payload.kind !== "other"
+                ? payload.kind as ToolPart["kind"]
+                : undefined)
+              ?? classifyToolKind(name, input, result);
             const attachmentPayload =
               payload.attachment && typeof payload.attachment === "object"
                 ? payload.attachment as Partial<MsgAttachment>
@@ -5956,23 +6453,26 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                 const exactIndex = parts.findIndex(
                   (p) => p.type === "tool" && p.id === callId,
                 );
-                const workspaceIndex = exactIndex < 0 && (kind === "plan" || kind === "canvas")
+                const workspaceIndex = exactIndex < 0 && (resolvedKind === "plan" || resolvedKind === "canvas")
                   ? parts.findIndex(
-                    (p) => p.type === "tool" && p.id.startsWith("workspace-") && p.kind === kind,
+                    (p) => p.type === "tool" && p.id.startsWith("workspace-") && p.kind === resolvedKind,
                   )
                   : -1;
-                const idx = exactIndex >= 0 ? exactIndex : workspaceIndex;
+                const todoIndex = exactIndex < 0 && resolvedKind === "todo"
+                  ? parts.findIndex((p) => p.type === "tool" && p.kind === "todo")
+                  : -1;
+                const idx = exactIndex >= 0 ? exactIndex : workspaceIndex >= 0 ? workspaceIndex : todoIndex;
                 const prevTool: ToolMsgPart | null =
                   idx >= 0 && parts[idx].type === "tool"
                     ? (parts[idx] as ToolMsgPart)
                     : null;
                 const next: MsgPart = {
                   type: "tool",
-                  id: callId,
+                  id: prevTool?.id || callId,
                   name,
                   status,
                   detail: detail ?? prevTool?.detail,
-                  kind: kind ?? prevTool?.kind,
+                  kind: resolvedKind ?? prevTool?.kind,
                   path: path ?? prevTool?.path,
                   diff: diff ?? prevTool?.diff,
                   input: input ?? prevTool?.input,
@@ -6006,7 +6506,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                     name,
                     status,
                     detail: detail ?? current.detail,
-                    kind: kind ?? current.kind,
+                    kind: resolvedKind ?? current.kind,
                     path: path ?? current.path,
                     diff: diff ?? current.diff,
                     input: input ?? current.input,
@@ -6120,18 +6620,23 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                   }),
                 };
                 const existingIndex = parts.findIndex(
-                  (part) => part.type === "tool" && part.id === workspaceTool.id,
+                  (part) =>
+                    part.type === "tool" &&
+                    (part.id === workspaceTool.id || part.kind === workspace.type),
                 );
                 if (existingIndex >= 0) {
-                  parts[existingIndex] = { ...parts[existingIndex], ...workspaceTool };
+                  const previous = parts[existingIndex];
+                  if (previous.type === "tool") {
+                    parts[existingIndex] = { ...previous, ...workspaceTool };
+                  }
                 } else {
                   parts.push({ type: "tool", ...workspaceTool });
                 }
                 return { ...message, ...withSyncedFlat(parts) };
               }),
             );
-            if (workspace.type === "plan" && notifiedPlanRef.current !== workspace.id) {
-              notifiedPlanRef.current = workspace.id;
+            if (workspace.type === "plan" && !notifiedPlanRef.current.has(workspace.id)) {
+              notifiedPlanRef.current.add(workspace.id);
               const preview = workspace.content.replace(/\s+/g, " ").trim();
               toast.success("Plan ready", {
                 description: `${workspace.name}: ${preview.slice(0, 140)}${preview.length > 140 ? "…" : ""}`,
@@ -6173,7 +6678,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                   (part) => part.type === "tool" && part.id === workspaceTool.id,
                 );
                 if (existingIndex >= 0) {
-                  parts[existingIndex] = { ...parts[existingIndex], ...workspaceTool };
+                  const previous = parts[existingIndex];
+                  if (previous.type === "tool") {
+                    parts[existingIndex] = { ...previous, ...workspaceTool };
+                  }
                 } else {
                   parts.push({ type: "tool", ...workspaceTool });
                 }
@@ -6220,6 +6728,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             );
           } else if (event === "done") {
             playFinishSound();
+            // A completed run may have consumed provider quota. Refresh once here
+            // instead of waiting for the background poll so the footer reflects
+            // the selected provider's new usage promptly.
+            void refreshPlanUsage(true);
             if (typeof document !== "undefined" && document.hidden) {
               markUnread(chatId);
             } else if (activeChatIdRef.current === chatId) {
@@ -6257,6 +6769,11 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             void loadMemories();
           }
         }
+      }
+      if (terminalEventSeen && activeChatIdRef.current === chatId) {
+        // Re-read the durable checkpoint so any event dropped during transient
+        // SQLite contention is recovered without duplicating streamed deltas.
+        void loadChat(chatId, { skipNav: true });
       }
     } catch (err) {
       if ((err as Error).name !== "AbortError") {
@@ -6306,11 +6823,14 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
 
   useEffect(() => {
     if (
-      busy ||
-      pendingQuestion ||
-      queueDrainBlockedRef.current ||
-      !queuedMessages.length ||
-      queueDrainRef.current
+      !shouldAutoDrainQueue({
+        busy,
+        sendInFlight: sendInFlightKeysRef.current.has(activeChatIdRef.current || "__draft__"),
+        waitingForQuestion: Boolean(pendingQuestion),
+        drainBlocked: queueDrainBlockedRef.current,
+        drainInProgress: queueDrainRef.current,
+        queueLength: queuedMessages.length,
+      })
     ) {
       return;
     }
@@ -6324,15 +6844,17 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       next.text,
       next.files,
       true,
-      undefined,
+      next.referenceText,
       next.references,
       next.id,
       () => setQueuedMessages((current) => current.filter((item) => item.id !== next.id)),
+      next.storedAttachments,
     ).finally(() => {
       queuedSendRef.current.delete(next.id);
       queueDrainRef.current = false;
+      setSendLockTick((value) => value + 1);
     });
-  }, [busy, pendingQuestion, queuedMessages]);
+  }, [busy, pendingQuestion, queuedMessages, sendLockTick]);
 
   const normalizedModelSearch = modelSearch.trim().toLowerCase();
   const availableProviderIds = new Set([
@@ -6350,29 +6872,64 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   });
   const selectedKey = parseModelKey(modelId);
   const selectedProvider = availableProviders.find((provider) => provider.value === selectedKey.providerKey);
+  const selectedConnection = selectedKey.connectionId
+    ? configuredModelProviders.find((provider) => provider.id === selectedKey.connectionId)
+    : undefined;
   const selectedModel =
     models.find((m) => m.id === modelId) ||
-    ({
-      id: modelId,
-      displayName: selectedKey.modelId || modelId || "Select a model",
-      providerId: selectedKey.providerKey,
-      providerName: selectedProvider?.label,
-    } satisfies ModelInfo);
+    (() => {
+      const displayName = selectedKey.modelId || modelId || "Select a model";
+      return {
+        id: modelId,
+        displayName,
+        providerId: selectedKey.providerKey,
+        providerName: selectedProvider?.label,
+        connectionId: selectedKey.connectionId,
+        connectionLabel: selectedConnection?.label,
+        contextWindow: contextWindowForModel({ id: selectedKey.modelId || modelId, displayName }),
+      } satisfies ModelInfo;
+    })();
   const latestUsage = [...messages]
     .reverse()
-    .find((message) => message.role === "assistant" && message.runMetadata?.inputTokens)
+    .find((message) =>
+      message.role === "assistant" &&
+      typeof message.runMetadata?.inputTokens === "number" &&
+      runMatchesModel(message.runMetadata, selectedKey),
+    )
     ?.runMetadata;
-  const estimatedContextTokens = Math.ceil(
-    messages.reduce((total, message) => total + message.content.length, 0) / 4,
+  // Keep the fallback's serialization/token ratio aligned with the runner.
+  // The UI cannot reproduce provider instructions or runner compaction exactly,
+  // but it can use the same shared estimator for the visible transcript shape.
+  const estimatedContextTokens = messages.reduce(
+    (total, message) =>
+      total + estimateContextTokens({
+        role: message.role,
+        content: message.content,
+        tools: message.tools || [],
+      }),
+    0,
   );
   const contextUsed = latestUsage?.inputTokens ?? estimatedContextTokens;
   const contextTotal = resolveContextTotal(
-    contextWindowForModel(selectedModel),
+    contextWindowForSelection(selectedModel, modelParams),
     contextUsed,
   );
-  const contextEstimated = !latestUsage?.inputTokens;
-  const { snapshot: planUsageSnapshot } = usePlanUsageSnapshot();
-  const selectedUsage = usageForSelectedProvider(planUsageSnapshot, selectedModel.providerId);
+  const contextEstimated = latestUsage?.inputTokensEstimated ?? !latestUsage?.inputTokens;
+  const contextModelMaximum = contextWindowForModel(selectedModel);
+  const contextSelection = contextSelectionLabel(selectedModel, modelParams);
+  const contextCompacting = busy && contextTotal > 0 && contextPressure(contextUsed, contextTotal).compactRecommended;
+  const { snapshot: planUsageSnapshot, refresh: refreshPlanUsage } = usePlanUsageSnapshot(Boolean(authed));
+  const selectedUsage = usageForSelectedProvider(planUsageSnapshot, {
+    providerId: selectedModel.providerId,
+    providerName: selectedModel.providerName,
+    connectionLabel: selectedModel.connectionLabel,
+    modelId: selectedKey.modelId || selectedModel.id,
+  });
+  const selectedUsageProviderName =
+    selectedModel.connectionLabel ||
+    selectedModel.providerName ||
+    selectedProvider?.label ||
+    selectedKey.providerKey;
   const selectedAttrs = modelAttrSummary(selectedModel, modelParams);
   const selectedMode = modes.find((mode) => mode.id === modeId) || modes[0];
   const providerQueryMatch = normalizedModelSearch.match(/^([a-z0-9_-]+):(.*)$/);
@@ -6404,6 +6961,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         providerName: provider?.label || parsed.providerKey,
         connectionId: parsed.connectionId,
         source: "discovered" as const,
+        contextWindow: contextWindowForModel({ id: parsed.modelId, displayName: parsed.modelId }),
       } satisfies ModelInfo;
     })
     .filter((model) =>
@@ -6474,7 +7032,6 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             </span>
           ) : null}
         </span>
-        <McpSupportIndicator providerId={model.providerId} />
         <button
           type="button"
           className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
@@ -7246,7 +7803,6 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                       </span>
                     ) : null}
                   </span>
-                  <McpSupportIndicator providerId={selectedModel.providerId} />
                   <ChevronDown className="size-3 shrink-0 opacity-60" />
                 </Button>
               </DropdownMenuTrigger>
@@ -7286,7 +7842,6 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                     >
                       {provider.value === "all" ? null : <ProviderLogo providerId={provider.value} className="size-3" />}
                       {provider.label}
-                      <McpSupportIndicator providerId={provider.value} />
                     </button>
                   ))}
                 </div>
@@ -7320,7 +7875,6 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                         <div className="flex items-center gap-1.5 px-2.5 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                           <ProviderLogo providerId={providerId} className="size-3" />
                           {group.label}
-                          <McpSupportIndicator providerId={providerId} />
                         </div>
                         {group.models.map(renderModelOption)}
                         <div className="py-1">
@@ -7378,12 +7932,20 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               onModelParamsChange={applyModelParams}
               onInsertPrompt={(text) => setInput(text)}
             />
-            <div className="ml-auto mr-1.5 flex items-center">
-              {selectedUsage ? <PlanUsageGauge provider={selectedUsage} /> : null}
-              <ContextUsageCircle
+            <div className="ml-auto mr-1.5 flex items-center gap-0.5">
+              <ContextUsageText
                 used={contextUsed}
                 total={contextTotal}
+                modelMaximum={contextModelMaximum}
                 estimated={contextEstimated}
+                measuredAt={latestUsage?.completedAt}
+                source={contextEstimated ? "current chat estimate" : "last model run"}
+                selectionLabel={contextSelection}
+                compacting={contextCompacting}
+              />
+              <PlanUsageGauge
+                provider={selectedUsage}
+                providerName={selectedUsageProviderName}
               />
             </div>
           </div>
@@ -7477,7 +8039,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             setNotesOpen(false);
             setWorkspaceOpen(false);
             setMobileNavOpen(false);
-            router.push("/?c=automations", { scroll: false });
+            navigateChat("automations");
           }}
         >
           <CalendarClock className="size-3.5 shrink-0 opacity-60" />
@@ -7518,6 +8080,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                       ? "text-primary hover:text-primary"
                       : "text-muted-foreground hover:text-foreground",
                 )}
+                onPointerEnter={() => void prefetchChat(c.id)}
+                onFocus={() => void prefetchChat(c.id)}
                 onClick={() => void loadChat(c.id)}
                 title={c.title || "Untitled"}
               >
@@ -8229,6 +8793,27 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                           return (
                             <>
                         {viewBlocks.map((block, bi, blocks) => {
+                          if (block.type === "compaction") {
+                            const statusLabel = block.status === "completed"
+                              ? "Context compacted"
+                              : block.status === "error"
+                                ? "Context compaction failed"
+                                : "Compacting context";
+                            const before = typeof block.beforeTokens === "number"
+                              ? `${formatMetricNumber(block.beforeTokens)} tokens`
+                              : "unknown size";
+                            const target = typeof block.targetTokens === "number"
+                              ? `${formatMetricNumber(block.targetTokens)} target`
+                              : "target unknown";
+                            return (
+                              <div key={`compaction-${bi}`} className="my-2 flex flex-wrap items-center gap-2 rounded-md border border-amber-400/25 bg-amber-400/5 px-2.5 py-1.5 text-[11px] text-muted-foreground">
+                                <span className="font-medium text-amber-300">{statusLabel}</span>
+                                <span>{before} · {target}</span>
+                                {typeof block.afterTokens === "number" ? <span>· {formatMetricNumber(block.afterTokens)} after</span> : null}
+                                {typeof block.removedMessages === "number" ? <span>· {block.removedMessages} messages compacted</span> : null}
+                              </div>
+                            );
+                          }
                           if (block.type === "thinking") {
                             return (
                               <ThinkingBlock
@@ -8251,19 +8836,50 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                                 key={`tools-${block.tools[0]?.id ?? bi}`}
                                 tools={block.tools}
                                 live={Boolean(m.streaming) && bi === lastBlockIndex}
-                                onOpenDiff={(tool) =>
-                                  setActiveDiff({
+                                onOpenDiff={(tool) => {
+                                  const baseDiff: ActiveDiff = {
                                     name: tool.name,
                                     path: tool.path,
                                     detail: tool.detail,
                                     input: tool.input,
                                     diff: tool.diff,
-                                  })
-                                }
+                                  };
+                                  setActiveDiff(baseDiff);
+                                  if (
+                                    !activeChatId ||
+                                    tool.diff?.before !== undefined ||
+                                    tool.diff?.after !== undefined
+                                  ) return;
+                                  void (async () => {
+                                    try {
+                                      const response = await fetch(
+                                        `/api/chats/${encodeURIComponent(activeChatId)}/tool-diff?messageId=${encodeURIComponent(m.id)}&toolId=${encodeURIComponent(tool.id)}`,
+                                        { cache: "no-store" },
+                                      );
+                                      if (!response.ok) return;
+                                      const payload = await response.json() as {
+                                        diff?: ToolPart["diff"] & { path?: string };
+                                      };
+                                      if (!payload.diff) return;
+                                      setActiveDiff((current) =>
+                                        current?.name === tool.name && current.path === tool.path
+                                          ? {
+                                              ...current,
+                                              path: current.path || payload.diff?.path,
+                                              diff: { ...(current.diff ?? {}), ...payload.diff },
+                                            }
+                                          : current,
+                                      );
+                                    } catch {
+                                      // The compact transcript is still usable if a legacy diff has no snapshot.
+                                    }
+                                  })();
+                                }}
                                 onOpenSubagent={(tool) => setActiveSubagent({ ...tool })}
                                 onOpenRaw={(tool) => setActiveRawTool({ ...tool })}
                                 onOpenWorkspace={(tool) => {
                                   if (tool.kind === "browser") {
+                                    if (!browserEnabled) return;
                                     setWorkspaceTab("browser");
                                     navigateBrowser(tool.result?.match(/https?:\/\/[^\s"'`]+/)?.[0] || "");
                                     setWorkspaceOpen(true);
@@ -8715,17 +9331,24 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         <aside
           className={cn(
             "workspace-surface relative flex min-h-0 w-full shrink-0 flex-col overflow-hidden border-l border-border/30 bg-background/95 max-md:absolute max-md:inset-0 max-md:z-30 max-md:!w-full",
+            workspaceTab === "browser" && "max-xl:absolute max-xl:inset-0 max-xl:z-40 max-xl:!w-full max-xl:border-l-0",
             workspaceFullscreen && "fixed inset-[1%] z-50 !w-auto rounded-xl border border-border shadow-2xl ring-1 ring-foreground/10",
             workspaceOpen ? "workspace-panel-enter" : "workspace-panel-exit",
           )}
-          style={workspaceFullscreen ? undefined : { width: `min(100%, ${workspaceWidth}px)` }}
+          style={workspaceFullscreen ? undefined : {
+            width: workspaceTab === "browser"
+              ? `min(100%, max(${workspaceWidth}px, min(68vw, 1040px)))`
+              : `min(100%, ${workspaceWidth}px)`,
+          }}
         >
           {workspaceFullscreen ? null : (
             <WorkspaceResizeHandle width={workspaceWidth} onWidthChange={setWorkspaceWidth} />
           )}
           <div className="flex shrink-0 items-center gap-1 border-b border-border/30 px-2 py-1.5">
             <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto">
-              {(["canvas", "plan", "files", "terminal", "browser", "monitor"] as const).map((tab) => (
+              {(["canvas", "plan", "files", "terminal", "browser", "monitor"] as const)
+                .filter((tab) => tab !== "browser" || browserEnabled)
+                .map((tab) => (
                 <Button
                   key={tab}
                   type="button"
@@ -8787,22 +9410,24 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               <X className="size-4" />
             </Button>
           </div>
-          <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden p-2.5">
+          <div className={cn("flex min-h-0 flex-1 flex-col gap-2 overflow-hidden p-2.5", workspaceTab === "browser" && "max-sm:p-1.5")}>
             {loadingChatId === activeChatId ? (
               <WorkspaceLoadingSkeleton />
             ) : workspaceTab === "browser" ? (
-              <>
-                <div className="flex items-center gap-1 overflow-x-auto">
+              <div className="flex min-h-0 flex-1 flex-col gap-1.5">
+                <div className="flex h-8 shrink-0 items-end gap-1 overflow-x-auto rounded-xl border border-border/35 bg-muted/20 px-1 pt-1 max-sm:h-7 max-sm:rounded-lg">
                   {browserTabs.map((tab) => (
                     <div key={tab.id} className={cn(
-                      "flex h-7 max-w-48 shrink-0 items-center rounded-md text-xs",
-                      tab.id === activeBrowserTabId ? "bg-secondary text-secondary-foreground" : "text-muted-foreground hover:bg-muted/60",
+                      "group flex h-7 max-w-52 shrink-0 items-center rounded-t-lg border border-transparent text-xs transition-colors",
+                      tab.id === activeBrowserTabId
+                        ? "border-border/40 bg-background/95 text-foreground shadow-[0_-1px_10px_rgba(0,0,0,0.08)]"
+                        : "text-muted-foreground hover:bg-background/45 hover:text-foreground",
                     )}>
                       <Button
                         type="button"
                         size="xs"
                         variant="ghost"
-                        className="h-7 min-w-0 flex-1 justify-start gap-1.5 px-2 text-xs"
+                        className="h-7 min-w-0 flex-1 justify-start gap-1.5 rounded-t-lg px-2 text-xs hover:bg-transparent"
                         title={tab.title}
                         onClick={() => {
                           browserInputDirtyRef.current = false;
@@ -8821,7 +9446,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                         type="button"
                         size="icon-xs"
                         variant="ghost"
-                        className="mr-0.5 size-6 shrink-0"
+                        className="mr-0.5 size-5 shrink-0 rounded-md opacity-55 hover:opacity-100"
                         aria-label={`Close ${tab.title || "browser tab"}`}
                         title="Close tab"
                         disabled={browserTabs.length <= 1}
@@ -8831,141 +9456,151 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                       </Button>
                     </div>
                   ))}
-                  <Button type="button" size="icon-xs" variant="ghost" className="size-7 shrink-0" aria-label="New browser tab" onClick={() => openBrowserTab()}>
+                  <Button
+                    type="button"
+                    size="icon-xs"
+                    variant="ghost"
+                    className="mb-0.5 size-6 shrink-0 rounded-md"
+                    aria-label="New browser tab"
+                    title="New tab"
+                    onClick={() => openBrowserTab()}
+                  >
                     <Plus className="size-3.5" />
                   </Button>
                 </div>
-                <form className="flex gap-2" onSubmit={(event) => {
-                  event.preventDefault();
-                  navigateBrowser(browserInput);
-                }}>
-                  <Input value={browserInput} onChange={(event) => { browserInputDirtyRef.current = true; setBrowserInput(event.target.value); }} placeholder="https://example.com or local URL" className="h-8 text-xs" />
-                  <Button type="submit" size="icon-sm" variant="secondary" aria-label="Open URL" title="Open in embedded browser"><Globe2 className="size-3.5" /></Button>
-                  <Button type="button" size="icon-sm" variant="ghost" disabled={!browserUrl.trim() && !browserInput.trim()} aria-label="Open in new browser tab" title="Open in new browser tab" onClick={openBrowserUrlInNewTab}>
-                    <ExternalLink className="size-3.5" />
+
+                <form
+                  className="flex h-10 shrink-0 items-center gap-1 rounded-xl border border-border/40 bg-background/80 p-1 shadow-sm max-sm:h-9 max-sm:rounded-lg"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    navigateBrowser(browserInput);
+                  }}
+                >
+                  <Button type="button" size="icon-xs" variant="ghost" className="size-7 shrink-0 rounded-lg" aria-label="Back" title="Back" onClick={() => void performBrowserAction("back")}>
+                    <ArrowLeft className="size-3.5" />
                   </Button>
-                </form>
-                {agentBrowserActivity.length > 0 ? (
-                  <div className="max-h-24 shrink-0 overflow-y-auto rounded-md border border-border/60 bg-muted/30 px-2 py-1">
-                    <p className="sticky top-0 bg-muted/30 pb-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Agent activity</p>
-                    {agentBrowserActivity.slice().reverse().map((entry, index) => (
-                      <p key={`${entry.ts}-${index}`} className="truncate text-[11px] leading-relaxed text-muted-foreground">
-                        <span className="text-foreground">{entry.action || "navigate"}</span>
-                        {entry.url ? ` · ${entry.url}` : ""}
-                      </p>
-                    ))}
+                  <Button type="button" size="icon-xs" variant="ghost" className="size-7 shrink-0 rounded-lg max-sm:hidden" aria-label="Forward" title="Forward" onClick={() => void performBrowserAction("forward")}>
+                    <ArrowRight className="size-3.5" />
+                  </Button>
+                  <Button type="button" size="icon-xs" variant="ghost" className="size-7 shrink-0 rounded-lg" aria-label="Reload" title="Reload" onClick={() => void performBrowserAction("reload")}>
+                    <RotateCcw className="size-3.5" />
+                  </Button>
+                  <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border border-border/30 bg-muted/35 px-2 focus-within:border-border/60 focus-within:bg-muted/45">
+                    {browserUrl.startsWith("https://") ? <LockKeyhole className="size-3 shrink-0 text-muted-foreground/75" /> : <Globe2 className="size-3 shrink-0 text-muted-foreground/75" />}
+                    <Input
+                      value={browserInput}
+                      onChange={(event) => { browserInputDirtyRef.current = true; setBrowserInput(event.target.value); }}
+                      placeholder="Search or enter address"
+                      className="h-7 min-w-0 flex-1 border-0 bg-transparent px-0 text-xs shadow-none focus-visible:ring-0"
+                    />
+                    {browserLoading ? <LoaderCircle className="size-3.5 shrink-0 animate-spin text-muted-foreground" /> : null}
                   </div>
-                ) : null}
-                {browserHistory.length > 0 ? (
-                  <div className="max-h-32 shrink-0 overflow-hidden rounded-md border border-border/60 bg-muted/20">
-                    <button
-                      type="button"
-                      onClick={() => setBrowserHistoryOpen((current) => !current)}
-                      className="flex w-full items-center justify-between px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground"
-                    >
-                      <span>History · {browserHistory.length}</span>
-                      <span>{browserHistoryOpen ? "▲" : "▼"}</span>
-                    </button>
-                    {browserHistoryOpen ? (
-                      <div className="max-h-24 overflow-y-auto px-2 pb-1">
-                        {browserHistory.map((entry) => (
-                          <button
-                            key={entry.id}
-                            type="button"
-                            onClick={() => { setBrowserInput(entry.url); void performBrowserAction("navigate", { url: entry.url }); }}
-                            className="block w-full truncate text-left text-[11px] leading-relaxed text-muted-foreground hover:text-foreground"
-                            title={entry.url}
-                          >
-                            <span className="text-foreground/70">{new Date(entry.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>{" · "}
-                            {entry.title || entry.url}
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-                <div className="flex shrink-0 items-center gap-1">
-                  <button
+                  <Button
                     type="button"
-                    onClick={() => updateBrowserSettings({ browserFollowAgent: !browserFollowAgent })}
-                    title={browserFollowAgent ? "Following the agent's browser activity — click to browse independently" : "Browsing independently — click to follow the agent"}
-                    className={`flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] transition-colors ${browserFollowAgent ? "border-sky-500/50 bg-sky-500/10 text-sky-300" : "border-border/60 bg-transparent text-muted-foreground hover:text-foreground"}`}
+                    size="icon-xs"
+                    variant="ghost"
+                    className="size-7 shrink-0 rounded-lg max-sm:hidden"
+                    disabled={!browserUrl.trim() && !browserInput.trim()}
+                    aria-label="Open in system browser"
+                    title="Open in system browser"
+                    onClick={openBrowserUrlInNewTab}
                   >
-                    <span className={`size-1.5 rounded-full ${browserFollowAgent ? "bg-sky-400" : "bg-muted-foreground/40"}`} />
-                    Follow
-                  </button>
-                  <Button type="button" size="icon-xs" variant="ghost" aria-label="Back" title="Back" onClick={() => void performBrowserAction("back")}><ArrowLeft className="size-3.5" /></Button>
-                  <Button type="button" size="icon-xs" variant="ghost" aria-label="Reload" title="Reload" onClick={() => void performBrowserAction("reload")}><RotateCcw className="size-3.5" /></Button>
-                  <Button type="button" size="icon-xs" variant="ghost" aria-label={workspaceFullscreen ? "Exit workspace fullscreen" : "Open workspace fullscreen"} title={workspaceFullscreen ? "Exit workspace fullscreen" : "Open workspace fullscreen"} onClick={() => setWorkspaceFullscreen((current) => !current)}>
-                    {workspaceFullscreen ? <Minimize2 className="size-3.5" /> : <Fullscreen className="size-3.5" />}
+                    <ExternalLink className="size-3.5" />
                   </Button>
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
-                      <Button type="button" size="icon-xs" variant="ghost" className="size-7" aria-label="Browser settings" title="Browser settings">
+                      <Button type="button" size="icon-xs" variant="ghost" className="size-7 shrink-0 rounded-lg" aria-label="Browser options" title="Browser options">
                         <MoreHorizontal className="size-3.5" />
                       </Button>
                     </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-56">
-                      <DropdownMenuLabel>Viewport resolution</DropdownMenuLabel>
-                      <form className="flex items-center gap-1 px-1.5 pb-1" onSubmit={(event) => { event.preventDefault(); resizeBrowser(); }}>
+                    <DropdownMenuContent align="end" className="w-72">
+                      <DropdownMenuLabel>Viewport</DropdownMenuLabel>
+                      <div className="flex items-center gap-1 px-1.5 pb-2">
                         <Input value={browserWidthInput} onChange={(event) => setBrowserWidthInput(event.target.value)} aria-label="Browser width" className="h-7 w-full px-2 text-[11px]" inputMode="numeric" />
                         <span className="text-xs text-muted-foreground">×</span>
                         <Input value={browserHeightInput} onChange={(event) => setBrowserHeightInput(event.target.value)} aria-label="Browser height" className="h-7 w-full px-2 text-[11px]" inputMode="numeric" />
-                        <Button type="submit" size="xs" variant="secondary" className="h-7">Set</Button>
-                      </form>
+                        <Button type="button" size="xs" variant="secondary" className="h-7" onClick={resizeBrowser}>Set</Button>
+                      </div>
+                      {browserHistory.length ? (
+                        <>
+                          <DropdownMenuLabel className="pt-1">Recent</DropdownMenuLabel>
+                          {browserHistory.slice(0, 6).map((entry) => (
+                            <DropdownMenuItem
+                              key={entry.id}
+                              className="min-w-0 gap-2"
+                              title={entry.url}
+                              onSelect={() => {
+                                browserInputDirtyRef.current = false;
+                                setBrowserInput(entry.url);
+                                navigateBrowser(entry.url);
+                              }}
+                            >
+                              <span className="w-9 shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                                {new Date(entry.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                              </span>
+                              <span className="min-w-0 flex-1 truncate text-xs">{entry.title || entry.url}</span>
+                            </DropdownMenuItem>
+                          ))}
+                        </>
+                      ) : null}
                     </DropdownMenuContent>
                   </DropdownMenu>
-                  {browserLoading ? <LoaderCircle className="ml-1 size-3.5 animate-spin text-muted-foreground" /> : null}
-                  <span className="flex shrink-0 items-center gap-1 text-[10px] text-emerald-400"><span className="size-1.5 rounded-full bg-emerald-400" />Live</span>
-                  <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">{browserUrl || "Server browser ready"}</span>
-                </div>
+                </form>
+
                 <div
                   ref={browserViewportRef}
                   tabIndex={0}
                   role="application"
                   aria-label="Embedded browser viewport. Click the page, then type or use keyboard shortcuts."
                   data-browser-viewport
-                  className="min-h-0 flex-1 overflow-auto rounded-md border border-border/40 bg-zinc-950 outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                  className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-xl border border-border/45 bg-[#090a0b] p-1.5 outline-none shadow-inner focus-visible:ring-2 focus-visible:ring-primary/45"
                   onKeyDown={pressBrowserKey}
                   onWheel={(event) => {
                     event.preventDefault();
                     if (!sendBrowserStreamAction("scroll", { deltaY: event.deltaY })) void performBrowserAction("scroll", { deltaY: event.deltaY });
                   }}
                 >
-                  <img
-                    ref={browserScreenshotRef}
-                    alt="Server browser page"
-                    className="hidden w-full cursor-crosshair"
-                    onClick={clickBrowserScreenshot}
-                  />
-                  {agentPointer ? (
-                    <div
-                      className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-1/2 transition-opacity duration-300"
-                      style={{ left: `${(agentPointer.x * 100).toFixed(2)}%`, top: `${(agentPointer.y * 100).toFixed(2)}%` }}
-                    >
-                      <div className="relative flex size-6 items-center justify-center rounded-full border-2 border-sky-400/90 bg-sky-400/15 shadow-[0_0_8px_rgba(56,189,248,0.5)]">
-                        {agentPointer.kind === "click" ? <div className="size-1.5 rounded-full bg-sky-400" /> : null}
-                        {agentPointer.kind === "type" ? <span className="text-[9px] leading-none text-sky-300">⌨</span> : null}
-                        {agentPointer.kind === "scroll" ? <span className="text-[9px] leading-none text-sky-300">↕</span> : null}
-                        {agentPointer.kind === "drag" ? <span className="text-[9px] leading-none text-sky-300">⇄</span> : null}
-                        {agentPointer.kind === "hover" ? <div className="size-1 rounded-full border border-sky-300/80" /> : null}
-                      </div>
-                      {agentPointer.kind !== "hover" ? (
-                        <span className="absolute left-1/2 top-full mt-1 -translate-x-1/2 whitespace-nowrap rounded bg-zinc-950/90 px-1.5 py-0.5 text-[9px] font-medium text-sky-300 ring-1 ring-sky-400/40">
-                          {agentPointer.kind === "type" ? `typing${agentPointer.detail ? `: ${agentPointer.detail}` : "…"}` : agentPointer.kind}
-                        </span>
-                      ) : null}
-                    </div>
-                  ) : null}
                   <div
-                    ref={browserScreenshotPlaceholderRef}
-                    className="flex h-full min-h-48 items-center justify-center px-6 text-center text-xs text-muted-foreground"
+                    className="relative shrink-0 overflow-hidden rounded-[10px] bg-white shadow-[0_16px_48px_rgba(0,0,0,0.34)] ring-1 ring-white/10"
+                    style={browserFrameSize.width > 0 && browserFrameSize.height > 0
+                      ? { width: `${browserFrameSize.width}px`, height: `${browserFrameSize.height}px` }
+                      : { width: "100%", aspectRatio: `${browserViewport.width} / ${browserViewport.height}` }}
                   >
-                    Enter a URL to open it in the server browser. The page is rendered on the server, so localhost links refer to the server.
+                    <img
+                      ref={browserScreenshotRef}
+                      alt="Server browser page"
+                      draggable={false}
+                      className="metis-browser-page-surface absolute inset-0 hidden h-full w-full object-fill cursor-default"
+                      onPointerDown={beginBrowserPointer}
+                      onPointerMove={moveBrowserPointer}
+                      onPointerUp={endBrowserPointer}
+                      onPointerCancel={() => { browserPointerGestureRef.current = null; }}
+                    />
+                    {agentPointer ? (
+                      <span
+                        key={agentPointer.ts}
+                        className="metis-browser-agent-cursor"
+                        style={{ left: `${agentPointer.x * 100}%`, top: `${agentPointer.y * 100}%` }}
+                      >
+                        <BrowserAgentCursor kind={agentPointer.kind} />
+                      </span>
+                    ) : null}
+                    <div
+                      ref={browserScreenshotPlaceholderRef}
+                      className="absolute inset-0 flex items-center justify-center bg-[#0d0e10] px-8 text-center text-xs text-zinc-400"
+                    >
+                      Enter a URL to open it in the server browser.
+                    </div>
+                  </div>
+                  <div className="pointer-events-none absolute bottom-2.5 left-2.5 flex max-w-[70%] items-center gap-1.5 rounded-full border border-white/10 bg-black/45 px-2 py-1 text-[10px] text-white/55 backdrop-blur-md">
+                    <span className={cn("size-1.5 rounded-full", browserLoading ? "animate-pulse bg-amber-300/80" : "bg-emerald-300/70")} />
+                    <span className="truncate">{browserLoading ? "Loading" : (browserUrl ? "Live browser" : "Ready")}</span>
+                    <span className="text-white/30">·</span>
+                    <span className="tabular-nums">{browserViewport.width}×{browserViewport.height}</span>
                   </div>
                 </div>
-                {browserError ? <div className="shrink-0 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1.5 text-xs text-destructive">{browserError}</div> : null}
-              </>
+                {browserError ? <div className="shrink-0 rounded-lg border border-destructive/30 bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">{browserError}</div> : null}
+              </div>
             ) : workspaceTab === "monitor" ? (
               <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
                 {monitorData.current ? (
@@ -9057,20 +9692,76 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               </p>
             ) : activeWorkspace.type === "plan" ? (
               <>
-                <div className="flex items-center justify-end gap-1">
+                <div className="flex flex-wrap items-center justify-end gap-1">
                   <Button
                     type="button"
                     size="xs"
                     className="ml-auto"
-                    disabled={busy}
+                    disabled={busy || reverting}
                     onClick={() => buildPlan({
                       title: activeWorkspace.name,
                       content: activeWorkspace.content,
+                      workspaceLink: `workspace://plan/${activeWorkspace.id}`,
                     })}
                   >
-                    {busy ? "Agent running…" : "Build plan"}
+                    {busy || reverting ? "Agent running…" : "Build"}
                   </Button>
+                  {planLooksParallelizable(activeWorkspace.content) ? (
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      disabled={busy || reverting}
+                      title="Split independent work across parallel subagents"
+                      onClick={() => buildPlan({
+                        title: activeWorkspace.name,
+                        content: activeWorkspace.content,
+                        workspaceLink: `workspace://plan/${activeWorkspace.id}`,
+                      }, { multiAgent: true })}
+                    >
+                      {busy || reverting ? "Agent running…" : "Build in parallel"}
+                    </Button>
+                  ) : null}
                 </div>
+                {subagentOutputs.length > 0 ? (
+                  <section className="shrink-0 rounded-lg border border-purple-400/20 bg-purple-400/[0.06]">
+                    <div className="flex items-center gap-2 px-2.5 py-2 text-xs">
+                      <Bot className="size-3.5 text-purple-300" />
+                      <span className="font-medium text-foreground/80">Subagents</span>
+                      <span className="text-muted-foreground/70">
+                        {runningSubagents.length} running · {subagentOutputs.length} total
+                      </span>
+                    </div>
+                    <div className="border-t border-purple-400/15 px-2 py-1">
+                      {subagentOutputs.map((tool) => (
+                        <button
+                          key={tool.id}
+                          type="button"
+                          className={cn(
+                            "flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs hover:bg-muted/40",
+                            selectedSubagent?.id === tool.id && "bg-muted/60",
+                          )}
+                          onClick={() => setActiveSubagent(tool)}
+                        >
+                          {tool.status === "running" ? (
+                            <LoaderCircle className="size-3 animate-spin text-purple-300" />
+                          ) : (
+                            <Bot className="size-3 text-muted-foreground" />
+                          )}
+                          <span className="min-w-0 flex-1 truncate">
+                            {tool.subagent?.title || tool.subagent?.prompt || tool.name}
+                          </span>
+                          {tool.subagent?.model ? (
+                            <span className="max-w-28 shrink-0 truncate text-[10px] text-muted-foreground/70">
+                              {tool.subagent.model}
+                            </span>
+                          ) : null}
+                          <span className="shrink-0 text-[10px] text-muted-foreground/70">{tool.status}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
                 <div className="flex min-h-0 flex-1 flex-col gap-2">
                   <div className="flex items-center gap-1">
                     <Input
@@ -9487,6 +10178,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         voiceEndpoint={voiceEndpoint}
         onVoiceApiKeySave={saveVoiceApiKey}
         onVoiceInputSettingsChange={updateVoiceInputSettings}
+        browserEnabled={browserEnabled}
         browserRealtime={browserRealtime}
         browserFps={browserFps}
         browserViewportWidth={browserDefaultViewport.width}
@@ -9519,6 +10211,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         onMemoriesChanged={() => void loadMemories()}
         onMemoryDeleted={(id) => setMemories((current) => current.filter((memory) => memory.id !== id))}
         onChatsChanged={() => void loadChats()}
+        usageSnapshot={planUsageSnapshot}
+        onRefreshUsage={() => refreshPlanUsage(true)}
         onModelsChanged={() => void loadModels()}
         onModesChanged={() => void loadModes()}
         onLogout={() => void logout()}
@@ -9553,7 +10247,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           key={selectedSubagent.id}
           tool={selectedSubagent}
           onBack={() => setActiveSubagent(null)}
-          onCancel={() => void cancelSubagent()}
+          onCancel={selectedSubagent.subagent?.chatId ? () => void cancelSubagent() : undefined}
           cancelling={cancellingSubagent}
           sidebarWidth={desktopSidebarOpen ? sidebarWidth : 0}
         />

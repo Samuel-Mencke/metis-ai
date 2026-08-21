@@ -4,8 +4,19 @@ export function sleep(ms: number) {
   });
 }
 
+const DEFAULT_WORKER_CONCURRENCY = 8;
+
+/** Invalid or missing configuration falls back to a bounded production default. */
+export function parseWorkerConcurrency(raw: string | undefined): number {
+  if (raw == null || raw.trim() === "") return DEFAULT_WORKER_CONCURRENCY;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_WORKER_CONCURRENCY;
+  return Math.floor(parsed);
+}
+
 export function describeQueueWait(running: number, queuedAhead: number, maxWorkers: number): string | undefined {
-  const workers = Number.isFinite(maxWorkers) ? Math.max(1, Math.floor(maxWorkers)) : 1;
+  if (maxWorkers <= 0 || !Number.isFinite(maxWorkers)) return undefined;
+  const workers = Math.max(1, Math.floor(maxWorkers));
   const freeSlots = Math.max(0, workers - Math.max(0, running));
   const ahead = Math.max(0, queuedAhead);
   // Only surface a wait when this job cannot take a free slot. Queued jobs
@@ -26,7 +37,7 @@ export async function waitForSchedulerTick(
     await sleep(pollMs);
     return "idle-poll";
   }
-  if (active.size >= concurrency) {
+  if (Number.isFinite(concurrency) && concurrency > 0 && active.size >= concurrency) {
     await Promise.race(active);
     return "slot-freed";
   }

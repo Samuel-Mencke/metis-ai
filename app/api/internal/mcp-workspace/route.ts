@@ -12,6 +12,11 @@ function authorized(req: Request) {
   return bearerTokenMatches(req, process.env.MCP_BEARER_TOKEN);
 }
 
+export async function GET(req: Request) {
+  if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  return Response.json({ ok: true, service: "workspace" });
+}
+
 export async function POST(req: Request) {
   if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
   if (req.headers.get("x-ai-chat-incognito") === "1") {

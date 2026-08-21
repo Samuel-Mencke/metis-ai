@@ -32,9 +32,11 @@
     "**/*.ts",
     "**/*.tsx",
     ".next/types/**/*.ts",
-    "next-env.d.ts"
+    "next-env.d.ts",
+    ".next-a/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    "data/provider-sessions"
   ]
 }

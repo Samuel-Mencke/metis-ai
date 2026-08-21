@@ -2,7 +2,7 @@ import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { captureApiError } from "@/lib/error-logs";
 import { enqueueJob, getActiveJob } from "@/lib/db-jobs";
 import {
-  appendMessage,
+  appendMessageInTransaction,
   getChat,
   titleFromMessage,
   updateChat,
@@ -45,6 +45,7 @@ type ChatBody = {
   attachments?: IncomingAttachment[];
   storedAttachments?: StoredAttachment[];
   incognito?: boolean;
+  streamDeviceId?: string;
 };
 
 export async function POST(req: Request) {
@@ -113,6 +114,7 @@ export async function POST(req: Request) {
     if (chat.incognito) {
       references = [];
     }
+    const requestedMessageId = body.messageId?.trim() || undefined;
     const resolvedExplicit = resolveReferences(ownerId, chatId, references);
     const pinnedReferences = chat.incognito
       ? []
@@ -126,7 +128,22 @@ export async function POST(req: Request) {
         return true;
       },
     );
-    if (getActiveJob(chatId, ownerId)) {
+    const activeJob = getActiveJob(chatId, ownerId);
+    if (activeJob) {
+      // Network retries reuse messageId. Returning the already accepted job is
+      // idempotent; treating the retry as a second run produces random-looking
+      // 409/queue behavior even though the first POST succeeded.
+      if (requestedMessageId && activeJob.messageId === requestedMessageId) {
+        return Response.json(
+          {
+            jobId: activeJob.id,
+            runId: activeJob.runId || activeJob.id,
+            status: activeJob.status,
+            queueMessage: activeJob.queueMessage,
+          },
+          { status: 202 },
+        );
+      }
       return Response.json(
         {
           error:
@@ -174,10 +191,13 @@ export async function POST(req: Request) {
     } catch (error) {
       return Response.json({ error: String(error) }, { status: 400 });
     }
-    const messageId = body.messageId?.trim() || crypto.randomUUID();
-    appendMessage(chatId, {
+    const messageId = requestedMessageId || crypto.randomUUID();
+    const streamDeviceId = body.streamDeviceId?.trim().slice(0, 120)
+      || req.headers.get("x-metis-device-id")?.trim().slice(0, 120)
+      || undefined;
+    const userMessage = {
       id: messageId,
-      role: "user",
+      role: "user" as const,
       content:
         message ||
         `Attached ${stored.length} file${stored.length === 1 ? "" : "s"}`,
@@ -186,17 +206,7 @@ export async function POST(req: Request) {
       ...((stored.length ? stored : storedAttachments).length
         ? { attachments: stored.length ? stored : storedAttachments }
         : {}),
-    });
-    if (chat.title === "New chat" || !chat.title.trim()) {
-      updateChat(
-        chatId,
-        {
-          title: titleFromMessage(message || `Attached ${stored.length} files`),
-          titleSource: "default",
-        },
-        ownerId,
-      );
-    }
+    };
     let job;
     try {
       job = enqueueJob({
@@ -217,6 +227,12 @@ export async function POST(req: Request) {
           ? { attachments: stored.length ? stored : storedAttachments }
           : {}),
         ...(chat.incognito ? { incognito: true } : {}),
+        ...(streamDeviceId ? { streamDeviceId } : {}),
+      }, {
+        beforeInsert: () => {
+          const appended = appendMessageInTransaction(chatId, userMessage, ownerId);
+          if (!appended) throw new Error("Chat not found while enqueueing message");
+        },
       });
     } catch (error) {
       if (error instanceof Error && error.name === "ActiveChatRun") {
@@ -229,6 +245,16 @@ export async function POST(req: Request) {
         );
       }
       throw error;
+    }
+    if (chat.title === "New chat" || !chat.title.trim()) {
+      updateChat(
+        chatId,
+        {
+          title: titleFromMessage(message || `Attached ${stored.length} files`),
+          titleSource: "default",
+        },
+        ownerId,
+      );
     }
     updateChat(
       chatId,

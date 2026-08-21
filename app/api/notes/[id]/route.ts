@@ -19,6 +19,8 @@ function patchFromBody(body: Record<string, unknown>): NoteWriteInput {
   return {
     title: typeof body.title === "string" ? body.title : undefined,
     content: typeof body.content === "string" ? body.content : undefined,
+    kind: body.kind === "project" || body.kind === "note" ? body.kind : undefined,
+    todos: Array.isArray(body.todos) ? body.todos as NoteWriteInput["todos"] : undefined,
     color: typeof body.color === "string" ? body.color : undefined,
     position: position ? { x: Number(position.x), y: Number(position.y) } : undefined,
     size: size ? { width: Number(size.width), height: Number(size.height) } : undefined,

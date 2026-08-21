@@ -15,6 +15,11 @@ function authorized(req: Request) {
   return bearerTokenMatches(req, process.env.MCP_BEARER_TOKEN);
 }
 
+export async function GET(req: Request) {
+  if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  return Response.json({ ok: true, service: "notes" });
+}
+
 export async function POST(req: Request) {
   if (!authorized(req)) return Response.json({ error: "Unauthorized" }, { status: 401 });
   if (req.headers.get("x-ai-chat-incognito") === "1") {
@@ -53,6 +58,8 @@ export async function POST(req: Request) {
         author: "agent",
         title: typeof body.title === "string" ? body.title : undefined,
         content: typeof body.content === "string" ? body.content : undefined,
+        kind: body.kind === "project" || body.kind === "note" ? body.kind : undefined,
+        todos: Array.isArray(body.todos) ? body.todos as import("@/lib/store").NoteTodo[] : undefined,
         color: typeof body.color === "string" ? body.color : undefined,
         position: body.position && typeof body.position === "object" ? body.position as { x?: number; y?: number } : undefined,
         size: body.size && typeof body.size === "object" ? body.size as { width?: number; height?: number } : undefined,
@@ -73,7 +80,9 @@ export async function POST(req: Request) {
     chatId,
     workspaceId,
     scope: body.scope === "global" || body.scope === "workspace" ? body.scope : "chat",
-    title: typeof body.title === "string" ? body.title : "Agent note",
+    kind: body.kind === "project" ? "project" : "note",
+    todos: Array.isArray(body.todos) ? body.todos as import("@/lib/store").NoteTodo[] : undefined,
+    title: typeof body.title === "string" ? body.title : body.kind === "project" ? "Agent project" : "Agent note",
     content: typeof body.content === "string" ? body.content : "",
     color: typeof body.color === "string" ? body.color : undefined,
     position: body.position && typeof body.position === "object" ? body.position as { x?: number; y?: number } : undefined,

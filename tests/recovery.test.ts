@@ -94,7 +94,7 @@ test("worker restart recovery requeues orphaned running jobs", () => {
   const chat = createChat("Orphan");
   const job = enqueueJob({ chatId: chat.id, message: "go" });
   updateJob(job.id, { status: "running" });
-  const recovered = recoverStaleJobs();
+  const recovered = recoverStaleJobs(0);
   assert.ok(recovered.resumed.some((item) => item.id === job.id));
   assert.equal(getJob(job.id)?.status, "queued");
   assert.match(getJob(job.id)?.resumePrompt || "", /Continue from the last saved/);
@@ -124,6 +124,43 @@ test("periodic snapshots reuse one row and ignore unknown owner ids", () => {
   assert.equal(getLatestSnapshot(chat.id)?.runStatus, "running");
 });
 
+test("enqueue is idempotent by message id and never duplicates the chat message", () => {
+  const { createChat, getChat, appendMessageInTransaction } = modules[0];
+  const { enqueueJob, updateJob } = modules[1];
+  const chat = createChat("Idempotent submit");
+  const messageId = `u-${randomUUID()}`;
+  const input = { chatId: chat.id, message: "hello", messageId };
+  const beforeInsert = () => {
+    appendMessageInTransaction(chat.id, { id: messageId, role: "user", content: "hello" });
+  };
+  const first = enqueueJob(input, { beforeInsert });
+  const retry = enqueueJob(input, { beforeInsert });
+  assert.equal(retry.id, first.id);
+  assert.equal(getChat(chat.id)?.messages.filter((message) => message.id === messageId).length, 1);
+  updateJob(first.id, { status: "completed" });
+});
+
+test("active-run rejection does not execute submission side effects", () => {
+  const { createChat, getChat, appendMessageInTransaction } = modules[0];
+  const { enqueueJob, updateJob } = modules[1];
+  const chat = createChat("Atomic submit");
+  const active = enqueueJob({ chatId: chat.id, message: "first", messageId: `u-${randomUUID()}` });
+  const secondId = `u-${randomUUID()}`;
+  assert.throws(
+    () => enqueueJob(
+      { chatId: chat.id, message: "second", messageId: secondId },
+      {
+        beforeInsert: () => {
+          appendMessageInTransaction(chat.id, { id: secondId, role: "user", content: "second" });
+        },
+      },
+    ),
+    (error: unknown) => error instanceof Error && error.name === "ActiveChatRun",
+  );
+  assert.equal(getChat(chat.id)?.messages.some((message) => message.id === secondId), false);
+  updateJob(active.id, { status: "completed" });
+});
+
 test("a second chat can start immediately while a worker slot is free", () => {
   process.env.AI_CHAT_WORKER_CONCURRENCY = "2";
   const { createChat } = modules[0];
@@ -150,4 +187,25 @@ test("claimNextJob skips an unreadable queued row instead of stalling the queue"
   assert.equal(claimed?.id, next.id);
   assert.equal(claimedIds.includes(blocked.id), false);
   assert.equal(getJob(blocked.id)?.status, "error");
+});
+
+test("interactive jobs outrank background jobs and reserved slots skip background work", () => {
+  const { createChat } = modules[0];
+  const { enqueueJob, claimNextJob, updateJob } = modules[1];
+  const background = enqueueJob({
+    chatId: createChat("Background priority").id,
+    message: "background",
+    workload: "background",
+    priority: 10,
+  });
+  const interactive = enqueueJob({
+    chatId: createChat("Interactive priority").id,
+    message: "interactive",
+    workload: "interactive",
+    priority: 100,
+  });
+  assert.equal(claimNextJob({ interactiveOnly: true })?.id, interactive.id);
+  updateJob(interactive.id, { status: "completed" });
+  assert.equal(claimNextJob()?.id, background.id);
+  updateJob(background.id, { status: "completed" });
 });

@@ -13,6 +13,7 @@ export type FeatureFlags = {
   recovery: boolean;
   askUserTimeout: boolean;
   voiceInput: boolean;
+  browser: boolean;
 };
 
 export function featureFlags(settings?: GlobalModelSettings): FeatureFlags {
@@ -22,6 +23,7 @@ export function featureFlags(settings?: GlobalModelSettings): FeatureFlags {
     recovery: settings?.featureFlags?.recovery ?? envFlag("FEATURE_RECOVERY", true),
     askUserTimeout: settings?.featureFlags?.askUserTimeout ?? envFlag("FEATURE_ASK_USER_TIMEOUT", true),
     voiceInput: settings?.featureFlags?.voiceInput ?? envFlag("FEATURE_VOICE_INPUT", true),
+    browser: settings?.featureFlags?.browser ?? envFlag("FEATURE_BROWSER", true),
   };
 }
 

@@ -28,6 +28,40 @@ export type McpContext = {
   compressionToolResults?: boolean;
 };
 
+export function buildMcpContext(input: {
+  chatId?: string;
+  userId?: string;
+  jobId?: string;
+  incognito?: boolean;
+  automation?: boolean;
+  modeId?: string;
+  modePolicy?: string | { allowedCategories: unknown; toolOverrides?: unknown };
+  compressionEnabled?: boolean;
+  compressionMode?: string;
+  compressionToolResults?: boolean;
+}): McpContext {
+  const modePolicy = typeof input.modePolicy === "string"
+    ? input.modePolicy
+    : input.modePolicy
+      ? JSON.stringify({
+          allowedCategories: input.modePolicy.allowedCategories,
+          toolOverrides: input.modePolicy.toolOverrides || {},
+        })
+      : undefined;
+  return {
+    chatId: input.chatId,
+    userId: input.userId,
+    jobId: input.jobId,
+    incognito: input.incognito,
+    automation: input.automation,
+    modeId: input.modeId,
+    modePolicy,
+    compressionEnabled: input.compressionEnabled,
+    compressionMode: input.compressionMode,
+    compressionToolResults: input.compressionToolResults,
+  };
+}
+
 export function getMcpServers(context: McpContext = {}): McpServerMap {
   const appRoot = config.root;
   const agentCwd = getUserAgentCwd(context.userId);
@@ -46,6 +80,18 @@ export function getMcpServers(context: McpContext = {}): McpServerMap {
       MCP_COMPRESSION_MODE: context.compressionMode,
       MCP_COMPRESSION_TOOL_RESULTS: context.compressionToolResults === false ? "0" : "1",
       MCP_AGENT_CWD: agentCwd,
+      AI_CHAT_INTERNAL_ORIGIN: config.internalOrigin,
+      AI_CHAT_PUBLIC_URL: config.publicUrl,
+      AI_CHAT_INTERNAL_URL: config.internalUrl,
+      AI_CHAT_WORKSPACE_URL: config.workspaceUrl,
+      AI_CHAT_CHAT_URL: config.chatUrl,
+      AI_CHAT_NOTES_URL: config.notesUrl,
+      AI_CHAT_MEMORY_URL: config.memoryUrl,
+      AI_CHAT_BROWSER_URL: config.browserUrl,
+      AI_CHAT_AGENT_STATE_URL: config.agentStateUrl,
+      AI_CHAT_SUBAGENT_URL: config.subagentUrl,
+      AI_CHAT_AUTOMATION_URL: config.automationUrl,
+      AI_CHAT_FILE_URL: config.fileUrl,
       MCP_OS_USERNAME: identity?.username,
       MCP_OS_UID: identity ? String(identity.uid) : undefined,
       MCP_OS_GID: identity ? String(identity.gid) : undefined,
@@ -80,10 +126,49 @@ export async function checkGatewayHealth(): Promise<{
   ok: boolean;
   url: string;
   detail: string;
+  checks?: Record<string, { ok: boolean; url: string; detail: string }>;
 }> {
+  const checks = Object.fromEntries(
+    await Promise.all(
+      [
+        ["gateway", `${config.mcpPublicUrl.replace(/\/+$/, "")}/health`],
+        ["workspace", config.workspaceUrl],
+        ["chat", config.chatUrl],
+        ["subagent", config.subagentUrl],
+        ["agentState", config.agentStateUrl],
+      ].map(async ([name, url]) => {
+        try {
+          const response = await fetch(url, {
+            headers: config.mcpBearerToken
+              ? { Authorization: `Bearer ${config.mcpBearerToken}` }
+              : undefined,
+            signal: AbortSignal.timeout(2_000),
+          });
+          const contentType = response.headers.get("content-type") || "";
+          const body = await response.text();
+          const validBody = !/^text\/html\b/i.test(contentType) && !/^\s*<!doctype html/i.test(body);
+          return [name, {
+            ok: response.ok && validBody,
+            url,
+            detail: response.ok && validBody
+              ? `HTTP ${response.status}`
+              : `HTTP ${response.status}${validBody ? "" : "; HTML response received"}`,
+          }] as const;
+        } catch (error) {
+          return [name, {
+            ok: false,
+            url,
+            detail: error instanceof Error ? error.message : "health check failed",
+          }] as const;
+        }
+      }),
+    ),
+  );
+  const ok = Object.values(checks).every((check) => check.ok);
   return {
-    ok: true,
+    ok,
     url: "stdio://ai-chat-internal-mcp",
-    detail: "internal MCP configured",
+    detail: ok ? "internal MCP and runtime routes are healthy" : "one or more MCP/runtime routes are unhealthy",
+    checks,
   };
 }

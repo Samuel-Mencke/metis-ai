@@ -3,8 +3,10 @@ import test from "node:test";
 import {
   compactFileDiff,
   compactToolPreview,
+  classifyToolKind,
   isToolRunning,
   layoutAssistantParts,
+  planFromToolPayload,
   remoteClientHostnameMap,
   todosFromToolPayload,
   toolCallHeadline,
@@ -12,7 +14,7 @@ import {
   truncateToolText,
 } from "../lib/tool-call-display";
 
-type LayoutTool = { id: string; name?: string; kind?: string; status?: string };
+type LayoutTool = { id: string; name?: string; kind?: string; status?: string; input?: string; todos?: Array<{ content: string }> };
 
 test("compactToolPreview hides JSON payloads from titles", () => {
   assert.equal(compactToolPreview('{"status":"success","value":{"content":"const x = 1"}}'), undefined);
@@ -112,6 +114,64 @@ test("layoutAssistantParts starts a new tool group after text, todos, and other 
   );
 });
 
+test("layoutAssistantParts keeps only the latest plan and todo state", () => {
+  const blocks = layoutAssistantParts<LayoutTool>([
+    { type: "tool", id: "plan-1", name: "create_plan", kind: "plan", status: "completed", input: "old plan" },
+    { type: "tool", id: "todo-1", name: "write_todos", kind: "todo", status: "completed", todos: [{ content: "old task" }] },
+    { type: "tool", id: "plan-2", name: "edit_plan", kind: "plan", status: "completed", input: "final plan" },
+    { type: "tool", id: "todo-2", name: "write_todos", kind: "todo", status: "completed", todos: [{ content: "final task" }] },
+  ]);
+
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0]?.type, "tools");
+  if (blocks[0]?.type === "tools") {
+    assert.deepEqual(blocks[0].tools.map((tool) => tool.id), ["plan-2", "todo-2"]);
+  }
+});
+
+test("layoutAssistantParts keeps a running intermediate plan out of the finished-plan path", () => {
+  const blocks = layoutAssistantParts<LayoutTool>([
+    { type: "tool", id: "plan-running", name: "create_plan", kind: "plan", status: "in_progress", input: '{"content":"Draft"}' },
+    { type: "tool", id: "tool-after", name: "read_file", kind: "read", status: "completed" },
+  ]);
+  const planBlock = blocks.find((block) =>
+    block.type === "tools" && block.tools.some((tool) => tool.id === "plan-running"));
+  assert.equal(planBlock?.type, "tools");
+  if (planBlock?.type === "tools") {
+    const plan = planBlock.tools.find((tool) => tool.id === "plan-running");
+    assert.equal(plan?.status, "in_progress");
+  }
+});
+
+test("planFromToolPayload deeply unwraps nested plan responses", () => {
+  const plan = planFromToolPayload(JSON.stringify({
+    status: "success",
+    result: JSON.stringify({
+      value: {
+        plan: { id: "plan-42", title: "Release plan", content: "Ship it." },
+      },
+    }),
+  }));
+  assert.deepEqual(plan, {
+    title: "Release plan",
+    content: "Ship it.",
+    workspaceLink: "workspace://plan/plan-42",
+  });
+});
+
+test("layoutAssistantParts presents todo directly below the latest plan", () => {
+  const blocks = layoutAssistantParts<LayoutTool>([
+    { type: "tool", id: "todo-final", name: "write_todos", kind: "todo", status: "completed", todos: [{ content: "Ship" }] },
+    { type: "tool", id: "plan-final", name: "create_plan", kind: "plan", status: "completed", input: "plan" },
+  ]);
+
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0]?.type, "tools");
+  if (blocks[0]?.type === "tools") {
+    assert.deepEqual(blocks[0].tools.map((tool) => tool.kind), ["plan", "todo"]);
+  }
+});
+
 test("toolCallHeadline uses the local shell command as the title", () => {
   const headline = toolCallHeadline({
     name: "execute_command",
@@ -197,6 +257,11 @@ test("toolCallHeadline includes read line ranges and grep patterns", () => {
   );
 });
 
+test("write_todos classifies as todo for the Tasks card", () => {
+  assert.equal(classifyToolKind("write_todos"), "todo");
+  assert.equal(classifyToolKind("updateTodos"), "todo");
+});
+
 test("todosFromToolPayload reads todo lists from tool JSON", () => {
   const todos = todosFromToolPayload(
     JSON.stringify({
@@ -209,6 +274,50 @@ test("todosFromToolPayload reads todo lists from tool JSON", () => {
   assert.equal(todos?.length, 2);
   assert.equal(todos?.[0]?.content, "Fix composer");
   assert.equal(todosFromToolPayload('{"status":"ok"}'), undefined);
+});
+
+test("call_mcp_tool write_todos unwraps string arguments into a Tasks card", () => {
+  const input = JSON.stringify({
+    server: "gateway",
+    toolName: "write_todos",
+    arguments: JSON.stringify({
+      todos: [
+        { id: "diag", content: "Diagnose", status: "completed" },
+        { id: "fix", content: "Fix todos", status: "in_progress" },
+      ],
+    }),
+  });
+  const todos = todosFromToolPayload(input);
+  assert.equal(todos?.length, 2);
+  assert.equal(classifyToolKind("call_mcp_tool", input), "todo");
+  const blocks = layoutAssistantParts<LayoutTool>([
+    { type: "tool", id: "1", name: "call_mcp_tool", kind: "mcp", input, status: "completed" },
+  ]);
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0]?.type, "tools");
+  if (blocks[0]?.type === "tools") {
+    assert.equal(blocks[0].tools[0]?.kind, "todo");
+    assert.equal(blocks[0].tools[0]?.todos?.length, 2);
+  }
+});
+
+test("todosFromToolPayload unwraps Cursor mcp write_todos payloads", () => {
+  const todos = todosFromToolPayload(
+    JSON.stringify({
+      toolName: "write_todos",
+      args: {
+        todos: [
+          { content: "Fix tokens", status: "inProgress" },
+        ],
+      },
+    }),
+  );
+  assert.equal(todos?.length, 1);
+  assert.equal(todos?.[0]?.status, "in_progress");
+  assert.equal(classifyToolKind("mcp", {
+    toolName: "write_todos",
+    args: { todos: [{ content: "Fix tokens", status: "pending" }] },
+  }), "todo");
 });
 
 test("compactFileDiff shows only the changed hunk", () => {
