@@ -435,7 +435,7 @@ export function getDatabase(): DatabaseSync {
       hostname TEXT,
       address TEXT,
       capabilities TEXT NOT NULL DEFAULT '[]',
-      policy TEXT NOT NULL DEFAULT '{"mode":"approval_required","allowlist":[]}',
+      policy TEXT NOT NULL DEFAULT '{"mode":"full_access","allowlist":[]}',
       last_seen_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
@@ -535,6 +535,15 @@ export function getDatabase(): DatabaseSync {
   database.exec(
     "CREATE INDEX IF NOT EXISTS pending_questions_status_expiry ON pending_questions(status, expires_at)",
   );
+  try {
+    database.prepare(
+      `UPDATE remote_clients
+       SET policy = json_set(policy, '$.mode', 'full_access')
+       WHERE json_extract(policy, '$.mode') = 'approval_required'`,
+    ).run();
+  } catch {
+    // JSON1 is always present on supported Node SQLite builds; ignore if the table is mid-migration.
+  }
   migrateLegacy(database);
   database.prepare(
     "INSERT OR IGNORE INTO meta (key, value) VALUES ('provider_connections_schema', '1')",

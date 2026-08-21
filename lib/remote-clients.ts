@@ -21,6 +21,16 @@ export type RemotePolicy = {
   allowlist: string[];
 };
 
+export const DEFAULT_REMOTE_POLICY: RemotePolicy = { mode: "full_access", allowlist: [] };
+
+export function normalizeRemotePolicy(policy?: Partial<RemotePolicy> | null): RemotePolicy {
+  const allowlist = [...new Set((policy?.allowlist || []).map((item) => String(item).trim()).filter(Boolean))].slice(0, 100);
+  return {
+    mode: policy?.mode === "restricted" ? "restricted" : "full_access",
+    allowlist,
+  };
+}
+
 export type RemoteClient = {
   id: string;
   ownerId: string;
@@ -122,7 +132,7 @@ function mapClient(row: Record<string, unknown>): RemoteClient {
     ...(row.hostname ? { hostname: String(row.hostname) } : {}),
     ...(row.address ? { address: String(row.address) } : {}),
     capabilities: safeJson<string[]>(row.capabilities, []),
-    policy: safeJson<RemotePolicy>(row.policy, { mode: "approval_required", allowlist: [] }),
+    policy: normalizeRemotePolicy(safeJson<RemotePolicy>(row.policy, DEFAULT_REMOTE_POLICY)),
     ...(row.lastSeenAt ? { lastSeenAt: String(row.lastSeenAt) } : {}),
     createdAt: String(row.createdAt),
     updatedAt: String(row.updatedAt),
@@ -177,7 +187,7 @@ export function registerRemoteClient(token: string, input: {
     input.version?.trim() || null,
     input.hostname?.trim() || null,
     JSON.stringify(input.capabilities?.slice(0, 64) || []),
-    JSON.stringify({ mode: "approval_required", allowlist: [] } satisfies RemotePolicy),
+    JSON.stringify(DEFAULT_REMOTE_POLICY),
     now,
     now,
   );
@@ -270,12 +280,7 @@ export function updateRemoteClient(id: string, ownerId: string, patch: {
 }) {
   const current = getRemoteClient(id, ownerId);
   if (!current) return null;
-  const nextPolicy = patch.policy
-    ? {
-        mode: patch.policy.mode,
-        allowlist: [...new Set(patch.policy.allowlist.map((item) => item.trim()).filter(Boolean))].slice(0, 100),
-      }
-    : current.policy;
+  const nextPolicy = patch.policy ? normalizeRemotePolicy(patch.policy) : current.policy;
   getDatabase().prepare(
     "UPDATE remote_clients SET name = ?, policy = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND revoked_at IS NULL",
   ).run(patch.name?.trim() || current.name, JSON.stringify(nextPolicy), iso(), id, ownerId);
@@ -300,23 +305,19 @@ export function deleteRemoteClient(id: string, ownerId: string) {
 
 export function authorizeRemoteAction(client: RemoteClient, action: RemoteAction, command?: string) {
   if (client.status === "revoked") return { allowed: false, requiresApproval: false, reason: "Client is revoked" };
-  if (client.policy.mode === "full_access") return { allowed: true, requiresApproval: false };
+  const mode = client.policy.mode === "restricted" ? "restricted" : "full_access";
+  if (mode === "full_access") return { allowed: true, requiresApproval: false };
   const mutatesFiles = action === "write_file" || action === "edit_file" || action === "delete_file";
   if (mutatesFiles) {
-    return client.policy.mode === "approval_required"
-      ? { allowed: true, requiresApproval: true }
-      : { allowed: false, requiresApproval: false, reason: "File changes are disabled by the client restricted policy" };
+    return { allowed: false, requiresApproval: false, reason: "File changes are disabled by the client restricted policy" };
   }
   if (action === "get_info" || action === "list_directory" || action === "read_file") {
     return { allowed: true, requiresApproval: false };
   }
-  if (action !== "execute_command") return { allowed: true, requiresApproval: client.policy.mode === "approval_required" };
+  if (action !== "execute_command") return { allowed: true, requiresApproval: false };
   const normalized = command?.trim() || "";
   const allowed = client.policy.allowlist.some((entry) => normalized === entry || normalized.startsWith(`${entry} `));
-  if (client.policy.mode === "restricted") {
-    return { allowed, requiresApproval: false, reason: allowed ? undefined : "Command is not in the client allowlist" };
-  }
-  return { allowed: true, requiresApproval: true };
+  return { allowed, requiresApproval: false, reason: allowed ? undefined : "Command is not in the client allowlist" };
 }
 
 export function createRemoteApproval(input: {

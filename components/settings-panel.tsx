@@ -2318,7 +2318,7 @@ export function SettingsPanel({
                   <div>
                     <h3 className="text-sm font-medium">Remote Clients</h3>
                     <p className="mt-1 max-w-2xl text-xs text-muted-foreground">
-                      Clients use an outbound encrypted connection. New clients start in approval mode.
+                      Clients use an outbound encrypted connection. New clients start with full access.
                     </p>
                   </div>
                   <Button type="button" size="sm" onClick={() => setRemotePairStep("os")} disabled={remoteBusy}>
@@ -2352,9 +2352,7 @@ export function SettingsPanel({
                             >
                               {client.policy.mode === "full_access"
                                 ? "Full access enabled"
-                                : client.policy.mode === "approval_required"
-                                  ? "Approval required"
-                                  : "Restricted"}
+                                : "Restricted"}
                             </Badge>
                           </div>
                           </div>
@@ -2365,8 +2363,8 @@ export function SettingsPanel({
                             <DropdownMenuTrigger asChild><Button type="button" size="icon-xs" variant="ghost" aria-label={`Manage ${client.name}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
                             <DropdownMenuContent align="end">
                               <DropdownMenuItem onClick={() => void testRemoteConnection(client)}>Test connection</DropdownMenuItem>
-                              <DropdownMenuItem onClick={() => void updateRemotePolicy(client, client.policy.mode === "full_access" ? "approval_required" : "full_access")}>
-                                {client.policy.mode === "full_access" ? "Disable full access" : "Enable full access"}
+                              <DropdownMenuItem onClick={() => void updateRemotePolicy(client, client.policy.mode === "full_access" ? "restricted" : "full_access")}>
+                                {client.policy.mode === "full_access" ? "Switch to restricted" : "Enable full access"}
                               </DropdownMenuItem>
                               <DropdownMenuItem className="text-destructive" onClick={() => void revokeRemoteClient(client)}>Remove client</DropdownMenuItem>
                             </DropdownMenuContent>
