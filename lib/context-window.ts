@@ -238,12 +238,7 @@ export function contextWindowForSelection(
   if (selectedWindow) return selectedWindow;
  if (contextValue?.trim()) return undefined;
 
-  const provider = (model?.providerId || "").toLowerCase();
-  const haystack = `${leafModelId(model?.id)} ${model?.displayName || ""}`.trim();
-  if (provider === "cursor") {
-    if (/grok-4\.6/i.test(haystack)) return 256_000;
-  }
-  return contextWindowForModel(model);
+ return contextWindowForModel(model);
 }
 
 /** Context tiers available for a model family, or null when it has a single tier. */

@@ -1532,7 +1532,7 @@ export function SettingsPanel({
                 <p className="text-xs text-muted-foreground">
                   {finishSound
                     ? `Custom sound: ${finishSound.name}`
-                    : "No custom sound uploaded. The default chime will be used."}
+                    : "No custom sound uploaded. The default completion sound plays when sound cues are on. Removing a custom file restores that default."}
                 </p>
                 <div className="border-t border-border/60 pt-4">
                   <h3 className="text-sm font-medium">Browser</h3>

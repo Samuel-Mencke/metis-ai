@@ -10,7 +10,9 @@ import {
   remoteClientHostnameMap,
   todosFromToolPayload,
   toolCallHeadline,
-  toolGroupLabel,
+  activityGroupLabel,
+ memoryCardFromPayload,
+ toolGroupLabel,
   truncateToolText,
 } from "../lib/tool-call-display";
 
@@ -104,13 +106,13 @@ test("layoutAssistantParts starts a new tool group after text, todos, and other 
   ]);
   assert.deepEqual(
     blocks.map((block) => block.type),
-    ["tools", "text", "tools", "tools", "text", "tools"],
+    ["tools", "text", "tools", "text", "tools"],
   );
   assert.deepEqual(
     blocks
       .filter((block) => block.type === "tools")
       .map((block) => block.type === "tools" ? block.tools.map((tool) => tool.id) : []),
-    [["1", "2"], ["3"], ["4", "5"], ["6"]],
+    [["1", "2"], ["3", "4", "5"], ["6"]],
   );
 });
 
@@ -336,3 +338,90 @@ test("truncateToolText keeps head and tail", () => {
   assert.match(truncated, /chars omitted/);
   assert.equal(truncated.includes("UNIQUE_MIDDLE"), false);
 });
+
+test("activityGroupLabel prefixes thought duration onto tool summaries", () => {
+ assert.equal(
+ activityGroupLabel(
+ [{ name: "read_file", kind: "read" }, { name: "list_directory", kind: "read" }],
+ { done: true, durationMs: 3000 },
+ ),
+ "Thought for 3s — Explored 2 files",
+ );
+});
+
+test("layoutAssistantParts attaches thinking to the following tool group", () => {
+ const blocks = layoutAssistantParts<LayoutTool>([
+ { type: "thinking", content: "look around", done: true, durationMs: 2500 },
+ { type: "tool", id: "1", name: "read_file", kind: "read", status: "completed" },
+ { type: "tool", id: "2", name: "list_directory", kind: "read", status: "completed" },
+ ]);
+ assert.equal(blocks.length, 1);
+ assert.equal(blocks[0]?.type, "tools");
+ if (blocks[0]?.type === "tools") {
+ assert.equal(blocks[0].tools.length, 2);
+ assert.equal(blocks[0].thinking?.content, "look around");
+ assert.equal(blocks[0].thinking?.durationMs, 2500);
+ }
+});
+
+test("layoutAssistantParts keeps thinking across todos for the following tools", () => {
+  const blocks = layoutAssistantParts<LayoutTool>([
+    { type: "thinking", content: "plan next steps", done: true, durationMs: 3000 },
+    { type: "tool", id: "1", name: "write_todos", kind: "todo", status: "completed" },
+    { type: "tool", id: "2", name: "read_file", kind: "read", status: "completed" },
+    { type: "tool", id: "3", name: "list_directory", kind: "read", status: "completed" },
+  ]);
+ assert.equal(blocks.length, 1);
+ assert.equal(blocks[0]?.type, "tools");
+ if (blocks[0]?.type === "tools") {
+ assert.deepEqual(blocks[0].tools.map((tool) => tool.name), ["write_todos", "read_file", "list_directory"]);
+ assert.equal(blocks[0].thinking?.durationMs, 3000);
+ }
+});
+
+test("layoutAssistantParts groups memory with following file tools and thinking", () => {
+  const blocks = layoutAssistantParts<LayoutTool>([
+    { type: "thinking", content: "remember this", done: true, durationMs: 1200 },
+    { type: "tool", id: "1", name: "add_memory", kind: "memory", status: "completed" },
+    { type: "tool", id: "2", name: "read_file", kind: "read", status: "completed" },
+  ]);
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0]?.type, "tools");
+  if (blocks[0]?.type === "tools") {
+    assert.deepEqual(blocks[0].tools.map((tool) => tool.name), ["add_memory", "read_file"]);
+    assert.equal(blocks[0].thinking?.content, "remember this");
+  }
+});
+
+test("memoryCardFromPayload shows saved content instead of raw json", () => {
+  const card = memoryCardFromPayload(
+    "add_memory",
+    JSON.stringify({ content: "Cursor context must stay settable" }),
+    JSON.stringify({ memory: { id: "1", content: "Cursor context must stay settable" } }),
+  );
+  assert.equal(card.title, "Saved memory");
+  assert.equal(card.body, "Cursor context must stay settable");
+});
+
+test("memoryCardFromPayload lists memories without dumping json", () => {
+  const card = memoryCardFromPayload(
+    "list_memories",
+    "{}",
+    JSON.stringify({ memories: [{ content: "one" }, { content: "two" }] }),
+  );
+  assert.equal(card.title, "Memories");
+  assert.ok(card.body.includes("one"));
+  assert.ok(card.body.includes("two"));
+  assert.equal(/memories/.test(card.body), false);
+});
+
+test("toolGroupLabel counts memory updates", () => {
+  assert.equal(
+    activityGroupLabel(
+      [{ name: "add_memory", kind: "memory" }, { name: "read_file", kind: "read" }],
+      { done: true, durationMs: 3000 },
+    ),
+    "Thought for 3s — Explored 1 file, 1 memory",
+  );
+});
+

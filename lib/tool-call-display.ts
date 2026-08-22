@@ -33,7 +33,11 @@ export type AssistantViewBlock<TTool> =
       message?: string;
     }
   | { type: "text"; content: string }
-  | { type: "tools"; tools: TTool[] };
+  | {
+ type: "tools";
+ tools: TTool[];
+ thinking?: { content: string; done?: boolean; durationMs?: number };
+ };
 
 type LayoutPart<TTool> =
   | { type: "thinking"; content: string; done?: boolean; durationMs?: number }
@@ -53,7 +57,6 @@ const STANDALONE_TOOL_KINDS = new Set([
   "todo",
   "plan",
   "note",
-  "memory",
   "canvas",
 ]);
 
@@ -326,17 +329,33 @@ export function layoutAssistantParts<TTool extends { kind?: string }>(
   });
 
   const blocks: AssistantViewBlock<TTool>[] = [];
-  let tools: TTool[] = [];
+ let tools: TTool[] = [];
+ let pendingThinking: { content: string; done?: boolean; durationMs?: number } | undefined;
 
-  const flushTools = () => {
-    if (!tools.length) return;
-    blocks.push({ type: "tools", tools });
-    tools = [];
-  };
+ const takeThinking = () => {
+ const thinking = pendingThinking;
+ pendingThinking = undefined;
+ return thinking;
+ };
 
-  const pushStandalone = (tool: TTool) => {
-    flushTools();
-    const last = blocks.at(-1);
+ const flushTools = () => {
+ if (!tools.length) return;
+ const thinking = takeThinking();
+ blocks.push({ type: "tools", tools, ...(thinking ? { thinking } : {}) });
+ tools = [];
+ };
+
+ const flushThinking = () => {
+ if (tools.length) flushTools();
+ const thinking = takeThinking();
+ if (!thinking) return;
+ blocks.push({ type: "thinking", ...thinking });
+ };
+
+ const pushStandalone = (tool: TTool) => {
+ flushTools();
+ // Keep pending thinking for the following regular tool group.
+ const last = blocks.at(-1);
     const isPlanTodo = tool.kind === "plan" || tool.kind === "todo";
     const lastIsPlanTodoGroup =
       last?.type === "tools" &&
@@ -355,24 +374,34 @@ export function layoutAssistantParts<TTool extends { kind?: string }>(
 
   normalized.forEach((part, index) => {
     if (part.type === "thinking") {
-      flushTools();
-      blocks.push({
-        type: "thinking",
-        content: part.content,
-        done: part.done,
-        durationMs: part.durationMs,
-      });
-      return;
-    }
-    if (part.type === "compaction") {
-      flushTools();
-      blocks.push(part);
-      return;
-    }
-    if (part.type === "text") {
-      if (!part.content.trim()) return;
-      flushTools();
-      const last = blocks.at(-1);
+ if (tools.length) flushTools();
+ const next = {
+ content: part.content,
+ done: part.done,
+ durationMs: part.durationMs,
+ };
+ if (pendingThinking) {
+ pendingThinking = {
+ content: [pendingThinking.content, next.content].filter(Boolean).join("\n\n"),
+ done: next.done,
+ durationMs: (pendingThinking.durationMs || 0) + (next.durationMs || 0) || next.durationMs,
+ };
+ } else {
+ pendingThinking = next;
+ }
+ return;
+ }
+ if (part.type === "compaction") {
+ flushTools();
+ flushThinking();
+ blocks.push(part);
+ return;
+ }
+ if (part.type === "text") {
+ if (!part.content.trim()) return;
+ flushTools();
+ flushThinking();
+ const last = blocks.at(-1);
       if (last?.type === "text") last.content = joinAssistantText(last.content, part.content);
       else blocks.push({ type: "text", content: part.content });
       return;
@@ -390,7 +419,57 @@ export function layoutAssistantParts<TTool extends { kind?: string }>(
     tools.push(part);
   });
   flushTools();
-  return blocks;
+    flushThinking();
+  return coalesceActivityBlocks(blocks);
+}
+
+function mergeBlockThinking(
+ a?: { content: string; done?: boolean; durationMs?: number },
+ b?: { content: string; done?: boolean; durationMs?: number },
+) {
+ if (!a) return b;
+ if (!b) return a;
+ return {
+ content: [a.content, b.content].filter(Boolean).join("\n\n"),
+ done: a.done !== false && b.done !== false,
+ durationMs: (a.durationMs || 0) + (b.durationMs || 0) || b.durationMs || a.durationMs,
+ };
+}
+
+function coalesceActivityBlocks<TTool extends { kind?: string }>(
+ blocks: AssistantViewBlock<TTool>[],
+): AssistantViewBlock<TTool>[] {
+ const out: AssistantViewBlock<TTool>[] = [];
+ for (const block of blocks) {
+ const last = out.at(-1);
+ if (block.type === "tools" && last?.type === "thinking") {
+ out.pop();
+ out.push({
+ type: "tools",
+ tools: block.tools,
+ thinking: mergeBlockThinking(
+ { content: last.content, done: last.done, durationMs: last.durationMs },
+ block.thinking,
+ ),
+ });
+ continue;
+ }
+ if (block.type === "thinking" && last?.type === "tools") {
+ last.thinking = mergeBlockThinking(last.thinking, {
+ content: block.content,
+ done: block.done,
+ durationMs: block.durationMs,
+ });
+ continue;
+ }
+ if (block.type === "tools" && last?.type === "tools") {
+ last.tools = [...last.tools, ...block.tools];
+ last.thinking = mergeBlockThinking(last.thinking, block.thinking);
+ continue;
+ }
+ out.push(block);
+ }
+ return out;
 }
 
 export function looksLikeStructuredPayload(value: string): boolean {
@@ -583,7 +662,7 @@ export type ToolActionIcon =
   | "subagent"
   | "other";
 
-export type ToolActionCategory = "file" | "search" | "edit" | "shell" | "browser" | "tool";
+export type ToolActionCategory = "file" | "search" | "edit" | "shell" | "browser" | "memory" | "tool";
 
 export function resolveToolAction(name?: string, kind?: string): {
   verb: string;
@@ -593,6 +672,10 @@ export function resolveToolAction(name?: string, kind?: string): {
   const value = (name || "").toLowerCase();
   if (kind === "subagent" || /(subagent|delegate)/.test(value)) {
     return { verb: "Delegated", icon: "subagent", category: "tool" };
+  }
+  if (kind === "memory" || /(memory|remember)/.test(value)) {
+    const verb = /(list)/.test(value) ? "Listed" : /(delete|remove)/.test(value) ? "Deleted" : /(edit|update)/.test(value) ? "Updated" : "Saved";
+    return { verb, icon: "other", category: "memory" };
   }
   if (kind === "browser" || /(browser_|navigate|playwright|webfetch|web_fetch)/.test(value)) {
     return { verb: "Browsed", icon: "browser", category: "browser" };
@@ -749,6 +832,7 @@ export function toolGroupLabel(tools: Array<{ name?: string; kind?: string }>): 
     edit: 0,
     shell: 0,
     browser: 0,
+    memory: 0,
     tool: 0,
   };
   for (const tool of tools) {
@@ -763,6 +847,141 @@ export function toolGroupLabel(tools: Array<{ name?: string; kind?: string }>): 
   if (counts.edit) parts.push(countedLabel(counts.edit, "edit", "edits"));
   if (counts.shell) parts.push(countedLabel(counts.shell, "command", "commands"));
   if (counts.browser) parts.push(countedLabel(counts.browser, "browser tool", "browser tools"));
+  if (counts.memory) parts.push(countedLabel(counts.memory, "memory", "memories"));
   if (counts.tool) parts.push(countedLabel(counts.tool, "tool", "tools"));
-  return parts.join(", ") || "Tools";
+ return parts.join(", ") || "Tools";
+}
+
+
+export function memoryCardFromPayload(
+ name: string,
+ input?: unknown,
+ result?: unknown,
+): { title: string; body: string } {
+ const inner = innerToolName(name, input, result).toLowerCase();
+ const record = unwrapToolRecord(result) || unwrapToolRecord(input) || {};
+ const list = Array.isArray(record.memories)
+ ? record.memories
+ : Array.isArray(record.items)
+ ? record.items
+ : [];
+ const contents = list.flatMap((item) => {
+ if (typeof item === "string" && item.trim()) return [item.trim()];
+ const entry = asRecord(item);
+ const content = nonEmptyString(entry?.content) || nonEmptyString(entry?.text);
+ return content ? [content] : [];
+ });
+ const memory = asRecord(record.memory);
+ const single =
+ nonEmptyString(record.content)
+ || nonEmptyString(record.text)
+ || nonEmptyString(memory?.content)
+ || nonEmptyString(memory?.text);
+ const isList = /list/.test(inner);
+ const title = isList
+ ? (contents.length === 1 ? "Memory" : "Memories")
+ : /(delete|remove)/.test(inner)
+ ? "Deleted memory"
+ : /(edit|update)/.test(inner)
+ ? "Updated memory"
+ : /(add|create|remember)/.test(inner)
+ ? "Saved memory"
+ : "Memory";
+ if (isList && !contents.length && !single) return { title, body: "No memories" };
+ const body = contents.length
+ ? (contents.length === 1 ? contents[0] : contents.map((item) => `• ${item}`).join("\n"))
+ : single || nonEmptyString(record.error) || "Memory updated";
+ return { title, body };
+}
+
+export function formatThoughtDuration(ms?: number): string | null {
+ if (ms == null || !Number.isFinite(ms) || ms <= 0) return null;
+ if (ms < 1000) return `${Math.round(ms)}ms`;
+ const s = ms / 1000;
+ if (s < 10 && !Number.isInteger(s)) return `${s.toFixed(1)}s`;
+ return `${Math.round(s)}s`;
+}
+
+export function activityGroupLabel(
+ tools: Array<{ name?: string; kind?: string }>,
+ thinking?: { done?: boolean; durationMs?: number } | null,
+): string {
+ const duration = formatThoughtDuration(thinking?.durationMs ?? undefined);
+ const thought = thinking
+ ? (thinking.done === false
+ ? (duration ? `Thinking for ${duration}` : "Thinking")
+ : (duration ? `Thought for ${duration}` : "Thought"))
+ : null;
+ const toolsLabel = tools.length ? toolGroupLabel(tools) : null;
+ if (thought && toolsLabel) return `${thought} — ${toolsLabel}`;
+ return thought || toolsLabel || "Tools";
+}
+
+
+export type MergeableChatMessage = {
+  id: string;
+  role?: string;
+  streaming?: boolean;
+  content?: string;
+  thinking?: string;
+  parts?: Array<{ type?: string; content?: string }>;
+  tools?: unknown[];
+  serverSequence?: number;
+  createdAt?: string;
+};
+
+export function messageLiveWeight(message: MergeableChatMessage) {
+  const parts = message.parts ?? [];
+  return (
+    (message.content?.length || 0) +
+    (message.thinking?.length || 0) +
+    parts.reduce((sum, part) => {
+      if (part.type === "text" || part.type === "thinking") return sum + (part.content?.length || 0);
+      return sum + 24;
+    }, 0) +
+    (message.tools?.length || 0) * 24
+  );
+}
+
+export function adoptOptimisticAssistantId<T extends MergeableChatMessage>(current: T[], incoming: T[]) {
+  const optimistic = [...current].reverse().find((message) => (
+    message.role === "assistant" && message.streaming && message.id.startsWith("a-")
+  ));
+  const serverAssistant = [...incoming].reverse().find((message) => message.role === "assistant");
+  if (!optimistic || !serverAssistant || optimistic.id === serverAssistant.id) return current;
+  return current.map((message) => (
+    message.id === optimistic.id ? { ...message, id: serverAssistant.id } : message
+  ));
+}
+
+export function mergeChatMessages<T extends MergeableChatMessage>(current: T[], incoming: T[]) {
+  const live = adoptOptimisticAssistantId(current, incoming);
+  const byId = new Map(live.map((message) => [message.id, message]));
+  const order = new Map(live.map((message, index) => [message.id, index]));
+  incoming.forEach((message) => {
+    const existing = byId.get(message.id);
+    if (!order.has(message.id)) order.set(message.id, order.size);
+    if (!existing) {
+      byId.set(message.id, message);
+      return;
+    }
+    if (existing.streaming) {
+      const incomingWeight = messageLiveWeight(message);
+      const existingWeight = messageLiveWeight(existing);
+      byId.set(
+        message.id,
+        incomingWeight > existingWeight
+          ? { ...existing, ...message, streaming: true }
+          : { ...message, ...existing, streaming: true },
+      );
+      return;
+    }
+    byId.set(message.id, message);
+  });
+  return [...byId.values()].sort((a, b) => {
+    const sequenceOrder = (a.serverSequence || 0) - (b.serverSequence || 0);
+    if (sequenceOrder) return sequenceOrder;
+    const createdAtOrder = (a.createdAt || "").localeCompare(b.createdAt || "");
+    return createdAtOrder || (order.get(a.id) || 0) - (order.get(b.id) || 0);
+  });
 }

@@ -48,6 +48,7 @@ export async function PATCH(req: Request) {
           Boolean(item) &&
           typeof item === "object" &&
           typeof (item as { id?: unknown }).id === "string" &&
+          (item as { id: string }).id !== "uncensored" &&
           typeof (item as { value?: unknown }).value === "string",
       )
     : undefined;
@@ -67,6 +68,7 @@ export async function PATCH(req: Request) {
                         Boolean(item) &&
                         typeof item === "object" &&
                         typeof (item as { id?: unknown }).id === "string" &&
+                        (item as { id: string }).id !== "uncensored" &&
                         typeof (item as { value?: unknown }).value === "string",
                     )
                     .slice(0, 50)

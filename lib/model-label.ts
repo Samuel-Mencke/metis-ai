@@ -56,8 +56,5 @@ export function modelAttrSummary(
   const fast = paramSelection(model, params, "fast");
   if (fast?.value === "true") parts.push("Fast");
 
-  const uncensored = paramSelection(model, params, "uncensored");
-  if (uncensored?.value === "true") parts.push("Uncensored");
-
   return parts.join(" ");
 }

@@ -40,12 +40,10 @@ import { subagentMetadataFromTool } from "@/lib/subagent-tool";
 import { METIS_SHARED_AGENT_CONTROL, toolContractPrompt } from "@/lib/agent-control";
 import { classifyToolKind, innerToolName, todosFromToolPayload } from "@/lib/tool-call-display";
 import { canRecoverCursorSend, cursorSessionFailureKind } from "@/lib/cursor-session-recovery";
-import { providerNativeParams } from "@/lib/model-params";
-import { uncensoredInstructions } from "@/lib/uncensored";
+import { providerNativeParams, stripRemovedModelParams } from "@/lib/model-params";
 import { recordSignal, type TaskCategory } from "@/lib/model-telemetry";
 import { classifyTool, resolveMcpToolName, toolDetailFromArgs } from "@/lib/tool-kind";
 import { metisAgentIdentity } from "@/lib/agent-identity";
-import { sanitizeModelParams } from "@/lib/feature-flags";
 
 const AGENT_INIT_TIMEOUT_MS = 90_000;
 const AGENT_INACTIVITY_TIMEOUT_MS = 5 * 60_000;
@@ -708,7 +706,7 @@ export async function runQueuedJob(job: AgentJob) {
   const configuredSubagentModel = job.extendedModelId ||
     (globalModelSettings.subagentModelEnabled ? globalModelSettings.subagentModelId : undefined);
   const configuredSubagentModelParams = configuredSubagentModel
-    ? sanitizeModelParams(globalModelSettings.modelParamsByModel?.[configuredSubagentModel] || []) || []
+    ? stripRemovedModelParams(globalModelSettings.modelParamsByModel?.[configuredSubagentModel] || []) || []
     : [];
   const customSubagentDefinitions = configuredSubagentModel
     ? Object.fromEntries(
@@ -822,7 +820,7 @@ export async function runQueuedJob(job: AgentJob) {
     return workspace;
   };
   try {
-    const modelParams = sanitizeModelParams(
+    const modelParams = stripRemovedModelParams(
       job.modelParams?.length ? job.modelParams : chat.modelParams,
     );
     const model = {
@@ -908,10 +906,6 @@ export async function runQueuedJob(job: AgentJob) {
     updateChat(job.chatId, { agentId: agent.agentId }, job.userId);
     const prompt = [
       metisAgentIdentity(),
-      ...((job.modelParams?.length ? job.modelParams : chat.modelParams)
-        ?.some((param) => param.id === "uncensored" && param.value === "true")
-        ? [uncensoredInstructions()]
-        : []),
       `Current agent mode: ${activeMode.name}\n${activeMode.instructions}`,
       "Working style: precise, technically fluent, proactive. Act with your tools instead of describing steps. Reply in the user's language — German in, German out. No filler phrases. On clear orders decide and act yourself; ask back only when genuinely ambiguous or destructive.",
       runToolContract,
@@ -1539,7 +1533,7 @@ export async function runQueuedJob(job: AgentJob) {
           modeId: job.modeId,
           modelId: job.modelId,
           extendedModelId: job.extendedModelId,
-          modelParams: sanitizeModelParams(job.modelParams),
+          modelParams: stripRemovedModelParams(job.modelParams),
         });
         createdChats.push({ id: child.id, title: child.title });
         emit("chat", {

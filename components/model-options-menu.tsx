@@ -7,7 +7,6 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { JailbreakPromptPicker } from "@/components/jailbreak-prompt-picker";
 import { cn } from "@/lib/utils";
 import {
   defaultParamsForModel,
@@ -31,7 +30,6 @@ type Props = {
   model: ModelInfo;
   modelParams: ModelParamSelection[];
   onModelParamsChange: (params: ModelParamSelection[]) => void;
-  onInsertPrompt?: (text: string) => void;
   className?: string;
 };
 
@@ -39,7 +37,6 @@ export function ModelOptionsMenu({
   model,
   modelParams,
   onModelParamsChange,
-  onInsertPrompt,
   className,
 }: Props) {
   const parameters = modelParametersForModel(model);
@@ -85,7 +82,7 @@ export function ModelOptionsMenu({
         <div>
           <p className="text-sm font-medium">{model.displayName}</p>
           <p className="text-xs text-muted-foreground">
-            Thinking, effort, fast, and other options
+            Context, thinking effort, and other options
           </p>
         </div>
 
@@ -99,7 +96,6 @@ export function ModelOptionsMenu({
 
             if (isBool) {
               const on = current === "true";
-              const isUncensored = param.id === "uncensored";
               return (
                 <div
                   key={param.id}
@@ -107,12 +103,6 @@ export function ModelOptionsMenu({
                 >
                   <div className="flex items-center gap-1">
                     <p className="text-sm">{param.displayName || param.id}</p>
-                    {isUncensored && onInsertPrompt ? (
-                      <JailbreakPromptPicker
-                        modelDisplayName={model.displayName}
-                        onPick={onInsertPrompt}
-                      />
-                    ) : null}
                   </div>
                   <Button
                     type="button"

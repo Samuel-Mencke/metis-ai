@@ -19,10 +19,11 @@ type VoiceInputProps = {
   endpoint?: string;
   connectionId?: string;
   stopSignal?: number;
+  cancelSignal?: number;
   onOpenSettings?: () => void;
 };
 
-type VoiceState = "idle" | "permission" | "recording" | "uploading" | "transcribing" | "ready" | "error";
+export type VoiceState = "idle" | "permission" | "recording" | "uploading" | "transcribing" | "ready" | "error";
 type SpeechRecognitionLike = {
   continuous: boolean;
   interimResults: boolean;
@@ -54,6 +55,7 @@ export function VoiceInput({
   endpoint,
   connectionId,
   stopSignal = 0,
+  cancelSignal = 0,
   onOpenSettings,
 }: VoiceInputProps) {
   const [state, setState] = useState<VoiceState>("idle");
@@ -76,6 +78,7 @@ export function VoiceInput({
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const startedAtRef = useRef(0);
   const lastStopSignalRef = useRef(stopSignal);
+  const lastCancelSignalRef = useRef(cancelSignal);
   const setRecording = useCallback((recording: boolean) => {
     onRecordingChange?.(recording);
   }, [onRecordingChange]);
@@ -412,13 +415,22 @@ export function VoiceInput({
     discard();
   }, [discard, enabled]);
 
+  useEffect(() => {
+    if (lastCancelSignalRef.current === cancelSignal) return;
+    lastCancelSignalRef.current = cancelSignal;
+    discard();
+  }, [cancelSignal, discard]);
+
   useEffect(() => () => {
     discardingRef.current = true;
     speechRecognitionRef.current?.stop();
     peerConnectionRef.current?.close();
     if (recorderRef.current?.state === "recording") recorderRef.current.stop();
     cleanup();
-  }, [cleanup]);
+    setRecording(false);
+    onStateChange?.("idle");
+    onWaveformLevelChange?.(0);
+  }, [cleanup, onStateChange, onWaveformLevelChange, setRecording]);
 
   if (!enabled) return null;
 

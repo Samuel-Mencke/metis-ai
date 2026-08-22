@@ -7,6 +7,7 @@ import {
   isInsideWorkspace,
   isRootWorkspace,
   parsePasswdLine,
+  listAssignablePosixUsers,
 } from "../lib/user-isolation";
 
 test("workspace containment rejects path escape", () => {
@@ -53,4 +54,19 @@ test("host admin usernames come from env or the first account", () => {
     true,
   );
   assert.equal(isHostAdminUsername("first", {}, "first"), true);
+});
+
+test("listAssignablePosixUsers keeps login shells and optional root", () => {
+  const passwd = [
+    "root:x:0:0:root:/root:/bin/bash",
+    "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin",
+    "nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin",
+    "alice:x:1001:1001:Alice:/home/alice:/bin/bash",
+    "bob:x:1002:1002:Bob:/home/bob:/bin/false",
+    "carol:x:1003:1003:Carol:/home/carol:/bin/zsh",
+  ].join("\n");
+  const regular = listAssignablePosixUsers(passwd);
+  assert.deepEqual(regular.map((user) => user.username), ["alice", "carol"]);
+  const withRoot = listAssignablePosixUsers(passwd, { includeRoot: true });
+  assert.deepEqual(withRoot.map((user) => user.username), ["alice", "carol", "root"]);
 });

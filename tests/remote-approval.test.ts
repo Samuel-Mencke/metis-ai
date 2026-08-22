@@ -34,7 +34,7 @@ test("new remote clients default to full access without approval", async () => {
   assert.throws(
     () => createRemoteApproval({
       ownerId: owner.id,
-      clientId: registered.client.id,
+      clientId: registered.client!.id,
       action: "execute_command",
       params: { command: "echo hello" },
     }),

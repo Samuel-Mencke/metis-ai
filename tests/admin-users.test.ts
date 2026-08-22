@@ -27,4 +27,21 @@ test("first created user is admin and later users are not", async () => {
   assert.throws(() => patchManagedUser(admin.id, { isAdmin: false }), /last admin/);
   assert.throws(() => deleteManagedUser(admin.id, user.id), /last admin/);
   assert.throws(() => deleteManagedUser(user.id, user.id), /own account/);
+  assert.throws(
+    () => createManagedUser({ username: "mappedmissing", password: "password1", osUsername: "no-such-os-user-xyz" }),
+    /does not exist/,
+  );
+  const { listAssignablePosixUsers } = await import("../lib/user-isolation");
+  const { readFileSync } = await import("node:fs");
+  const posix = listAssignablePosixUsers(readFileSync("/etc/passwd", "utf8"))[0];
+  assert.ok(posix, "expected at least one assignable OS user on the host");
+  const mapped = createManagedUser({
+    username: "mappeduser",
+    password: "password1",
+    workspaceRoot: posix.home || dir,
+    osUsername: posix.username,
+  });
+  assert.equal(mapped.osUsername, posix.username);
+  const cleared = patchManagedUser(mapped.id, { osUsername: null });
+  assert.equal(cleared.osUsername, undefined);
 });

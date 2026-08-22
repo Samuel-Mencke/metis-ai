@@ -7,6 +7,7 @@ import {
   isHostAdminUsername,
   isInsideWorkspace,
   isRootWorkspace,
+  listAssignablePosixUsers,
   parsePasswdLine,
   type PosixIdentity,
 } from "@/lib/user-isolation";
@@ -52,6 +53,16 @@ export function lookupPosixUser(username: string): PosixIdentity | undefined {
   }
 }
 
+export function listHostOsUsers() {
+  try {
+    return listAssignablePosixUsers(readFileSync("/etc/passwd", "utf8"), {
+      includeRoot: config.allowRootAgents,
+    });
+  } catch {
+    return [];
+  }
+}
+
 export function getUserAccess(userId?: string): UserAccess {
   if (!userId?.trim()) return { userId: "", workspaceRoot: path.resolve(config.agentCwd) };
   const row = getDatabase().prepare(
@@ -87,6 +98,15 @@ export function getUserExecutionIdentity(userId?: string): UserExecutionIdentity
   const posix = lookupPosixUser(access.osUsername);
   const uid = access.uid ?? posix?.uid;
   const gid = access.gid ?? posix?.gid;
+  if (uid === 0 && config.allowRootAgents && isRootWorkspace(access.workspaceRoot, posix?.home || access.home)) {
+    return {
+      username: access.osUsername,
+      uid,
+      gid: gid ?? 0,
+      home: posix?.home || access.home,
+      workspaceRoot: access.workspaceRoot,
+    };
+  }
   if (uid === undefined || gid === undefined || uid <= 0) return undefined;
   return {
     username: access.osUsername,
@@ -107,6 +127,12 @@ export function requireUserExecutionIdentity(userId?: string): UserExecutionIden
       home: process.env.HOME || config.dockerWorkspace,
       workspaceRoot: access.workspaceRoot,
     };
+  }
+  const account = userId
+    ? getDatabase().prepare("SELECT username FROM users WHERE id = ?").get(userId) as { username?: string } | undefined
+    : undefined;
+  if (account?.username) {
+    provisionMissingAccountAccess(userId!, account.username);
   }
   const identity = getUserExecutionIdentity(userId);
   if (!identity) {
@@ -196,4 +222,29 @@ export function provisionAccountAccess(userId: string, username: string) {
     : path.join("/home", username);
   ensureUserAccess(userId, workspace, username);
   return true;
+}
+
+/**
+ * Repairs access created by older account flows without requiring a shell
+ * command. Root is only selected for an explicitly allowed /root workspace;
+ * otherwise an identically named non-root OS account is used when available.
+ */
+export function provisionMissingAccountAccess(userId: string, username: string) {
+  const access = getUserAccess(userId);
+  const current = access.osUsername ? lookupPosixUser(access.osUsername) : undefined;
+  if (current && (current.uid > 0 || (config.allowRootAgents && isRootWorkspace(access.workspaceRoot, current.home)))) {
+    return true;
+  }
+
+  if (config.allowRootAgents && isRootWorkspace(access.workspaceRoot)) {
+    ensureUserAccess(userId, access.workspaceRoot, "root");
+    return true;
+  }
+
+  const matching = lookupPosixUser(username);
+  if (matching && matching.uid > 0) {
+    ensureUserAccess(userId, access.workspaceRoot, matching.username);
+    return true;
+  }
+  return false;
 }

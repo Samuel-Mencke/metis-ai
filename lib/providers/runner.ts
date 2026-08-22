@@ -57,7 +57,6 @@ import { stripRawToolMarkup } from "@/lib/providers/tool-schema";
 import { executeEmbeddedToolFallbacks, type EmbeddedToolExecution } from "@/lib/providers/embedded-tool-fallback";
 import { subagentMetadataFromTool } from "@/lib/subagent-tool";
 import { METIS_SHARED_AGENT_CONTROL, toolContractPrompt } from "@/lib/agent-control";
-import { uncensoredInstructions } from "@/lib/uncensored";
 import { recordSignal, type TaskCategory } from "@/lib/model-telemetry";
 import { LoopGuard, routeTask } from "@/lib/agent-efficiency";
 
@@ -253,10 +252,7 @@ function providerPrompt(
     job.referenceText ? `Referenced context:\n${job.referenceText}` : "",
     buildAttachmentPrompt(job.chatId, job.attachments),
   ].filter(Boolean).join("\n\n");
-  const uncensored = modelParams?.some((param) => param.id === "uncensored" && param.value === "true");
-  return uncensored
-    ? `${metisAgentIdentity()}\n\n${uncensoredInstructions()}\n\n${prompt}`
-    : prompt;
+  return prompt;
 }
 
 function parseToolInput(value?: string) {

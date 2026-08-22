@@ -4,9 +4,7 @@ import { filterAllowedModels } from "@/lib/model-access";
 import {
   defaultParamsForModel,
   modelParametersForModel,
-  UNCENSORED_PARAMETER,
 } from "@/lib/model-params";
-import { isUncensoredEnabled } from "@/lib/feature-flags";
 import {
   findActiveConnection,
   getProviderConnectionSecret,
@@ -21,7 +19,7 @@ import {
   scheduleProviderModelRefresh,
 } from "@/lib/providers/discovery";
 import { modelKey } from "@/lib/providers/types";
-import { contextWindowOf as providerContextWindow } from "@/lib/context-window";
+import { contextWindowForModel, contextWindowOf as providerContextWindow } from "@/lib/context-window";
 import { getVerifiedProviderCapabilities } from "@/lib/providers/registry";
 
 export const runtime = "nodejs";
@@ -59,12 +57,6 @@ export type ModelInfo = {
   contextWindow?: number;
 };
 
-function withUncensoredParameter(parameters: ModelParameter[] = []) {
-  const without = parameters.filter((parameter) => parameter.id !== "uncensored");
-  if (!isUncensoredEnabled()) return without;
-  if (parameters.some((parameter) => parameter.id === "uncensored")) return parameters;
-  return [...without, UNCENSORED_PARAMETER];
-}
 
 function modelContextWindow(value: unknown, id?: string, displayName?: string) {
  const record = value && typeof value === "object"
@@ -119,7 +111,11 @@ export async function GET(req: Request) {
           .map((p) => ({ id: p.id, value: p.value }));
         const discoveredWindow = providerContextWindow(m);
         const storedWindow = storedById.get(m.id)?.contextWindow;
-        const contextWindow = discoveredWindow || storedWindow;
+        const contextWindow = contextWindowForModel({
+ id: m.id,
+ displayName: m.displayName || m.id,
+ contextWindow: discoveredWindow || storedWindow,
+ });
  const normalizedModel = {
           id: m.id,
           displayName: m.displayName || m.id,
@@ -142,7 +138,7 @@ export async function GET(req: Request) {
           source: "cursor",
           description: m.description,
           capabilities: getVerifiedProviderCapabilities("cursor", m.id)?.verified,
-          parameters: withUncensoredParameter(parameters),
+          parameters,
           defaultParams,
         };
       });
@@ -227,7 +223,7 @@ export async function GET(req: Request) {
           tags: "tags" in model && Array.isArray(model.tags) ? model.tags : undefined,
           ...(contextWindow ? { contextWindow } : {}),
           capabilities: model.capabilities as Record<string, boolean> | undefined,
-          ...(parameters.length ? { parameters: withUncensoredParameter(parameters) } : {}),
+          ...(parameters.length ? { parameters } : {}),
           defaultParams,
         };
       }),

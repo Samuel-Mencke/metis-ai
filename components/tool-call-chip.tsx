@@ -34,16 +34,16 @@ import {
   planFromToolPayload,
   todosFromToolPayload,
   toolCallHeadline,
-  toolGroupLabel,
+  activityGroupLabel,
+ memoryCardFromPayload,
+ toolGroupLabel,
   truncateToolText,
   type ToolActionIcon,
 } from "@/lib/tool-call-display";
 import { looksLikeTranscriptDump } from "@/lib/agent-transcript";
 
-const toolCallTriggerClass =
-  "inline-flex max-w-full cursor-pointer items-center gap-1 appearance-none rounded-none border-0 bg-transparent p-0 text-left text-[11px] font-light text-muted-foreground/70 shadow-none ring-0 outline-none transition-colors hover:bg-transparent hover:text-muted-foreground focus-visible:ring-0";
 import { parseAutomationCard } from "@/lib/tool-kind";
-import { ThinkingBlock, formatThinkingDuration } from "@/components/thinking-block";
+import { ThinkingBlock, activityRowClass } from "@/components/thinking-block";
 
 export type ToolCallData = {
   id: string;
@@ -418,13 +418,13 @@ export const ToolCallChip = memo(function ToolCallChip({
     );
   }
   if (resolvedKind === "memory") {
-    const memoryOutput = formatToolOutput(result || detail || input) || "Memory updated";
+    const memoryCard = memoryCardFromPayload(name, input || detail, result || detail);
     return (
       <div className="my-1 flex w-full items-start gap-2 px-1 py-0.5 text-xs">
         <Brain className="mt-0.5 size-3.5 shrink-0 text-violet-400" />
         <div className="min-w-0">
-          <p className="font-medium text-violet-300">Memory update</p>
-          <p className="mt-0.5 max-h-20 overflow-hidden whitespace-pre-wrap text-foreground/75">{memoryOutput}</p>
+          <p className="font-medium text-violet-300">{memoryCard.title}</p>
+          <p className="mt-0.5 max-h-20 overflow-hidden whitespace-pre-wrap text-foreground/75">{memoryCard.body}</p>
         </div>
       </div>
     );
@@ -529,11 +529,11 @@ export const ToolCallChip = memo(function ToolCallChip({
     );
   }
   return (
-    <div className="my-0.5 w-full min-w-0" style={{ overflowAnchor: "none" }}>
+    <div className={cn(nested ? "my-0" : "my-0.5", "w-full min-w-0")} style={{ overflowAnchor: "none" }}>
       <div className="group flex w-full min-w-0 items-center gap-1">
         <button
           type="button"
-          className={cn(toolCallTriggerClass, "min-w-0 flex-1")}
+          className={cn(activityRowClass, "min-w-0 flex-1")}
           onClick={() => {
             if (subagentClickable && onOpenSubagent) {
               onOpenSubagent();
@@ -740,7 +740,18 @@ export const ToolCallGroup = memo(function ToolCallGroup({
   );
   const automationTools = tools.filter((tool) => isAutomationCardTool(tool));
   const regularEntries = regularTools.filter((tool) => !isAutomationCardTool(tool));
-  const groupTitle = toolGroupLabel(regularEntries);
+  const thinkingFromActivity = (activity || [])
+ .filter((entry): entry is Extract<ActivityEntry, { type: "thinking" }> => entry.type === "thinking")
+ .map((entry) => entry.thinking);
+ const thinkingList = [...thinking, ...thinkingFromActivity];
+ const combinedThinking = thinkingList.length
+ ? {
+ text: thinkingList.map((item) => item.text).filter(Boolean).join("\n\n"),
+ done: thinkingList.every((item) => item.done !== false),
+ durationMs: thinkingList.reduce((sum, item) => sum + (item.durationMs || 0), 0) || thinkingList.at(-1)?.durationMs,
+ }
+ : undefined;
+ const groupTitle = activityGroupLabel([...regularEntries, ...todoTools, ...noteTools], combinedThinking);
   const groupOpen = userOpen || Boolean(live) || Boolean(autoExpand);
   const lastToolId = regularTools[regularTools.length - 1]?.id;
   const renderTool = (tool: ToolCallData, nested = false) => (
@@ -774,64 +785,77 @@ export const ToolCallGroup = memo(function ToolCallGroup({
     return <div key={entry.tool.id}>{renderTool(entry.tool)}</div>;
   };
 
-  if (regularEntries.length === 0) {
-    return (
-      <>
-        {planTools.map((tool, index) => (
-          <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
-        ))}
-        {noteTools.map((tool, index) => (
-          <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
-        ))}
-        {todoTools.map((tool, index) => (
-          <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
-        ))}
-        {automationTools.map((tool) => (
-          <div key={tool.id}>{renderTool(tool)}</div>
-        ))}
-      </>
-    );
-  }
-  return (
-    <div className="w-full min-w-0" style={{ overflowAnchor: "none" }}>
-      {planTools.map((tool, index) => (
-        <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
-      ))}
-      {noteTools.map((tool, index) => (
-        <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
-      ))}
-      {todoTools.map((tool, index) => (
-        <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
-      ))}
-      {regularEntries.length === 1 ? (
-        <div className="flex flex-col">
-          {regularEntries.map((tool, index) => (
-            <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
-          ))}
-        </div>
-      ) : (
-        <div className="my-1 w-full">
-          <button
-            type="button"
-            className={toolCallTriggerClass}
-            onClick={() => setUserOpen((open) => !open)}
-          >
-            {regularEntries.some((tool) => isToolRunning(tool.status)) ? (
-              <LoaderCircle className="size-3 shrink-0 animate-spin" />
-            ) : (
-              <ChevronRight className={cn("size-3 shrink-0 transition-transform", groupOpen && "rotate-90")} />
-            )}
-            <span className="truncate">{groupTitle}</span>
-          </button>
-          {groupOpen ? (
-            <div className="mt-0.5 space-y-0 pl-4">
-              {regularEntries.map((tool, index) => (
-                <div key={toolReactKey(tool, index)}>{renderTool(tool, true)}</div>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      )}
-    </div>
-  );
+  if (regularEntries.length === 0 && !combinedThinking) {
+ return (
+ <>
+ {planTools.map((tool, index) => (
+ <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
+ ))}
+ {noteTools.map((tool, index) => (
+ <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
+ ))}
+ {todoTools.map((tool, index) => (
+ <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
+ ))}
+ {automationTools.map((tool) => (
+ <div key={tool.id}>{renderTool(tool)}</div>
+ ))}
+ </>
+ );
+ }
+ const activityRunning = [...regularEntries, ...todoTools, ...noteTools, ...automationTools].some((tool) => isToolRunning(tool.status));
+ return (
+ <div className="w-full min-w-0" style={{ overflowAnchor: "none" }}>
+ {regularEntries.length === 1 && !combinedThinking ? (
+ <div className="flex flex-col">
+ {regularEntries.map((tool, index) => (
+ <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
+ ))}
+ </div>
+ ) : (
+ <div className="my-0.5 w-full">
+ <button
+ type="button"
+ className={activityRowClass}
+ onClick={() => setUserOpen((open) => !open)}
+ >
+ {activityRunning || combinedThinking?.done === false ? (
+ <LoaderCircle className="size-3 shrink-0 animate-spin" />
+ ) : (
+ <ChevronRight className={cn("size-3 shrink-0 transition-transform", groupOpen && "rotate-90")} />
+ )}
+ <span className="truncate">{groupTitle}</span>
+ </button>
+ {groupOpen ? (
+ <div className="flex flex-col gap-1 pl-4">
+ {combinedThinking?.text || combinedThinking?.done === false ? (
+ <ThinkingBlock
+ text={combinedThinking.text || "…"}
+ done={combinedThinking.done !== false}
+ durationMs={combinedThinking.durationMs}
+ embedded
+ />
+ ) : null}
+ {planTools.map((tool, index) => (
+ <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
+ ))}
+ {todoTools.map((tool, index) => (
+ <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
+ ))}
+ {noteTools.map((tool, index) => (
+ <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
+ ))}
+ {regularEntries.map((tool, index) => (
+ <div key={toolReactKey(tool, index)}>{renderTool(tool, true)}</div>
+ ))}
+ {automationTools.map((tool) => (
+ <div key={tool.id}>{renderTool(tool, true)}</div>
+ ))}
+ </div>
+ ) : null}
+ </div>
+ )}
+ </div>
+ );
+
 });

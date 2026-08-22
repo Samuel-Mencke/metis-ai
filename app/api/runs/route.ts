@@ -11,6 +11,7 @@ import { appendMessageInTransaction, getChat } from "@/lib/db-store";
 import { SSE_HEADERS } from "@/lib/sse";
 import { saveAttachments, type IncomingAttachment } from "@/lib/uploads";
 import { isModelAllowed } from "@/lib/model-access";
+import { stripRemovedModelParams } from "@/lib/model-params";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,10 +46,10 @@ export async function GET(req: Request) {
             };
             const deadline = Date.now() + 30 * 60 * 1000;
             let lastHeartbeat = Date.now();
-            const deviceId = search.get("deviceId")?.trim() || req.headers.get("x-metis-device-id")?.trim() || "";
             const snapshotRequested = search.get("mode") === "snapshot";
-            const leaderDeviceId = jobId ? getJob(jobId)?.streamDeviceId : getActiveJob(chatId!, userId)?.streamDeviceId;
-            const snapshotOnly = snapshotRequested || Boolean(leaderDeviceId && deviceId && leaderDeviceId !== deviceId);
+            // stream=1 always delivers text/thinking. Snapshot-only is opt-in so a
+            // device-id mismatch cannot hide the live answer on the tab that sent it.
+            const snapshotOnly = snapshotRequested;
             const skipDelta = new Set(["text", "thinking"]);
             while (Date.now() < deadline) {
               const events = listRunEvents(
@@ -222,7 +223,7 @@ export async function POST(req: Request) {
           : {}),
         ...(body.agentId ? { agentId: body.agentId } : {}),
         ...(requestedModelId ? { modelId: requestedModelId } : {}),
-        ...(body.modelParams ? { modelParams: body.modelParams } : {}),
+        ...(body.modelParams ? { modelParams: stripRemovedModelParams(body.modelParams) ?? [] } : {}),
         ...(stored.length ? { attachments: stored } : {}),
       }, {
         beforeInsert: () => {

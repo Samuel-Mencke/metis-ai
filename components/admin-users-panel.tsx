@@ -16,25 +16,88 @@ type AdminUser = {
   osUsername?: string;
 };
 
+type OsUser = {
+  username: string;
+  uid: number;
+  gid: number;
+  home: string;
+};
+
+const selectClassName =
+  "h-8 w-full min-w-0 rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 dark:bg-input/30";
+
+function LinuxUserField({
+  value,
+  onChange,
+  osUsers,
+  ariaLabel,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  osUsers: OsUser[];
+  ariaLabel: string;
+}) {
+  if (osUsers.length === 0) {
+    return (
+      <Input
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder="Linux user (must exist on host)"
+        aria-label={ariaLabel}
+        className="h-8 font-normal"
+        autoComplete="off"
+      />
+    );
+  }
+  const options = osUsers.some((user) => user.username === value) || !value
+    ? osUsers
+    : [{ username: value, uid: -1, gid: -1, home: "" }, ...osUsers];
+  return (
+    <select
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      aria-label={ariaLabel}
+      className={selectClassName}
+    >
+      <option value="">None</option>
+      {options.map((user) => (
+        <option key={user.username} value={user.username}>
+          {user.uid > 0 ? `${user.username} · uid ${user.uid}` : user.username}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 export function AdminUsersPanel() {
   const [users, setUsers] = useState<AdminUser[]>([]);
+  const [osUsers, setOsUsers] = useState<OsUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [workspaceRoot, setWorkspaceRoot] = useState("");
+  const [osUsername, setOsUsername] = useState("");
   const [makeAdmin, setMakeAdmin] = useState(false);
   const [passwordEdits, setPasswordEdits] = useState<Record<string, string>>({});
   const [workspaceEdits, setWorkspaceEdits] = useState<Record<string, string>>({});
+  const [osEdits, setOsEdits] = useState<Record<string, string>>({});
   const [deleteTarget, setDeleteTarget] = useState<AdminUser | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await fetch("/api/admin/users", { cache: "no-store" });
-      const body = await response.json().catch(() => ({})) as { users?: AdminUser[]; error?: string };
-      if (!response.ok) throw new Error(body.error || "Could not load users.");
-      setUsers(body.users || []);
+      const [usersResponse, osResponse] = await Promise.all([
+        fetch("/api/admin/users", { cache: "no-store" }),
+        fetch("/api/admin/os-users", { cache: "no-store" }),
+      ]);
+      const usersBody = await usersResponse.json().catch(() => ({})) as { users?: AdminUser[]; error?: string };
+      if (!usersResponse.ok) throw new Error(usersBody.error || "Could not load users.");
+      setUsers(usersBody.users || []);
+      if (osResponse.ok) {
+        const osBody = await osResponse.json().catch(() => ({})) as { users?: OsUser[] };
+        setOsUsers(osBody.users || []);
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not load users.");
     } finally {
@@ -46,16 +109,24 @@ export function AdminUsersPanel() {
     void load();
   }, [load]);
 
+  function selectCreateOsUser(next: string) {
+    setOsUsername(next);
+    const home = osUsers.find((user) => user.username === next)?.home?.trim();
+    if (home && !workspaceRoot.trim()) setWorkspaceRoot(home);
+  }
+
   async function createUser() {
     setBusy(true);
     try {
+      const selected = osUsers.find((user) => user.username === osUsername.trim());
       const response = await fetch("/api/admin/users", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           username,
           password,
-          workspaceRoot: workspaceRoot.trim() || undefined,
+          workspaceRoot: workspaceRoot.trim() || selected?.home || undefined,
+          osUsername: osUsername.trim() || undefined,
           isAdmin: makeAdmin,
         }),
       });
@@ -64,6 +135,7 @@ export function AdminUsersPanel() {
       setUsername("");
       setPassword("");
       setWorkspaceRoot("");
+      setOsUsername("");
       setMakeAdmin(false);
       toast.success("User created");
       await load();
@@ -89,6 +161,26 @@ export function AdminUsersPanel() {
       await load();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not update workspace.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveOsUser(user: AdminUser) {
+    const next = (osEdits[user.id] ?? user.osUsername ?? "").trim();
+    setBusy(true);
+    try {
+      const response = await fetch(`/api/admin/users/${encodeURIComponent(user.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ osUsername: next || null }),
+      });
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(body.error || "Could not update Linux user.");
+      toast.success("Linux user updated");
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not update Linux user.");
     } finally {
       setBusy(false);
     }
@@ -160,7 +252,7 @@ export function AdminUsersPanel() {
             Users
           </h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            Admins can create accounts, set workspace folders, and promote other admins.
+            Admins can create accounts, assign a Linux user, set workspace folders, and promote other admins.
           </p>
         </div>
         <Button type="button" size="xs" variant="ghost" onClick={() => void load()} disabled={loading}>
@@ -175,6 +267,15 @@ export function AdminUsersPanel() {
           <Input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="Username" aria-label="New username" />
           <Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password (min 8)" aria-label="New password" />
         </div>
+        <label className="flex flex-col gap-1 text-[11px] font-medium text-muted-foreground">
+          Linux user
+          <LinuxUserField
+            value={osUsername}
+            onChange={selectCreateOsUser}
+            osUsers={osUsers}
+            ariaLabel="New Linux user"
+          />
+        </label>
         <Input
           value={workspaceRoot}
           onChange={(event) => setWorkspaceRoot(event.target.value)}
@@ -216,6 +317,18 @@ export function AdminUsersPanel() {
                   </Button>
                 </div>
               </div>
+              <label className="flex flex-col gap-1 text-[11px] font-medium text-muted-foreground">
+                Linux user
+                <div className="flex gap-1">
+                  <LinuxUserField
+                    value={osEdits[user.id] ?? user.osUsername ?? ""}
+                    onChange={(value) => setOsEdits((current) => ({ ...current, [user.id]: value }))}
+                    osUsers={osUsers}
+                    ariaLabel={`${user.username} Linux user`}
+                  />
+                  <Button type="button" size="xs" disabled={busy} onClick={() => void saveOsUser(user)}>Save</Button>
+                </div>
+              </label>
               <label className="flex flex-col gap-1 text-[11px] font-medium text-muted-foreground">
                 Workspace
                 <div className="flex gap-1">

@@ -109,7 +109,7 @@ import {
   resolveContextTotal,
 } from "@/lib/context-window";
 import { PlanToolCallCard, ToolCallGroup, type ActivityEntry, type ToolCallData } from "@/components/tool-call-chip";
-import { classifyToolKind, layoutAssistantParts, remoteClientHostnameMap, todosFromToolPayload } from "@/lib/tool-call-display";
+import { classifyToolKind, layoutAssistantParts, mergeChatMessages, remoteClientHostnameMap, todosFromToolPayload } from "@/lib/tool-call-display";
 import { stripTranscriptDump } from "@/lib/agent-transcript";
 import { planLooksParallelizable } from "@/lib/modes";
 import {
@@ -721,6 +721,7 @@ const WORKSPACE_SQUEEZE_MIN_WIDTH = 200;
 const NOTIFICATIONS_STORAGE_KEY = `${clientConfig.storagePrefix}_notifications_enabled`;
 const SOUND_CUES_STORAGE_KEY = `${clientConfig.storagePrefix}_sound_cues_enabled`;
 const FINISH_SOUND_STORAGE_KEY = `${clientConfig.storagePrefix}_finish_sound`;
+const DEFAULT_FINISH_SOUND_URL = "/sounds/agent-completion.wav";
 const UNREAD_CHATS_STORAGE_KEY = `${clientConfig.storagePrefix}_unread_chats`;
 
 function loadUnreadChatIds(): string[] {
@@ -1486,24 +1487,7 @@ function normalizeSuggestions(value: unknown): Suggestion[] {
 }
 
 function mergeMessages(current: Msg[], incoming: Msg[]): Msg[] {
-  const byId = new Map(current.map((message) => [message.id, message]));
-  const order = new Map(current.map((message, index) => [message.id, index]));
-  incoming.forEach((message) => {
-    const existing = byId.get(message.id);
-    if (!order.has(message.id)) order.set(message.id, order.size);
-    // Background refreshes can race the foreground SSE stream. Preserve the
-    // live message parts/content until the stream marks the message terminal.
-    byId.set(
-      message.id,
-      existing?.streaming ? { ...message, ...existing, streaming: true } : message,
-    );
-  });
-  return [...byId.values()].sort((a, b) => {
-    const sequenceOrder = (a.serverSequence || 0) - (b.serverSequence || 0);
-    if (sequenceOrder) return sequenceOrder;
-    const createdAtOrder = (a.createdAt || "").localeCompare(b.createdAt || "");
-    return createdAtOrder || (order.get(a.id) || 0) - (order.get(b.id) || 0);
-  });
+ return mergeChatMessages(current, incoming);
 }
 
 function prependMessages(current: Msg[], incoming: Msg[]): Msg[] {
@@ -1817,6 +1801,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [notesOpen, setNotesOpen] = useState(false);
   const [automationsOpen, setAutomationsOpen] = useState(false);
   const [focusedNoteId, setFocusedNoteId] = useState<string | null>(null);
+  const [focusedAutomationId, setFocusedAutomationId] = useState<string | null>(null);
   const [workspaceFullscreen, setWorkspaceFullscreen] = useState(false);
   const workspaceAutoCollapsedSidebarRef = useRef(false);
   const [remoteTerminalCwd, setRemoteTerminalCwd] = useState(workspaceDefaultCwd);
@@ -1862,6 +1847,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [voiceRecording, setVoiceRecording] = useState(false);
   const [voiceState, setVoiceState] = useState("idle");
   const [voiceStopSignal, setVoiceStopSignal] = useState(0);
+  const [voiceCancelSignal, setVoiceCancelSignal] = useState(0);
   const [voiceWaveformLevel, setVoiceWaveformLevel] = useState(0);
   const [monitorData, setMonitorData] = useState<MonitorPayload>({ current: null, history: [] });
   const browserSocketRef = useRef<WebSocket | null>(null);
@@ -2641,6 +2627,19 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     [],
   );
 
+  const resetVoiceComposer = useCallback(() => {
+    setVoiceRecording(false);
+    setVoiceState("idle");
+    setVoiceWaveformLevel(0);
+    setVoiceCancelSignal((current) => current + 1);
+  }, []);
+
+  useEffect(() => {
+    if (!voiceRecording && voiceState === "idle") return;
+    resetVoiceComposer();
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- drop a stale waveform after view/chat changes
+  }, [activeChatId, automationsOpen, notesOpen]);
+
   const isDraft = !activeChatId;
   const isEmpty = messages.length === 0;
   const activeChatIsRunning = Boolean(
@@ -3202,29 +3201,9 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   function playFinishSound() {
     if (!soundCuesEnabled || typeof window === "undefined") return;
     try {
-      if (finishSound) {
-        const audio = new Audio(finishSound.dataUrl);
-        audio.volume = 0.8;
-        void audio.play();
-        return;
-      }
-      const AudioContextClass = window.AudioContext ||
-        (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (!AudioContextClass) return;
-      const context = new AudioContextClass();
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      oscillator.type = "sine";
-      oscillator.frequency.setValueAtTime(740, context.currentTime);
-      oscillator.frequency.exponentialRampToValueAtTime(988, context.currentTime + 0.12);
-      gain.gain.setValueAtTime(0.0001, context.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.16, context.currentTime + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.32);
-      oscillator.connect(gain);
-      gain.connect(context.destination);
-      oscillator.start();
-      oscillator.stop(context.currentTime + 0.34);
-      oscillator.addEventListener("ended", () => void context.close());
+      const audio = new Audio(finishSound?.dataUrl || DEFAULT_FINISH_SOUND_URL);
+      audio.volume = 0.8;
+      void audio.play();
     } catch {
       // Audio playback can be blocked by browser autoplay policies.
     }
@@ -4415,7 +4394,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       // The foreground send stream already carries text/tool/status deltas.
       // Polling the same chat in parallel used to repeatedly deserialize the
       // entire latest page and could overwrite fresher optimistic state.
-      if (runtimeRef.current.has(activeChatId) || document.visibilityState === "hidden") return;
+      if (document.visibilityState === "hidden") return;
       try {
         const res = await fetchReadWithRetry(
           `/api/chats/${activeChatId}?messageLimit=${CHAT_MESSAGE_LOAD_LIMIT}&messageOffset=0`,
@@ -4622,17 +4601,30 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         } satisfies ReferenceItem,
       }));
     };
+    const openLinkedAutomation = (event: Event) => {
+      const detail = (event as CustomEvent<{ id?: string }>).detail;
+      const id = typeof detail?.id === "string" && detail.id.trim() ? detail.id.trim() : null;
+      openDraft({ skipNav: true });
+      setFocusedAutomationId(id);
+      setAutomationsOpen(true);
+      setNotesOpen(false);
+      setWorkspaceOpen(false);
+      setMobileNavOpen(false);
+      navigateChat("automations");
+    };
     window.addEventListener("ai-chat:open-browser", openLinkedUrl);
     window.addEventListener("ai-chat:open-reference", openLinkedReference);
     window.addEventListener("ai-chat:open-workspace", openLinkedWorkspace);
     window.addEventListener("ai-chat:open-note", openLinkedNote);
+    window.addEventListener("ai-chat:open-automations", openLinkedAutomation);
     return () => {
       window.removeEventListener("ai-chat:open-browser", openLinkedUrl);
       window.removeEventListener("ai-chat:open-reference", openLinkedReference);
       window.removeEventListener("ai-chat:open-workspace", openLinkedWorkspace);
       window.removeEventListener("ai-chat:open-note", openLinkedNote);
+      window.removeEventListener("ai-chat:open-automations", openLinkedAutomation);
     };
-  }, [activeChatId, browserEnabled, loadChat, messageOffset, navigateBrowser, terminalTabs, workspaces]);
+  }, [activeChatId, browserEnabled, loadChat, messageOffset, navigateBrowser, navigateChat, openDraft, terminalTabs, workspaces]);
 
   useEffect(() => {
     if (!authed) return;
@@ -6172,8 +6164,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       }
 
       let runJobId: string | undefined;
-      if (res.status !== 202) onAccepted?.();
-      if (res.status === 202) {
+      const streamType = res.headers.get("content-type") || "";
+      const jsonAccepted = !streamType.includes("text/event-stream") && (res.status === 202 || streamType.includes("application/json"));
+      if (!jsonAccepted) onAccepted?.();
+      if (jsonAccepted) {
         const queued = (await res.json().catch(() => ({}))) as { jobId?: string; queueMessage?: string };
         onAccepted?.();
         if (queued.queueMessage && activeChatIdRef.current === chatId) {
@@ -6336,7 +6330,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               ),
             );
           } else if (event === "text-reset") {
-            // Uncensored refusal-retry: drop any streamed text so the retried
+            // Refusal-retry: drop any streamed text so the retried
             // answer replaces the refused response instead of appending to it.
             setMessages((m) =>
               m.map((x) => {
@@ -7725,10 +7719,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             }
             }}
             placeholder="Message…"
-            className={cn(voiceRecording ? "opacity-0" : "dark:bg-transparent")}
+            className={cn(voiceRecording && voiceState === "recording" ? "opacity-0" : "dark:bg-transparent")}
             aria-label="Message"
           />
-          {voiceRecording ? (
+          {voiceRecording && voiceState === "recording" ? (
             <div
               className="pointer-events-none absolute inset-0 z-10 flex items-center justify-between overflow-hidden bg-transparent px-3"
               aria-label="Audio waveform"
@@ -7753,11 +7747,21 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             type="button"
             variant="ghost"
             size="icon"
-            aria-label="Attach files"
+            aria-label={voiceRecording || voiceState === "permission" || voiceState === "uploading" || voiceState === "transcribing" ? "Cancel voice input" : "Attach files"}
             className="size-9 shrink-0 self-end rounded-full"
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => {
+              if (voiceRecording || voiceState === "permission" || voiceState === "uploading" || voiceState === "transcribing") {
+                resetVoiceComposer();
+                return;
+              }
+              fileInputRef.current?.click();
+            }}
           >
-            <Plus className="size-4" />
+            {voiceRecording || voiceState === "permission" || voiceState === "uploading" || voiceState === "transcribing" ? (
+              <X className="size-4" />
+            ) : (
+              <Plus className="size-4" />
+            )}
           </Button>
           <span className="flex-1" />
           <VoiceInput
@@ -7777,6 +7781,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             onStateChange={setVoiceState}
             onWaveformLevelChange={setVoiceWaveformLevel}
             stopSignal={voiceStopSignal}
+            cancelSignal={voiceCancelSignal}
             onTranscript={(transcript) => {
               const next = input.trim() ? `${input.trim()} ${transcript}` : transcript;
               handleComposerInputChange(next, next.length);
@@ -7986,7 +7991,6 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               model={selectedModel}
               modelParams={modelParams}
               onModelParamsChange={applyModelParams}
-              onInsertPrompt={(text) => setInput(text)}
             />
             <div className="ml-auto mr-1.5 flex items-center gap-0.5">
               <ContextUsageText
@@ -8092,6 +8096,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           onClick={() => {
             openDraft({ skipNav: true });
             setAutomationsOpen(true);
+            setFocusedAutomationId(null);
             setNotesOpen(false);
             setWorkspaceOpen(false);
             setMobileNavOpen(false);
@@ -8538,6 +8543,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               modes={modes}
               selectedModelId={modelId}
               onOpenChat={(chatId) => void loadChat(chatId)}
+              highlightId={focusedAutomationId}
             />
           </div>
         ) : notesOpen ? (
@@ -8891,6 +8897,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                               <ToolCallGroup
                                 key={`tools-${block.tools[0]?.id ?? bi}`}
                                 tools={block.tools}
+ thinking={block.thinking ? [{ text: block.thinking.content, done: block.thinking.done, durationMs: block.thinking.durationMs }] : undefined}
                                 live={Boolean(m.streaming) && bi === lastBlockIndex}
                                 onOpenDiff={(tool) => {
                                   const baseDiff: ActiveDiff = {
@@ -8967,7 +8974,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                               className={cn(
                                 "block w-full",
                                 m.streaming && bi === blocks.length - 1 && "streaming-answer",
-                                bi > 0 && "mt-3",
+                                bi > 0 && blocks[bi - 1]?.type === "text" && "mt-3",
                               )}
                             >
                               {m.streaming ? (

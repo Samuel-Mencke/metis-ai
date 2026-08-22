@@ -90,7 +90,7 @@ test("contextWindowForSelection follows the selected provider context parameter"
   assert.equal(contextWindowForSelection(cursorModel, [{ id: "context", value: "1.047576M" }]), 1_047_576);
  assert.equal(contextWindowForSelection(cursorModel, [{ id: "context", value: "unlimited" }]), 1_050_000);
  assert.equal(contextWindowForSelection({ id: "unknown-model" }, [{ id: "context", value: "max" }]), undefined);
- assert.equal(contextWindowForSelection({ id: "grok-4.6", providerId: "cursor" }), 256_000);
+ assert.equal(contextWindowForSelection({ id: "grok-4.6", providerId: "cursor" }), 2_000_000);
 });
 
 test("current GPT-5 family fallbacks keep long-context and mini variants distinct", () => {

@@ -316,11 +316,13 @@ export function AutomationsPanel({ activeChatId, onOpenChat, models, modes, sele
 
   useEffect(() => {
     if (!highlightId) return;
-    void load(true).then(() => {
+    void (async () => {
+      await load(true);
+      await loadDetail(highlightId);
       window.requestAnimationFrame(() => {
         document.getElementById(`automation-${highlightId}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
       });
-    });
+    })();
   }, [highlightId]);
 
   const latestCompleted = useMemo(
@@ -557,7 +559,7 @@ export function AutomationsPanel({ activeChatId, onOpenChat, models, modes, sele
       />
 
       {currentDetail ? (
-        <div className="space-y-3 pb-4">
+        <div id={currentDetail ? `automation-${currentDetail.id}` : undefined} className="space-y-3 pb-4">
           {detailLoading ? <p className="p-3 text-xs text-muted-foreground">Loading automation…</p> : null}
           <section className="rounded-xl border border-border/45 bg-card/45 p-3">
             <div className="flex items-start gap-2.5">
@@ -631,7 +633,7 @@ export function AutomationsPanel({ activeChatId, onOpenChat, models, modes, sele
             const activeRun = automation.runs?.find((run) => run.status === "running" || run.status === "queued");
             const latestRun = automation.runs?.[0];
             return (
-              <section key={automation.id} className="rounded-xl border border-border/40 bg-card/40 p-3 transition hover:border-border/65">
+              <section key={automation.id} id={`automation-${automation.id}`} className="rounded-xl border border-border/40 bg-card/40 p-3 transition hover:border-border/65">
                 <button type="button" className="flex w-full items-start gap-2.5 text-left" onClick={() => { setDetailAutomation(automation); void loadDetail(automation.id); }}>
                   <div className="relative grid size-8 shrink-0 place-items-center rounded-lg border border-border/45 bg-background/55">
                     {automation.creator === "agent" ? <Bot className="size-3.5" /> : <UserRound className="size-3.5" />}
