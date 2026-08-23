@@ -99,7 +99,7 @@ export class AiSdkDriver extends BaseDriver {
           });
           return res.content.map((c) => c.text).join("\n");
         },
-      });
+      } as never);
     }
 
     const itemId = crypto.randomUUID();
@@ -111,9 +111,8 @@ export class AiSdkDriver extends BaseDriver {
       system: systemPrompt,
       prompt: context.prompt,
       tools: aiTools,
-      maxSteps: 10,
       abortSignal: context.signal,
-    });
+    } as any);
 
     for await (const chunk of result.textStream) {
       fullText += chunk;
@@ -129,10 +128,11 @@ export class AiSdkDriver extends BaseDriver {
 
     const finalUsage = await result.usage;
     if (finalUsage) {
+      const u = finalUsage as any;
       usage = {
-        inputTokens: finalUsage.promptTokens,
-        outputTokens: finalUsage.completionTokens,
-        totalTokens: finalUsage.totalTokens,
+        inputTokens: u.inputTokens ?? u.promptTokens,
+        outputTokens: u.outputTokens ?? u.completionTokens,
+        totalTokens: u.totalTokens,
       };
     }
 

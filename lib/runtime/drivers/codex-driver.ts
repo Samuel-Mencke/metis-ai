@@ -29,13 +29,13 @@ export class CodexDriver extends BaseDriver {
     let usage: DriverExecutionResult["usage"];
     let threadId: string | undefined;
 
-    if (codexSdk && codexSdk.Codex) {
-      const codex = new codexSdk.Codex({
+    if (codexSdk && (codexSdk as any).Codex) {
+      const codex = new (codexSdk as any).Codex({
         ...(context.secret ? { apiKey: context.secret } : {}),
       });
 
       const thread = codex.startThread(threadOptions);
-      threadId = thread.id;
+      threadId = thread.id || undefined;
 
       const systemPrompt = context.systemPrompt || getMetisSystemPrompt({ cwd: context.cwd });
       const prompt = `${systemPrompt}\n\nUser request:\n${context.prompt}`;

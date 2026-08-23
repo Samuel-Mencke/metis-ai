@@ -62,7 +62,7 @@ export function ToolRunCard({ group }: { group: TimelineToolGroup }) {
                   <div className="flex items-center gap-2 font-mono text-xs text-foreground font-semibold">
                     <span className="text-primary">⚡ {tool.name}</span>
                   </div>
-                  {rawOutput && (
+                  {rawOutput ? (
                     <button
                       type="button"
                       onClick={() => handleCopy(tool.id, rawOutput)}
@@ -71,26 +71,26 @@ export function ToolRunCard({ group }: { group: TimelineToolGroup }) {
                       {copiedId === tool.id ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
                       {copiedId === tool.id ? "Copied" : "Copy output"}
                     </button>
-                  )}
+                  ) : null}
                 </div>
 
-                {tool.input && (
+                {tool.input ? (
                   <pre className="text-xs p-2 rounded-md bg-muted/50 overflow-x-auto text-muted-foreground font-mono">
                     {typeof tool.input === "string" ? tool.input : JSON.stringify(tool.input, null, 2)}
                   </pre>
-                )}
+                ) : null}
 
-                {rawOutput && (
+                {rawOutput ? (
                   <div className="mt-1 font-mono text-xs rounded-md bg-zinc-950 text-zinc-200 p-2.5 overflow-x-auto max-h-56 overflow-y-auto border border-zinc-800">
                     <pre className="whitespace-pre-wrap">{rawOutput}</pre>
                   </div>
-                )}
+                ) : null}
 
-                {tool.error && (
+                {tool.error ? (
                   <div className="text-xs text-rose-400 bg-rose-950/40 p-2 rounded-md border border-rose-800/50">
                     {tool.error}
                   </div>
-                )}
+                ) : null}
               </div>
             );
           })}

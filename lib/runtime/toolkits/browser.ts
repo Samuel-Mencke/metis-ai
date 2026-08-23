@@ -14,23 +14,28 @@ export async function executeBrowserAction(params: {
   text?: string;
   script?: string;
 }): Promise<BrowserActionResult> {
-  // Gracefully handles browser calls via local server-browser or Playwright
   try {
-    const { getServerBrowserClient } = await import("@/lib/server-browser").catch(() => ({ getServerBrowserClient: null }));
-    if (getServerBrowserClient) {
-      const client = await getServerBrowserClient();
-      if (params.action === "navigate" && params.url) {
-        return await client.navigate(params.url);
-      }
-      if (params.action === "screenshot") {
-        return await client.screenshot();
-      }
+    const { performBrowserAction } = await import("@/lib/server-browser").catch(() => ({ performBrowserAction: null }));
+    if (performBrowserAction) {
+      const res = await performBrowserAction("runtime-user", "runtime-chat", {
+        action: params.action,
+        url: params.url,
+        selector: params.selector,
+        text: params.text,
+      });
+      return {
+        success: Boolean(res && !res.error),
+        url: res?.url || params.url,
+        title: res?.title,
+        text: typeof res?.snapshot === "string" ? res.snapshot : undefined,
+        error: res?.error,
+      };
     }
     return {
       success: true,
       url: params.url || "about:blank",
       title: "Browser preview",
-      text: `Browser action ${params.action} performed successfully.`,
+      text: `Browser action ${params.action} performed.`,
     };
   } catch (err: any) {
     return {
