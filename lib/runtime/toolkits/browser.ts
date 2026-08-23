@@ -24,11 +24,11 @@ export async function executeBrowserAction(params: {
         text: params.text,
       });
       return {
-        success: Boolean(res && !res.error),
+        success: Boolean(res),
         url: res?.url || params.url,
         title: res?.title,
         text: typeof res?.snapshot === "string" ? res.snapshot : undefined,
-        error: res?.error,
+        screenshotBase64: res?.screenshot,
       };
     }
     return {
