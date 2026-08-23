@@ -37,6 +37,7 @@ const API_KEY_URLS: Record<string, string> = {
   openai: "https://platform.openai.com/api-keys",
   anthropic: "https://console.anthropic.com/settings/keys",
   google: "https://aistudio.google.com/app/apikey",
+  antigravity: "https://aistudio.google.com/app/apikey",
   xai: "https://console.x.ai/",
   openrouter: "https://openrouter.ai/keys",
 };

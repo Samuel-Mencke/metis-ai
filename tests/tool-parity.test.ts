@@ -12,6 +12,7 @@ import { CORE_MCP_TOOL_ALLOWLIST, selectBridgeTools } from "../lib/mcp-bridge";
 import {
   antigravityCliSettings,
   antigravityMcpConfig,
+  antigravitySdkMcpServers,
   parseAntigravityCliChunk,
   writeAntigravitySessionFiles,
 } from "../lib/providers/official-antigravity";
@@ -175,6 +176,38 @@ test("antigravity MCP config maps stdio servers", () => {
   assert.equal(config.mcpServers.gateway.command, "/usr/bin/node");
   assert.equal(config.mcpServers.gateway.env.MCP_CHAT_ID, "chat-1");
   assert.equal(antigravityCliSettings().toolPermission, "always-proceed");
+});
+
+test("antigravity SDK MCP mapping keeps stdio and HTTP servers", () => {
+  const servers = antigravitySdkMcpServers({
+    gateway: {
+      type: "stdio",
+      command: "/usr/bin/node",
+      args: ["internal-mcp-server.mjs"],
+      cwd: "/tmp",
+      env: { MCP_CHAT_ID: "chat-1" },
+    },
+    remote: {
+      type: "http",
+      url: "http://127.0.0.1:8787/mcp",
+      headers: { Authorization: "Bearer test" },
+    },
+  });
+  assert.deepEqual(servers, [
+    {
+      name: "gateway",
+      type: "stdio",
+      command: "/usr/bin/node",
+      args: ["internal-mcp-server.mjs"],
+      env: { MCP_CHAT_ID: "chat-1" },
+    },
+    {
+      name: "remote",
+      type: "http",
+      url: "http://127.0.0.1:8787/mcp",
+      headers: { Authorization: "Bearer test" },
+    },
+  ]);
 });
 
 test("writeAntigravitySessionFiles writes mcp_config.json under temp HOME", async () => {

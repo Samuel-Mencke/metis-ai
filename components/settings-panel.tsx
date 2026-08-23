@@ -91,12 +91,7 @@ type ProviderConnection = {
 };
 
 function preferredAuthType(provider: ProviderDefinition) {
-  const priority = ["oauth", "account", "api_key", "local", "vertex_adc"];
-  return (
-    priority.find((authType) => provider.authTypes.includes(authType)) ||
-    provider.authTypes[0] ||
-    "api_key"
-  );
+  return provider.authTypes[0] || "api_key";
 }
 
 type OAuthFlow = {
@@ -236,6 +231,7 @@ const API_KEY_URLS: Record<string, string> = {
   openai: "https://platform.openai.com/api-keys",
   anthropic: "https://console.anthropic.com/settings/keys",
   google: "https://aistudio.google.com/app/apikey",
+  antigravity: "https://aistudio.google.com/app/apikey",
   xai: "https://console.x.ai/",
   openrouter: "https://openrouter.ai/keys",
 };
@@ -1950,9 +1946,9 @@ export function SettingsPanel({
                     options={(providerDefinitions.find((provider) => provider.key === providerDraft.providerKey)?.authTypes || ["api_key"]).map((authType) => ({
                       value: authType,
                       label: authType === "api_key"
-                        ? "API key"
+                        ? (providerDraft.providerKey === "antigravity" ? "Gemini API key (SDK)" : "API key")
                         : authType === "oauth"
-                          ? "OAuth"
+                          ? (providerDraft.providerKey === "antigravity" ? "OAuth (agy CLI)" : "OAuth")
                           : authType === "vertex_adc"
                             ? "Google Vertex / ADC"
                             : authType === "account"

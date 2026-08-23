@@ -38,7 +38,7 @@ import {
   ensureAntigravityProjectId,
   type OAuthProviderKey,
 } from "@/lib/providers/oauth";
-import { antigravitySupportsEffort, runOfficialAntigravityJob } from "@/lib/providers/official-antigravity";
+import { antigravitySupportsEffort, runAntigravitySdkJob, runOfficialAntigravityJob } from "@/lib/providers/official-antigravity";
 import type { AgentJob } from "@/lib/jobs";
 import { allModes, modeById } from "@/lib/modes";
 import { classifyToolKind, innerToolName, todosFromToolPayload } from "@/lib/tool-call-display";
@@ -1519,7 +1519,7 @@ async function runAntigravity(context: ProviderContext): Promise<ProviderResult>
             : {}),
         }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
       );
-  await runOfficialAntigravityJob({
+  const job = {
     userId: context.job.userId,
     connectionId: context.connection.id,
     secret: context.connection.secret || "",
@@ -1535,7 +1535,23 @@ async function runAntigravity(context: ProviderContext): Promise<ProviderResult>
     onText: context.onText,
     onStream: context.onStream,
     onTool: context.onTool,
-  });
+  };
+  if (context.connection.authType === "oauth") {
+    await runOfficialAntigravityJob(job);
+  } else {
+    await runAntigravitySdkJob({
+      modelId: job.modelId,
+      prompt: job.prompt,
+      cwd: job.cwd,
+      mcp: job.mcp,
+      extraEnv,
+      apiKey: context.connection.secret || "",
+      signal: context.signal,
+      onText: context.onText,
+      onStream: context.onStream,
+      onTool: context.onTool,
+    });
+  }
   return {};
 }
 

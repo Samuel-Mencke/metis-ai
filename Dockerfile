@@ -12,7 +12,12 @@ ENV AI_CHAT_ROOT=/app
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
 COPY package.json pnpm-lock.yaml ./
+COPY requirements-antigravity.txt ./
 RUN pnpm install --frozen-lockfile
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 python3-pip \
+  && python3 -m pip install --no-cache-dir --break-system-packages -r requirements-antigravity.txt \
+  && rm -rf /var/lib/apt/lists/*
 
 COPY . .
 RUN pnpm build

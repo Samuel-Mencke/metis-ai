@@ -62,6 +62,12 @@ test("Codex exposes the supported credential paths and official model IDs", () =
   ]);
 });
 
+test("Antigravity defaults to the official SDK API key and still offers OAuth", () => {
+  const provider = listProviderDefinitions().find((item) => item.key === "antigravity");
+  assert.deepEqual(provider?.authTypes, ["api_key", "oauth"]);
+  assert.match(provider?.setupHint || "", /SDK/i);
+});
+
 test("Codex tool events preserve command and MCP results", () => {
   assert.deepEqual(
     codexTool({

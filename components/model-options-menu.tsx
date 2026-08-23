@@ -7,6 +7,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import {
   defaultParamsForModel,
@@ -104,15 +105,13 @@ export function ModelOptionsMenu({
                   <div className="flex items-center gap-1">
                     <p className="text-sm">{param.displayName || param.id}</p>
                   </div>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant={on ? "default" : "outline"}
-                    className="min-w-14 rounded-full"
-                    onClick={() => setParam(param.id, on ? "false" : "true")}
-                  >
-                    {on ? "On" : "Off"}
-                  </Button>
+                  <Switch
+                    checked={on}
+                    onCheckedChange={(checked) =>
+                      setParam(param.id, checked ? "true" : "false")
+                    }
+                    aria-label={param.displayName || param.id}
+                  />
                 </div>
               );
             }

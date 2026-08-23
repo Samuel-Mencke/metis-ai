@@ -252,9 +252,9 @@ export const PROVIDERS: ProviderDefinition[] = [
   {
     key: "antigravity",
     name: "Google Antigravity",
-    description: "Antigravity agent through the official agy CLI.",
+    description: "Antigravity agent through the official Python SDK by default, or the agy CLI via OAuth.",
     kind: "antigravity-agent",
-    authTypes: ["oauth"],
+    authTypes: ["api_key", "oauth"],
     capabilities: agentCapabilities,
     models: models(
       ...[
@@ -276,7 +276,7 @@ export const PROVIDERS: ProviderDefinition[] = [
           : {}),
       })),
     ),
-    setupHint: "OAuth runs the official agy CLI remote login.",
+    setupHint: "Default: paste a Gemini API key to run the official google-antigravity SDK. OAuth still uses the agy CLI if you want that path.",
   },
 ];
 

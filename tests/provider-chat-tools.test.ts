@@ -19,6 +19,8 @@ test("runner dispatches Codex and Claude Code to their MCP agent SDKs", () => {
   assert.match(source, /execution === "codex-sdk"\) return runCodex/);
   assert.match(source, /execution === "claude-agent"\) return runClaude/);
   assert.match(source, /execution === "antigravity-cli"\) return runAntigravity/);
+  assert.match(source, /runAntigravitySdkJob/);
+  assert.match(source, /authType === "oauth"/);
   assert.doesNotMatch(source, /runOAuthAiSdk\(context, "codex"\)/);
   assert.doesNotMatch(source, /claudeSecretIsJsonOAuth/);
   assert.match(source, /claudeMcpServers\(getMcpServers/);

@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -38,6 +39,29 @@ export function antigravityMcpConfig(mcp: McpServerMap) {
       ]),
     ),
   };
+}
+
+export type AntigravitySdkMcpServer =
+  | { name: string; type: "stdio"; command: string; args?: string[]; env?: Record<string, string> }
+  | { name: string; type: "http"; url: string; headers?: Record<string, string> };
+
+export function antigravitySdkMcpServers(mcp: McpServerMap = {}): AntigravitySdkMcpServer[] {
+  return Object.entries(mcp).map(([name, server]) =>
+    server.type === "http"
+      ? {
+          name,
+          type: "http" as const,
+          url: server.url,
+          ...(server.headers ? { headers: server.headers } : {}),
+        }
+      : {
+          name,
+          type: "stdio" as const,
+          command: server.command,
+          args: server.args,
+          env: server.env,
+        },
+  );
 }
 
 export function antigravityCliSettings() {
@@ -441,5 +465,138 @@ export async function runOfficialAntigravityJob(context: {
   } finally {
     context.signal.removeEventListener("abort", killOnAbort);
     await rm(tempHome, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+function sdkToolPart(payload: Record<string, unknown>): ToolPart {
+  const name = String(payload.name || "Antigravity tool");
+  const input = typeof payload.input === "string"
+    ? payload.input
+    : payload.input
+      ? JSON.stringify(payload.input)
+      : undefined;
+  const result = typeof payload.result === "string"
+    ? payload.result
+    : payload.error
+      ? String(payload.error)
+      : payload.result
+        ? JSON.stringify(payload.result)
+        : undefined;
+  const todos = todosFromToolPayload(input, result);
+  const kind = classifyTranscriptTool(name, input, result);
+  return {
+    id: kind === "todo" ? "todo" : String(payload.id || crypto.randomUUID()),
+    name,
+    status: String(payload.status || "completed"),
+    kind,
+    ...(input ? { input } : {}),
+    ...(result ? { result } : {}),
+    ...(todos?.length ? { todos } : {}),
+  };
+}
+
+export async function runAntigravitySdkJob(context: {
+  modelId: string;
+  prompt: string;
+  cwd?: string;
+  mcp?: McpServerMap;
+  extraEnv?: Record<string, string>;
+  apiKey?: string;
+  signal: AbortSignal;
+  onText: (value: string) => void;
+  onStream: (data: Record<string, unknown>) => void;
+  onTool?: (tool: ToolPart) => void;
+}) {
+  const python = process.env.ANTIGRAVITY_PYTHON?.trim() || "python3";
+  const script = path.join(config.root, "scripts", "antigravity_bridge.py");
+  if (!existsSync(script)) {
+    throw new Error(`Antigravity SDK bridge was not found at ${script}.`);
+  }
+  const child = spawn(python, ["-u", script], {
+    cwd: context.cwd || config.agentCwd,
+    env: {
+      ...process.env,
+      PYTHONUNBUFFERED: "1",
+      ...(context.apiKey ? { GEMINI_API_KEY: context.apiKey, GOOGLE_API_KEY: context.apiKey } : {}),
+      ...(context.extraEnv || {}),
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const payload = {
+    prompt: context.prompt,
+    model: context.modelId,
+    cwd: context.cwd || config.agentCwd,
+    api_key: context.apiKey || undefined,
+    mcp_servers: antigravitySdkMcpServers(context.mcp || {}),
+  };
+  if (!child.stdin) throw new Error("Antigravity SDK bridge stdin is unavailable.");
+  child.stdin.write(`${JSON.stringify(payload)}\n`);
+  child.stdin.end();
+
+  let stdout = "";
+  let stderr = "";
+  let bridgeError = "";
+  const handleLine = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      if (parsed.type === "text" && parsed.text) {
+        context.onText(String(parsed.text));
+        return;
+      }
+      if (parsed.type === "tool") {
+        context.onTool?.(sdkToolPart(parsed));
+        context.onStream({ type: "sdk-tool", ...parsed });
+        return;
+      }
+      if (parsed.type === "error") {
+        bridgeError = String(parsed.message || parsed.detail || "Antigravity SDK failed.");
+        context.onStream({ type: "sdk-error", message: bridgeError });
+        return;
+      }
+      if (parsed.type === "done") {
+        context.onStream({ type: "sdk-done" });
+        return;
+      }
+    } catch {
+      context.onStream({ type: "sdk-output", text: trimmed });
+    }
+  };
+
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+    const lines = stdout.split("\n");
+    stdout = lines.pop() || "";
+    for (const line of lines) handleLine(line);
+  });
+  child.stderr.on("data", (chunk: string) => {
+    stderr = `${stderr}${chunk}`.slice(-8_000);
+  });
+
+  const killOnAbort = () => {
+    child.kill("SIGTERM");
+  };
+  context.signal.addEventListener("abort", killOnAbort, { once: true });
+  try {
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", resolve);
+    });
+    if (stdout.trim()) handleLine(stdout);
+    if (context.signal.aborted) throw new Error("Antigravity run cancelled.");
+    if (bridgeError) throw new Error(bridgeError);
+    if (exitCode !== 0) {
+      const detail = stderr.trim().replace(/\s+/g, " ").slice(-1_000);
+      throw new Error(
+        detail
+          ? `Antigravity SDK run failed: ${detail}`
+          : "Antigravity SDK run failed. Install google-antigravity in the Python environment.",
+      );
+    }
+  } finally {
+    context.signal.removeEventListener("abort", killOnAbort);
   }
 }
