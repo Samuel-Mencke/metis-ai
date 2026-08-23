@@ -51,17 +51,17 @@ test("voice composer exposes cancel via the plus button and drops stale waveform
   assert.match(shellSource, /\[activeChatId, automationsOpen, notesOpen\]/);
 });
 
-test("agent completion uses the bundled default WAV unless a custom sound is set", () => {
+test("agent completion uses the bundled default sound unless a custom sound is set", () => {
   const settingsSource = readFileSync(
     new URL("../components/settings-panel.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(shellSource, /const DEFAULT_FINISH_SOUND_URL = "\/sounds\/agent-completion\.wav"/);
+  assert.match(shellSource, /const DEFAULT_FINISH_SOUND_URL = "\/sounds\/agent-completion\.mp3"/);
   assert.match(shellSource, /finishSound\?\.dataUrl \|\| DEFAULT_FINISH_SOUND_URL/);
   assert.doesNotMatch(shellSource, /createOscillator/);
   assert.match(settingsSource, /Removing a custom file restores that default/);
   assert.ok(
-    existsSync(new URL("../public/sounds/agent-completion.wav", import.meta.url)),
-    "default completion WAV must be shipped",
+    existsSync(new URL("../public/sounds/agent-completion.mp3", import.meta.url)),
+    "default completion sound must be shipped",
   );
 });

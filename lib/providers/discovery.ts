@@ -122,7 +122,16 @@ type DiscoveredModel = {
   tags?: string[];
 };
 
-export function parseDiscoveredModel(value: unknown): DiscoveredModel | null {
+export const NON_CHAT_TOOL_MODEL = /(\bembed|whisper|tts|dall-e|dalle|sora|moderation|babbage|davinci-002|realtime|transcribe|chatgpt-image|gpt-image|gpt-audio|omni-moderation)/i;
+
+export function modelSupportsChatTools(id: string, displayName = "") {
+  const hay = `${id} ${displayName}`;
+  if (NON_CHAT_TOOL_MODEL.test(hay)) return false;
+  if (/\binstruct\b/i.test(hay)) return false;
+  return true;
+}
+
+function parseDiscoveredModel(value: unknown): DiscoveredModel | null {
   if (!value || typeof value !== "object") return null;
   const item = value as Record<string, unknown>;
   const id = typeof item.id === "string"
@@ -285,7 +294,9 @@ export async function discoverProviderModels(connection: ProviderConnectionWithS
       contextWindowDiscovered: Boolean(model.contextWindowDiscovered),
     });
   }
-  return [...merged.values()];
+  const chatModels = [...merged.values()].filter((model) => modelSupportsChatTools(model.id, model.displayName));
+  if (chatModels.length) return chatModels;
+  return provider.models.filter((model) => modelSupportsChatTools(model.id, model.displayName));
 }
 
 const MODEL_CACHE_STALE_MS = 60 * 60 * 1000;

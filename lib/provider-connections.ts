@@ -2,12 +2,15 @@ import { randomUUID } from "node:crypto";
 import { getDatabase, transaction } from "@/lib/sqlite";
 import { decryptSecret, encryptSecret, maskSecret } from "@/lib/secrets";
 import { getProviderDefinition } from "@/lib/providers/registry";
+import { isVoiceOnlyProviderConnection } from "@/lib/providers/voice-connection";
 import type {
   ProviderAuthType,
   ProviderConnection,
   ProviderModel,
   ProviderModelDefinition,
 } from "@/lib/providers/types";
+
+export { isVoiceOnlyProviderConnection } from "@/lib/providers/voice-connection";
 
 type ConnectionRow = {
   id: string;
@@ -111,7 +114,7 @@ function validateBaseUrl(baseUrl: string | undefined) {
 
 function sanitizeConfig(value: Record<string, unknown> | undefined) {
   if (!value) return {};
-  const allowedKeys = new Set(["project", "location", "organization", "modelIds", "pendingOAuthFlow"]);
+  const allowedKeys = new Set(["project", "location", "organization", "modelIds", "pendingOAuthFlow", "purpose"]);
   const result: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value)) {
     if (!allowedKeys.has(key)) continue;
@@ -127,6 +130,10 @@ function sanitizeConfig(value: Record<string, unknown> | undefined) {
     }
     if (key === "pendingOAuthFlow") {
       if (typeof item === "boolean") result[key] = item;
+      continue;
+    }
+    if (key === "purpose") {
+      if (item === "voice" || item === "chat") result[key] = item;
       continue;
     }
     if (typeof item === "string" && item.trim()) result[key] = item.trim().slice(0, 300);
@@ -176,6 +183,12 @@ export function listProviderConnections(ownerId: string, includeDisabled = true)
               label COLLATE NOCASE ASC`,
   ).all(ownerId) as ConnectionRow[];
   return rows.map(rowToConnection);
+}
+
+export function listChatProviderConnections(ownerId: string, includeDisabled = true) {
+  return listProviderConnections(ownerId, includeDisabled).filter(
+    (connection) => !isVoiceOnlyProviderConnection(connection),
+  );
 }
 
 export function getProviderConnection(id: string, ownerId: string) {

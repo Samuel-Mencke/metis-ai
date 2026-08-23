@@ -721,7 +721,7 @@ const WORKSPACE_SQUEEZE_MIN_WIDTH = 200;
 const NOTIFICATIONS_STORAGE_KEY = `${clientConfig.storagePrefix}_notifications_enabled`;
 const SOUND_CUES_STORAGE_KEY = `${clientConfig.storagePrefix}_sound_cues_enabled`;
 const FINISH_SOUND_STORAGE_KEY = `${clientConfig.storagePrefix}_finish_sound`;
-const DEFAULT_FINISH_SOUND_URL = "/sounds/agent-completion.wav";
+const DEFAULT_FINISH_SOUND_URL = "/sounds/agent-completion.mp3";
 const UNREAD_CHATS_STORAGE_KEY = `${clientConfig.storagePrefix}_unread_chats`;
 
 function loadUnreadChatIds(): string[] {

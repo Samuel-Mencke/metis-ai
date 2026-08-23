@@ -29,6 +29,7 @@ export async function POST(req: Request) {
       label: provider === "custom" ? "Voice custom endpoint" : "Voice OpenAI",
       authType: "api_key",
       ...(endpoint ? { baseUrl: endpoint } : {}),
+      config: { purpose: "voice" },
       secret: apiKey,
       enabled: true,
     });

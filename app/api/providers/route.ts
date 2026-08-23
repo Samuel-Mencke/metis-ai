@@ -1,7 +1,7 @@
 import { getVerifiedProviderCapabilities } from "@/lib/providers/registry";
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import {
-  listProviderConnections,
+  listChatProviderConnections,
   upsertProviderConnection,
   type ProviderConnectionInput,
 } from "@/lib/provider-connections";
@@ -33,7 +33,7 @@ export async function GET(req: Request) {
   if (!ownerId) return Response.json({ error: "A user session is required." }, { status: 401 });
   return Response.json({
     providers: publicProviders(),
-    connections: listProviderConnections(ownerId),
+    connections: listChatProviderConnections(ownerId),
   });
 }
 

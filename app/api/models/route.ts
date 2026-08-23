@@ -8,7 +8,7 @@ import {
 import {
   findActiveConnection,
   getProviderConnectionSecret,
-  listProviderConnections,
+  listChatProviderConnections,
   listProviderModels,
   providerAuthPriority,
 } from "@/lib/provider-connections";
@@ -166,7 +166,7 @@ export async function GET(req: Request) {
   }
 
   const connections = userId
-    ? listProviderConnections(userId, false)
+    ? listChatProviderConnections(userId, false)
         .filter((connection) => {
           if (connection.authType === "local" || connection.authType === "vertex_adc") return true;
           return Boolean(getProviderConnectionSecret(connection.id, userId)?.secret);

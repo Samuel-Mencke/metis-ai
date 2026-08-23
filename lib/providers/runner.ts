@@ -30,6 +30,7 @@ import {
   type ProviderConnectionWithSecret,
 } from "@/lib/provider-connections";
 import { getProviderDefinition } from "@/lib/providers/registry";
+import { providerExecution } from "@/lib/providers/run-kind";
 import { normalizeLegacyProviderModelId } from "@/lib/providers/model-aliases";
 import { modelKey, parseModelKey } from "@/lib/providers/types";
 import {
@@ -186,14 +187,20 @@ function providerRemoteTools(context: ProviderContext): ToolSet {
 
 function providerLanguageTools(context: ProviderContext): ToolSet {
   const tools: ToolSet = { ...providerRemoteTools(context) };
-  if (context.connection.providerKey !== "xai") return tools;
+  Object.assign(tools, providerNativeSearchTools(context));
+  return tools;
+}
+
+function providerNativeSearchTools(context: ProviderContext): ToolSet {
+  if (context.connection.providerKey !== "xai") return {};
   const client = createXai({
     apiKey: context.connection.secret,
     ...(context.connection.baseUrl ? { baseURL: context.connection.baseUrl } : {}),
   });
-  tools.web_search = client.tools.webSearch() as never;
-  tools.x_search = client.tools.xSearch() as never;
-  return tools;
+  return {
+    web_search: client.tools.webSearch() as never,
+    x_search: client.tools.xSearch() as never,
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -1017,7 +1024,10 @@ async function agentToolsFor(context: ProviderContext): Promise<ToolSet> {
 }
 
 async function runAiSdk(context: ProviderContext): Promise<ProviderResult> {
-  const tools = await agentToolsFor(context);
+  const tools = {
+    ...(await agentToolsFor(context)),
+    ...providerNativeSearchTools(context),
+  };
   const messages = modelMessages(
     context.chat,
     context.job,
@@ -1088,7 +1098,10 @@ async function runOAuthAiSdk(
     }
     const provider = await createOAuthProvider(providerKey, authFile);
     const oauthModelId = context.modelId;
-    const oauthTools = await agentToolsFor(context);
+    const oauthTools = {
+      ...(await agentToolsFor(context)),
+      ...providerNativeSearchTools(context),
+    };
     const messages = modelMessages(
       context.chat,
       context.job,
@@ -1389,6 +1402,22 @@ function claudeTool(message: Record<string, unknown>): ToolPart | null {
   };
 }
 
+function claudeMcpServers(servers: ReturnType<typeof getMcpServers>) {
+  return Object.fromEntries(
+    Object.entries(servers).map(([name, server]) => {
+      if (server.type === "http") {
+        return [name, { type: "http" as const, url: server.url, headers: server.headers }];
+      }
+      return [name, {
+        command: server.command,
+        args: server.args,
+        env: server.env,
+        alwaysLoad: true,
+      }];
+    }),
+  );
+}
+
 async function runClaude(context: ProviderContext): Promise<ProviderResult> {
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
   const abortController = new AbortController();
@@ -1402,18 +1431,18 @@ async function runClaude(context: ProviderContext): Promise<ProviderResult> {
   const options = {
     cwd: agentCwd,
     model: context.modelId,
-    // Do not expose Claude Code's native filesystem, shell, browser, or task
-    // tools. Metis MCP is the sole tool surface for every provider CLI.
+    // Disable Claude Code builtins so Metis MCP is the sole tool surface.
     tools: [] as string[],
     permissionMode: "acceptEdits" as const,
     includePartialMessages: true,
+    strictMcpConfig: true,
     ...(previousId ? { resume: previousId } : {}),
     env: inheritedEnv({
       ...(context.connection.secret ? { ANTHROPIC_API_KEY: context.connection.secret } : {}),
       CLAUDE_AGENT_SDK_CLIENT_APP: "metis-ai",
     }),
     abortController,
-    mcpServers: getMcpServers(providerMcpContext(context)),
+    mcpServers: claudeMcpServers(getMcpServers(providerMcpContext(context))),
     systemPrompt: providerPrompt(context.job, ["mcp"], false, effectiveModelParams(context.chat, context.job)),
   };
   let sessionId: string | undefined;
@@ -1510,31 +1539,13 @@ async function runAntigravity(context: ProviderContext): Promise<ProviderResult>
   return {};
 }
 
-function claudeSecretIsJsonOAuth(secret?: string) {
-  const value = secret?.trim() || "";
-  if (!value.startsWith("{")) return false;
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed));
-  } catch {
-    return false;
-  }
-}
 
 async function runProvider(context: ProviderContext): Promise<ProviderResult> {
-  const providerKey = parseModelKey(context.job.modelId).providerKey;
-  if (providerKey === "antigravity") return runAntigravity(context);
-  if (providerKey === "codex") {
-    return context.connection.authType === "api_key"
-      ? runAiSdk(context)
-      : runOAuthAiSdk(context, "codex");
-  }
-  if (providerKey === "claude-code") {
-    if (context.connection.authType === "oauth" && claudeSecretIsJsonOAuth(context.connection.secret)) {
-      return runOAuthAiSdk(context, providerKey);
-    }
-    return runClaude(context);
-  }
+  const providerKey = context.connection.providerKey || parseModelKey(context.job.modelId).providerKey;
+  const execution = providerExecution(providerKey);
+  if (execution === "antigravity-cli") return runAntigravity(context);
+  if (execution === "codex-sdk") return runCodex(context);
+  if (execution === "claude-agent") return runClaude(context);
   return runAiSdk(context);
 }
 

@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { decryptSecret, encryptSecret, maskSecret } from "../lib/secrets";
 import { listProviderDefinitions } from "../lib/providers/registry";
+import { providerExecution } from "../lib/providers/run-kind";
 import { codexTool } from "../lib/providers/runner";
 import { antigravitySupportsEffort } from "../lib/providers/official-antigravity";
 import { modelKey, parseModelKey } from "../lib/providers/types";
+import { isVoiceOnlyProviderConnection } from "../lib/providers/voice-connection";
 
 process.env.AI_CHAT_SECRETS_KEY = "00".repeat(32);
 
@@ -95,4 +97,40 @@ test("Antigravity does not send effort for Claude models", () => {
   assert.equal(antigravitySupportsEffort("gemini-3.6-flash"), true);
   assert.equal(antigravitySupportsEffort("gpt-oss-120b-medium"), true);
   assert.equal(antigravitySupportsEffort("claude-opus-4-6-thinking"), false);
+});
+
+test("every implemented provider routes to a tool-capable runtime", () => {
+  const expected: Record<string, string> = {
+    cursor: "cursor-agent",
+    openai: "ai-sdk",
+    anthropic: "ai-sdk",
+    google: "ai-sdk",
+    xai: "ai-sdk",
+    openrouter: "ai-sdk",
+    ollama: "ai-sdk",
+    compatible: "ai-sdk",
+    codex: "codex-sdk",
+    "claude-code": "claude-agent",
+    antigravity: "antigravity-cli",
+  };
+  const keys = listProviderDefinitions().map((provider) => provider.key).sort();
+  assert.deepEqual(keys, Object.keys(expected).sort());
+  for (const provider of listProviderDefinitions()) {
+    assert.equal(
+      providerExecution(provider.key),
+      expected[provider.key],
+      `${provider.key} must keep a tool-capable execution path`,
+    );
+    assert.equal(provider.capabilities.tools, true, `${provider.key} tools`);
+    assert.equal(provider.capabilities.mcp, true, `${provider.key} mcp`);
+  }
+});
+
+
+test("voice OpenAI connections stay out of the chat picker", () => {
+ assert.equal(isVoiceOnlyProviderConnection({ slug: "voice-openai", label: "Voice OpenAI", config: {} }), true);
+ assert.equal(isVoiceOnlyProviderConnection({ slug: "voice-custom", label: "Voice custom endpoint", config: { purpose: "voice" } }), true);
+ assert.equal(isVoiceOnlyProviderConnection({ slug: "openai-main", label: "OpenAI", config: {} }), false);
+ assert.equal(isVoiceOnlyProviderConnection({ slug: "openai-work", label: "OpenAI", config: { purpose: "chat" } }), false);
+ assert.equal(isVoiceOnlyProviderConnection({ slug: "cursor-main", label: "Cursor", config: {} }), false);
 });

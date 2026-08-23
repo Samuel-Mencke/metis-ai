@@ -1,6 +1,6 @@
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { checkGatewayHealth } from "@/lib/mcp";
-import { listProviderConnections } from "@/lib/provider-connections";
+import { listChatProviderConnections } from "@/lib/provider-connections";
 import { getUserAgentCwd } from "@/lib/mcp";
 import { readWorkerHeartbeat } from "@/lib/worker-health";
 import { isHostAdmin } from "@/lib/user-access";
@@ -13,7 +13,7 @@ export async function GET(req: Request) {
   const gateway = await checkGatewayHealth();
   const worker = readWorkerHeartbeat();
   const ownerId = await getAuthenticatedUserId(req);
-  const connections = ownerId ? listProviderConnections(ownerId) : [];
+  const connections = ownerId ? listChatProviderConnections(ownerId) : [];
   const hasCursorSdkConnection = connections.some(
     (connection) => connection.providerKey === "cursor" && connection.enabled && connection.hasSecret,
   );

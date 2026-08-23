@@ -516,8 +516,8 @@ function markJobError(job: AgentJob, message: string) {
 async function resolveAutoModel(job: AgentJob, chat: Chat): Promise<string | null> {
   if (!job.userId) return null;
   try {
-    const { listProviderConnections } = await import("@/lib/provider-connections");
-    const connections = listProviderConnections(job.userId, false);
+    const { listChatProviderConnections } = await import("@/lib/provider-connections");
+    const connections = listChatProviderConnections(job.userId, false);
     const candidates: RoutingModel[] = [];
     for (const connection of connections) {
       if (connection.providerKey === "cursor") continue;

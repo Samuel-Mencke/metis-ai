@@ -158,6 +158,7 @@ test("CORE allowlist keeps search_tools/call_mcp_tool and excludes provide_file/
 test("every selectable provider advertises tool support", () => {
   for (const provider of listProviderDefinitions()) {
     assert.equal(provider.capabilities.tools, true, `${provider.key} should advertise tools`);
+    assert.equal(provider.capabilities.mcp, true, `${provider.key} should advertise mcp`);
   }
 });
 
