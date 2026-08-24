@@ -180,6 +180,14 @@ import { modelAttrSummary } from "@/lib/model-label";
 import { clientConfig } from "@/lib/client-config";
 import { modelKey, parseModelKey } from "@/lib/providers/types";
 import type { AgentMode } from "@/lib/store";
+import {
+  clampWorkspaceWidth,
+  displayedWorkspacePanelWidth,
+  WORKSPACE_MAX_WIDTH,
+  WORKSPACE_MIN_WIDTH,
+  workspaceCrowdsSidebar,
+  workspaceWidthAfterReopeningSidebar,
+} from "@/lib/workspace-layout";
 
 type Role = "user" | "assistant" | "system";
 
@@ -737,10 +745,6 @@ const SIDEBAR_WIDTH_STORAGE_KEY = `${clientConfig.storagePrefix}_sidebar_width`;
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 420;
 const WORKSPACE_WIDTH_STORAGE_KEY = `${clientConfig.storagePrefix}_workspace_width_compact`;
-const WORKSPACE_MIN_WIDTH = 280;
-const WORKSPACE_MAX_WIDTH = 1120;
-const CHAT_MIN_WIDTH = 640;
-const WORKSPACE_SQUEEZE_MIN_WIDTH = 200;
 const NOTIFICATIONS_STORAGE_KEY = `${clientConfig.storagePrefix}_notifications_enabled`;
 const SOUND_CUES_STORAGE_KEY = `${clientConfig.storagePrefix}_sound_cues_enabled`;
 const FINISH_SOUND_STORAGE_KEY = `${clientConfig.storagePrefix}_finish_sound`;
@@ -1832,6 +1836,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [sidebarProjects, setSidebarProjects] = useState<Array<{ id: string; name: string }>>([]);
   const [workspaceFullscreen, setWorkspaceFullscreen] = useState(false);
   const workspaceAutoCollapsedSidebarRef = useRef(false);
+  const sidebarRevealPinnedRef = useRef(false);
   const [remoteTerminalCwd, setRemoteTerminalCwd] = useState(workspaceDefaultCwd);
   const [remoteFileCwd, setRemoteFileCwd] = useState(workspaceDefaultCwd);
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
@@ -1903,6 +1908,14 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       ? Math.min(WORKSPACE_MAX_WIDTH, Math.max(WORKSPACE_MIN_WIDTH, saved))
       : 380;
   });
+  const [workspaceWidthInput, setWorkspaceWidthInput] = useState(() => String(
+    typeof window === "undefined" ? 380 : (() => {
+      const saved = Number(localStorage.getItem(WORKSPACE_WIDTH_STORAGE_KEY));
+      return Number.isFinite(saved)
+        ? Math.min(WORKSPACE_MAX_WIDTH, Math.max(WORKSPACE_MIN_WIDTH, saved))
+        : 380;
+    })(),
+  ));
   const [activeDiff, setActiveDiff] = useState<ActiveDiff | null>(null);
   const [activeRawTool, setActiveRawTool] = useState<ActiveRawTool | null>(null);
   const [activeSubagent, setActiveSubagent] = useState<ActiveSubagent | null>(null);
@@ -2038,32 +2051,62 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
 
   const layoutSidebarWidth =
     viewportWidth >= 768 && desktopSidebarOpen ? sidebarWidth : 0;
-  const displayedWorkspaceWidth = (() => {
-    if (!workspaceOpen || workspaceFullscreen) return workspaceWidth;
-    const remaining = viewportWidth - layoutSidebarWidth - CHAT_MIN_WIDTH;
-    if (remaining >= workspaceWidth) return workspaceWidth;
-    return Math.max(WORKSPACE_SQUEEZE_MIN_WIDTH, remaining);
-  })();
+  const displayedWorkspaceWidth = displayedWorkspacePanelWidth({
+    workspaceOpen,
+    workspaceFullscreen,
+    workspaceWidth,
+    viewportWidth,
+    sidebarWidth: layoutSidebarWidth,
+  });
+
+  const applyWorkspaceWidth = useCallback((width: number, options?: { unpinSidebar?: boolean }) => {
+    const next = clampWorkspaceWidth(width);
+    setWorkspaceWidth(next);
+    setWorkspaceWidthInput(String(next));
+    if (options?.unpinSidebar) sidebarRevealPinnedRef.current = false;
+  }, []);
+
+  const revealDesktopSidebar = useCallback(() => {
+    if (typeof window !== "undefined" && workspaceOpen && !workspaceFullscreen) {
+      applyWorkspaceWidth(workspaceWidthAfterReopeningSidebar(
+        window.innerWidth,
+        sidebarWidth,
+        workspaceWidth,
+      ));
+    }
+    sidebarRevealPinnedRef.current = true;
+    workspaceAutoCollapsedSidebarRef.current = false;
+    setDesktopSidebarOpen(true);
+  }, [applyWorkspaceWidth, sidebarWidth, workspaceFullscreen, workspaceOpen, workspaceWidth]);
+
+  const toggleDesktopSidebar = useCallback(() => {
+    if (desktopSidebarOpen) {
+      sidebarRevealPinnedRef.current = false;
+      workspaceAutoCollapsedSidebarRef.current = false;
+      setDesktopSidebarOpen(false);
+      return;
+    }
+    revealDesktopSidebar();
+  }, [desktopSidebarOpen, revealDesktopSidebar]);
 
   useEffect(() => {
     if (typeof window === "undefined" || window.innerWidth < 768) return;
     const syncSidebarForWorkspace = () => {
-      const browserWidth = Math.min(1040, Math.max(workspaceWidth, window.innerWidth * 0.68));
-      const effectiveWorkspaceWidth = workspaceTab === "browser" ? browserWidth : workspaceWidth;
       const needsSpace = workspaceOpen && !workspaceFullscreen &&
-        window.innerWidth < sidebarWidth + effectiveWorkspaceWidth + 640;
-      if (needsSpace && desktopSidebarOpen) {
+        workspaceCrowdsSidebar(window.innerWidth, sidebarWidth, workspaceWidth);
+      if (needsSpace && desktopSidebarOpen && !sidebarRevealPinnedRef.current) {
         workspaceAutoCollapsedSidebarRef.current = true;
         setDesktopSidebarOpen(false);
       } else if (!workspaceOpen && workspaceAutoCollapsedSidebarRef.current) {
         workspaceAutoCollapsedSidebarRef.current = false;
+        sidebarRevealPinnedRef.current = false;
         setDesktopSidebarOpen(true);
       }
     };
     syncSidebarForWorkspace();
     window.addEventListener("resize", syncSidebarForWorkspace);
     return () => window.removeEventListener("resize", syncSidebarForWorkspace);
-  }, [desktopSidebarOpen, sidebarWidth, workspaceFullscreen, workspaceOpen, workspaceTab, workspaceWidth]);
+  }, [desktopSidebarOpen, sidebarWidth, workspaceFullscreen, workspaceOpen, workspaceWidth]);
 
   useEffect(() => {
     if (desktopSidebarOpen) {
@@ -2201,6 +2244,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
 
   useEffect(() => {
     localStorage.setItem(WORKSPACE_WIDTH_STORAGE_KEY, String(workspaceWidth));
+    setWorkspaceWidthInput(String(workspaceWidth));
   }, [workspaceWidth]);
 
   useEffect(() => {
@@ -8137,6 +8181,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
  function openProjectHome(projectId: string) {
  setNotesOpen(false);
  setAutomationsOpen(false);
+ setWorkspaceOpen(false);
+ setWorkspaceFullscreen(false);
  persistActiveSnapshot();
  setActiveChatId(null);
  activeChatIdRef.current = null;
@@ -8575,7 +8621,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           toggleWorkspace();
         }}
         onOpenModel={() => setModelMenuOpen(true)}
-        onToggleSidebar={() => setDesktopSidebarOpen((open) => !open)}
+        onToggleSidebar={toggleDesktopSidebar}
         onExport={exportCurrentChat}
       />
       {findOpen ? (
@@ -8679,7 +8725,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             className="hidden size-8 md:inline-flex"
             aria-label={desktopSidebarOpen ? "Hide sidebar" : "Show sidebar"}
             title={desktopSidebarOpen ? "Hide sidebar" : "Show sidebar"}
-            onClick={() => setDesktopSidebarOpen((open) => !open)}
+            onClick={toggleDesktopSidebar}
           >
             <PanelLeft className="size-4" />
           </Button>
@@ -9633,13 +9679,21 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             workspaceOpen ? "workspace-panel-enter" : "workspace-panel-exit",
           )}
           style={workspaceFullscreen ? undefined : {
-            width: workspaceTab === "browser"
-              ? `min(100%, max(${workspaceWidth}px, min(68vw, 1040px)))`
-              : `min(100%, ${workspaceWidth}px)`,
+            width: `min(100%, ${displayedWorkspaceWidth}px)`,
           }}
         >
           {workspaceFullscreen ? null : (
-            <WorkspaceResizeHandle width={workspaceWidth} onWidthChange={setWorkspaceWidth} />
+            <WorkspaceResizeHandle
+              width={workspaceWidth}
+              onWidthChange={(width) => {
+                const expandingPastFit = typeof window !== "undefined"
+                  && desktopSidebarOpen
+                  && workspaceOpen
+                  && !workspaceFullscreen
+                  && workspaceCrowdsSidebar(window.innerWidth, sidebarWidth, width);
+                applyWorkspaceWidth(width, { unpinSidebar: expandingPastFit });
+              }}
+            />
           )}
           <div className="flex shrink-0 items-center gap-1 border-b border-border/30 px-2 py-1.5">
             <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto">
@@ -9832,7 +9886,13 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="w-72">
-                      <DropdownMenuLabel>Viewport</DropdownMenuLabel>
+                                            <DropdownMenuLabel>Panel width</DropdownMenuLabel>
+                      <div className="flex items-center gap-1 px-1.5 pb-2">
+                      <Input value={workspaceWidthInput} onChange={(event) => setWorkspaceWidthInput(event.target.value)} onBlur={() => applyWorkspaceWidth(Number(workspaceWidthInput) || workspaceWidth)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); applyWorkspaceWidth(Number(workspaceWidthInput) || workspaceWidth); } }} aria-label="Workspace panel width" className="h-7 w-full px-2 text-[11px]" inputMode="numeric" />
+                      <span className="text-xs text-muted-foreground">px</span>
+                      <Button type="button" size="xs" variant="secondary" className="h-7" onClick={() => applyWorkspaceWidth(Number(workspaceWidthInput) || workspaceWidth)}>Set</Button>
+                      </div>
+<DropdownMenuLabel>Viewport</DropdownMenuLabel>
                       <div className="flex items-center gap-1 px-1.5 pb-2">
                         <Input value={browserWidthInput} onChange={(event) => setBrowserWidthInput(event.target.value)} aria-label="Browser width" className="h-7 w-full px-2 text-[11px]" inputMode="numeric" />
                         <span className="text-xs text-muted-foreground">×</span>

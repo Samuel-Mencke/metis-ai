@@ -108,7 +108,7 @@ function finalizeAlternativeTools(tools: ToolPart[]) {
   }
 }
 
-type CompactionEvent = {
+export type CompactionEvent = {
   type: "compaction";
  id: string;
  name: "context_compaction";
@@ -308,21 +308,16 @@ function stripProviderReasoning(messages: ModelMessage[]): ModelMessage[] {
   });
 }
 
-function modelMessages(
-  chat: Chat,
-  job: AgentJob,
-  contextWindow?: number,
-  contextMode: ContextMode = "normal",
-  onCompaction?: (event: CompactionEvent) => void,
-): ModelMessage[] {
+function chatToModelMessages(chat: Chat, excludeMessageId?: string): ModelMessage[] {
   const messages: ModelMessage[] = [];
   for (const message of chat.messages) {
+    if (excludeMessageId && message.id === excludeMessageId) continue;
     if (message.role !== "user" && message.role !== "assistant") continue;
     const content = message.content.trim();
     const tools = message.tools || [];
     if (!content && !tools.length) continue;
     if (message.role === "user") {
-      messages.push({ role: "user", content: content || "Please respond." });
+      messages.push({ role: "user", content: content || "respond." });
       continue;
     }
     if (!tools.length) {
@@ -353,8 +348,60 @@ function modelMessages(
       })),
     });
   }
+  return messages;
+}
+
+function serializeModelMessagesForPrompt(messages: ModelMessage[]): string {
+  const blocks: string[] = [];
+  for (const message of messages) {
+    const text = modelMessageText(message).trim();
+    if (!text) continue;
+    const speaker = message.role === "user" ? "User" : message.role === "assistant" ? "Assistant" : "Tool";
+    blocks.push(`${speaker}:\n${text}`);
+  }
+  return blocks.join("\n\n");
+}
+
+/** Compact chat history for Cursor SDK (string prompt) using the same 80% policy as AI-SDK providers. */
+export function compactChatHistoryForPrompt(
+  chat: Chat,
+  options: {
+    excludeMessageId?: string;
+    contextWindow?: number;
+    contextMode?: ContextMode;
+    onCompaction?: (event: CompactionEvent) => void;
+    maxChars?: number;
+  } = {},
+): { text: string; compacted: boolean } {
+  const messages = chatToModelMessages(chat, options.excludeMessageId);
+  let compacted = false;
+  const next = compactIfNeeded(
+    messages,
+    options.contextWindow,
+    options.contextMode || "normal",
+    (event) => {
+      if (event.status === "completed") compacted = true;
+      options.onCompaction?.(event);
+    },
+  );
+  let text = serializeModelMessagesForPrompt(next);
+  const maxChars = options.maxChars ?? 120_000;
+  if (text.length > maxChars) {
+    text = `[Earlier persisted messages truncated to fit the model context]\n${text.slice(-maxChars)}`;
+  }
+  return { text, compacted };
+}
+
+function modelMessages(
+  chat: Chat,
+  job: AgentJob,
+  contextWindow?: number,
+  contextMode: ContextMode = "normal",
+  onCompaction?: (event: CompactionEvent) => void,
+): ModelMessage[] {
+  const messages = chatToModelMessages(chat);
   if (!messages.some((message) => message.role === "user")) {
-    messages.push({ role: "user", content: job.message || "Please respond." });
+    messages.push({ role: "user", content: job.message || "respond." });
   }
   return compactIfNeeded(messages, contextWindow, contextMode, onCompaction);
 }

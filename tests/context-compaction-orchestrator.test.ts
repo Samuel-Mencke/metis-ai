@@ -8,7 +8,9 @@ import {
   estimateContextTokens,
   contextWindowForSelection,
 } from "../lib/context-window";
-import { compactProviderMessages, codexReasoningEffortForSelection } from "../lib/providers/runner";
+import { compactChatHistoryForPrompt, compactProviderMessages, codexReasoningEffortForSelection } from "../lib/providers/runner";
+import { readFileSync } from "node:fs";
+import type { Chat } from "../lib/store";
 
 const toolHistory: ModelMessage[] = [
   { role: "user", content: "Keep the current task and file state." },
@@ -119,4 +121,64 @@ test("272K is selected only by an explicit matching context selection", () => {
     contextWindowForSelection(model, [{ id: "context", value: "272k" }]),
     272_000,
   );
+});
+
+const workerSource = readFileSync(new URL("../lib/worker-runner.ts", import.meta.url), "utf8");
+
+test("Cursor SDK prompt compaction uses the same 80% recap and skips the live turn", () => {
+  const chat = {
+    messages: [
+      { id: "u1", role: "user", content: "Keep the current task and file state.", createdAt: "t" },
+      {
+        id: "a1",
+        role: "assistant",
+        content: "The file needs a focused fix.",
+        createdAt: "t",
+        tools: [{
+          id: "read-1",
+          name: "read_file",
+          status: "completed",
+          input: JSON.stringify({ path: "/workspace/src/important.ts" }),
+          result: `${"large file content ".repeat(4_000)}\nERROR: preserve this failure\nTODO: keep this todo`,
+        }],
+      },
+      { id: "u2", role: "user", content: "Continue without repeating completed work.", createdAt: "t" },
+      { id: "live", role: "user", content: "LIVE_TURN_MUST_NOT_APPEAR", createdAt: "t" },
+    ],
+  } as Chat;
+  const events: Array<Record<string, unknown>> = [];
+  const result = compactChatHistoryForPrompt(chat, {
+    excludeMessageId: "live",
+    contextWindow: 4_000,
+    onCompaction: (event) => events.push(event),
+  });
+  assert.equal(result.compacted, true);
+  assert.match(result.text, /\[metis-context-recap:v1\]/);
+  assert.doesNotMatch(result.text, /LIVE_TURN_MUST_NOT_APPEAR/);
+  assert.equal(events[0]?.status, "started");
+  assert.equal(events.at(-1)?.status, "completed");
+});
+
+test("Cursor SDK prompt compaction is a no-op below 80% of the window", () => {
+  const chat = {
+    messages: [
+      { id: "u1", role: "user", content: "Short question.", createdAt: "t" },
+      { id: "a1", role: "assistant", content: "Short answer.", createdAt: "t" },
+    ],
+  } as Chat;
+  const events: Array<Record<string, unknown>> = [];
+  const result = compactChatHistoryForPrompt(chat, {
+    contextWindow: 200_000,
+    onCompaction: (event) => events.push(event),
+  });
+  assert.equal(result.compacted, false);
+  assert.equal(events.length, 0);
+  assert.match(result.text, /Short question/);
+});
+
+test("Cursor worker compacts before resume and emits a compaction chip", () => {
+  assert.match(workerSource, /compactChatHistoryForPrompt\(chat,/);
+  assert.match(workerSource, /agent = \(job\.agentId \|\| chat\.agentId\) && !historyCompacted/);
+  assert.match(workerSource, /emit\("compaction", event\)/);
+  assert.match(workerSource, /compactedHistory\.text/);
 });

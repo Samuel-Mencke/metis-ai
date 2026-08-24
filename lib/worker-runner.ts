@@ -28,7 +28,8 @@ import { providerModelsForConnection } from "@/lib/providers/discovery";
 import { routeModel, type RoutingModel } from "@/lib/model-routing";
 import { routeTask } from "@/lib/agent-efficiency";
 import type { Chat } from "@/lib/store";
-import { runAlternativeProviderJob } from "@/lib/providers/runner";
+import { compactChatHistoryForPrompt, runAlternativeProviderJob } from "@/lib/providers/runner";
+import { contextModeOf, contextWindowForSelection } from "@/lib/context-window";
 import { appendAgentTrace } from "@/lib/agent-trace";
 import { parseAgentTranscript, stripTranscriptDump } from "@/lib/agent-transcript";
 import { snapshotInterruptedJob } from "@/lib/recovery";
@@ -67,30 +68,6 @@ function nativeToolsForMode(mode: AgentMode, options?: { browserEnabled?: boolea
   void mode;
   void options;
   return ["mcp"];
-}
-
-const PERSISTED_CONTEXT_MAX_CHARS = 120_000;
-
-function persistedConversationContext(
-  chat: { messages: Array<{ id: string; role: string; content: string; createdAt?: string }> },
-  currentMessageId?: string,
-) {
-  const messages = chat.messages
-    .filter((message) =>
-      message.id !== currentMessageId &&
-      (message.role === "user" || message.role === "assistant") &&
-      message.content.trim(),
-    )
-    .map((message) => {
-      const speaker = message.role === "user" ? "User" : "Assistant";
-      const timestamp = message.createdAt ? ` (${message.createdAt})` : "";
-      return `${speaker}${timestamp}:\n${message.content.trim()}`;
-    });
-
-  if (!messages.length) return "";
-  const context = messages.join("\n\n");
-  if (context.length <= PERSISTED_CONTEXT_MAX_CHARS) return context;
-  return `[Earlier persisted messages truncated to fit the model context]\n${context.slice(-PERSISTED_CONTEXT_MAX_CHARS)}`;
 }
 
 function toolNameFromDelta(update: {
@@ -831,7 +808,31 @@ export async function runQueuedJob(job: AgentJob) {
         ? { params: providerNativeParams(modelParams) }
         : {}),
     };
-    agent = job.agentId || chat.agentId
+    let historyCompacted = false;
+    const compactedHistory = (job.incognito || chat.incognito)
+      ? { text: "", compacted: false }
+      : compactChatHistoryForPrompt(chat, {
+          excludeMessageId: job.messageId,
+          contextWindow: contextWindowForSelection(
+            { id: requestedModelId, providerId: "cursor" },
+            modelParams,
+          ),
+          contextMode: contextModeOf(modelParams),
+          onCompaction: (event) => {
+            historyCompacted = historyCompacted || event.status === "completed";
+            const part: MessagePart = { ...event };
+            const index = parts.findIndex((item) => item.type === "compaction");
+            if (index >= 0) parts[index] = part;
+            else parts.push(part);
+            emit("compaction", event);
+            checkpoint(true);
+          },
+        });
+    historyCompacted = historyCompacted || compactedHistory.compacted;
+    if (historyCompacted) {
+      updateChat(job.chatId, { agentId: null }, job.userId);
+    }
+    agent = (job.agentId || chat.agentId) && !historyCompacted
       ? await (async () => {
           try {
             return await withTimeout(Agent.resume(job.agentId || chat.agentId!, {
@@ -960,7 +961,7 @@ export async function runQueuedJob(job: AgentJob) {
         ? []
         : (() => {
             const persistedContext = compressContext(
-              persistedConversationContext(chat, job.messageId),
+              compactedHistory.text,
               Boolean(compressionSettings?.compressChatHistory ?? true),
             );
             return persistedContext
