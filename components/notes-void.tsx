@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ExternalLink, LayoutGrid, Maximize2, Palette, Pin, PinOff, Plus, RefreshCw, Search, Trash2, ZoomIn, ZoomOut } from "lucide-react";
+import { ExternalLink, LayoutGrid, Maximize2, Palette, Pin, PinOff, Plus, RefreshCw, Search, Trash2, X, ZoomIn, ZoomOut } from "lucide-react";
 import type { SharedNote, NoteTodo } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -826,21 +826,40 @@ export function NotesVoid({
                 {(note.todos || []).map((todo, index) => {
                   const done = todo.status === "completed";
                   return (
-                    <label key={todo.id || `${todo.content}-${index}`} className="flex min-w-0 items-center gap-1.5 text-[11px] text-black/80">
-                      <input
-                        type="checkbox"
-                        checked={done}
-                        onChange={() => {
-                          const next = (note.todos || []).map((item, itemIndex) =>
-                            itemIndex === index
-                              ? { ...item, status: (done ? "pending" : "completed") as NoteTodo["status"] }
-                              : item,
-                          );
+                    <div
+                      key={todo.id || `${todo.content}-${index}`}
+                      className="group relative flex min-w-0 items-center gap-1.5 pr-4 text-[11px] text-black/80"
+                    >
+                      <label className="flex min-w-0 flex-1 items-center gap-1.5">
+                        <input
+                          type="checkbox"
+                          checked={done}
+                          onChange={() => {
+                            const next = (note.todos || []).map((item, itemIndex) =>
+                              itemIndex === index
+                                ? { ...item, status: (done ? "pending" : "completed") as NoteTodo["status"] }
+                                : item,
+                            );
+                            void update(note, { todos: next });
+                          }}
+                        />
+                        <span className={done ? "truncate line-through opacity-60" : "truncate"}>{todo.content}</span>
+                      </label>
+                      <button
+                        type="button"
+                        aria-label={`Delete todo: ${todo.content}`}
+                        title="Delete todo"
+                        className="absolute right-0 top-1/2 -translate-y-1/2 rounded p-0.5 text-black/35 opacity-0 transition-opacity duration-150 pointer-events-none group-hover:pointer-events-auto group-hover:opacity-100 hover:text-black/60 focus-visible:pointer-events-auto focus-visible:opacity-100"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          const next = (note.todos || []).filter((_, itemIndex) => itemIndex !== index);
                           void update(note, { todos: next });
                         }}
-                      />
-                      <span className={done ? "truncate line-through opacity-60" : "truncate"}>{todo.content}</span>
-                    </label>
+                      >
+                        <X className="size-3" />
+                      </button>
+                    </div>
                   );
                 })}
                 {!compact ? (
