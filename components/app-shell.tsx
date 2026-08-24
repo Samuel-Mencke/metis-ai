@@ -4708,16 +4708,22 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       const key = event.key.toLowerCase();
       const target = event.target as HTMLElement | null;
       if (target?.closest("[data-browser-viewport]")) return;
-      if (event.shiftKey && key === "tab") {
-        event.preventDefault();
-        if (modes.length) {
-          const index = Math.max(0, modes.findIndex((mode) => mode.id === modeId));
-          const nextMode = modes[(index + 1) % modes.length];
-          if (nextMode) void selectMode(nextMode.id);
-        }
-        return;
-      }
-      if (modifier && key === "f") {
+ if (event.shiftKey && key === "tab") {
+ const inComposer = Boolean(target?.closest(".composer-input-area, .rich-composer-input"));
+ const isEditable =
+ Boolean(target?.isContentEditable) ||
+ target?.tagName === "INPUT" ||
+ target?.tagName === "TEXTAREA";
+ if (isEditable && !inComposer) return;
+ event.preventDefault();
+ if (modes.length) {
+ const index = Math.max(0, modes.findIndex((mode) => mode.id === modeId));
+ const nextMode = modes[(index + 1) % modes.length];
+ if (nextMode) void selectMode(nextMode.id);
+ }
+ return;
+ }
+ if (modifier && key === "f") {
         event.preventDefault();
         if (notesOpen) {
           window.dispatchEvent(new Event("ai-chat:focus-notes-search"));

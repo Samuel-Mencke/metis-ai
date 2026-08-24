@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type ChangeEvent } from "react";
+import { Fragment, useCallback, useEffect, useState, type ChangeEvent } from "react";
 import {
   Archive,
   ArchiveRestore,
@@ -356,13 +356,15 @@ const SETTINGS_SECTIONS: Record<string, Array<{ id: string; label: string }>> = 
     { id: "settings-token-compression", label: "Token compression" },
     { id: "settings-notifications", label: "Notifications" },
     { id: "settings-browser", label: "Browser" },
+ { id: "settings-browser-storage", label: "Browser storage" },
     { id: "settings-default-model", label: "Default model" },
     { id: "settings-subagent-model", label: "Subagent model" },
     { id: "settings-voice-input", label: "Voice input" },
     { id: "settings-session", label: "Session" },
   ],
   models: [
-    { id: "settings-providers", label: "Providers" },
+    { id: "settings-usage", label: "Usage" },
+ { id: "settings-providers", label: "Providers" },
   ],
   agent: [
     { id: "settings-skills", label: "Skills" },
@@ -380,6 +382,21 @@ const SETTINGS_SECTIONS: Record<string, Array<{ id: string; label: string }>> = 
     { id: "settings-maintenance", label: "Maintenance" },
   ],
 };
+
+const SETTINGS_TABS = [
+ { value: "general", label: "General" },
+ { value: "models", label: "Models" },
+ { value: "agent", label: "Agent" },
+ { value: "devices", label: "Devices" },
+ { value: "admin", label: "Admin" },
+] as const;
+
+function visibleSettingsSections(tab: string, isHostAdmin: boolean) {
+ return (SETTINGS_SECTIONS[tab] || []).filter((item) => {
+ if (!isHostAdmin && (item.id === "settings-users" || item.id === "settings-maintenance")) return false;
+ return true;
+ });
+}
 
 function scrollSettingsSection(id: string) {
   document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1281,45 +1298,41 @@ export function SettingsPanel({
             />
           </div>
           <TabsList className="hidden h-auto w-full shrink-0 flex-wrap justify-start gap-1.5 rounded-none border-b border-border bg-muted/20 px-4 py-3 md:flex md:h-full md:min-h-0 md:flex-nowrap md:flex-col md:items-start md:justify-start md:overflow-y-auto md:border-b-0 md:border-r md:px-3 md:py-5">
-            <TabsTrigger value="general" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
- <Settings2 data-icon="inline-start" />
- General
- </TabsTrigger>
- <TabsTrigger value="models" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
- <KeyRound data-icon="inline-start" />
- Models
- </TabsTrigger>
- <TabsTrigger value="agent" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
- <Puzzle data-icon="inline-start" />
- Agent
- </TabsTrigger>
- <TabsTrigger value="devices" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
- <PlugZap data-icon="inline-start" />
- Devices
- </TabsTrigger>
- <TabsTrigger value="admin" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
- <Users data-icon="inline-start" />
- {isHostAdmin ? "Admin" : "Chats"}
- </TabsTrigger>
-       {(SETTINGS_SECTIONS[settingsTab] || []).map((item) => (
-        <button
-          key={item.id}
-          type="button"
-          className="ml-4 hidden w-[calc(100%-1rem)] truncate rounded-md border-l border-border/40 px-2.5 py-1 text-left text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground md:block"
-          onClick={() => scrollSettingsSection(item.id)}
-        >
-          {item.label}
-        </button>
-      ))}
-      </TabsList>
+           {SETTINGS_TABS.map((tab) => {
+           const Icon =
+           tab.value === "general" ? Settings2
+           : tab.value === "models" ? KeyRound
+           : tab.value === "agent" ? Puzzle
+           : tab.value === "devices" ? PlugZap
+           : Users;
+           const label = tab.value === "admin" ? (isHostAdmin ? "Admin" : "Chats") : tab.label;
+           const expanded = settingsTab === tab.value;
+           return (
+           <Fragment key={tab.value}>
+           <TabsTrigger value={tab.value} className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
+           <Icon data-icon="inline-start" />
+           {label}
+           </TabsTrigger>
+           {expanded
+           ? visibleSettingsSections(tab.value, isHostAdmin).map((item) => (
+           <button
+           key={item.id}
+           type="button"
+           className="ml-4 hidden w-[calc(100%-1rem)] truncate rounded-md border-l border-border/40 px-2.5 py-1 text-left text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground md:block"
+           onClick={() => scrollSettingsSection(item.id)}
+           >
+           {item.label}
+           </button>
+           ))
+           : null}
+           </Fragment>
+           );
+           })}
+          </TabsList>
 
           <div className="min-h-0 min-w-0 overflow-x-hidden overflow-y-auto">
-            {isHostAdmin ? (
-              <TabsContent value="admin" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
-                <div id="settings-users"><AdminUsersPanel /></div>
-              </TabsContent>
-            ) : null}
-            <TabsContent value="general" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+<TabsContent value="general" className="mt-0 space-y-10 px-6 py-6 sm:px-8 sm:py-8">
+
               <section className="flex flex-col gap-5">
                 <div>
                   <h3 id="settings-token-compression" className="text-sm font-medium">Token compression</h3>
@@ -1407,15 +1420,11 @@ export function SettingsPanel({
                   Aggressive and ultra modes can remove wording. Code blocks, URLs, paths and structured data are protected where possible.
                 </p>
               </section>
-            </TabsContent>
-            <TabsContent value="models" className="mt-0 min-w-0 px-6 py-6 sm:px-8 sm:py-8">
-              <PlanUsagePanel snapshot={usageSnapshot} onRefresh={onRefreshUsage} />
-            </TabsContent>
-            <TabsContent value="general" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+
               <section className="flex flex-col gap-4">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <h3 className="text-sm font-medium">Embedded browser storage</h3>
+                    <h3 id="settings-browser-storage" className="text-sm font-medium">Embedded browser storage</h3>
                     <p className="mt-1 text-xs text-muted-foreground">
                       Persistent website sessions are stored privately for your account.
                     </p>
@@ -1446,8 +1455,7 @@ export function SettingsPanel({
                   ))}
                 </div>
               </section>
-            </TabsContent>
-            <TabsContent value="general" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+
               <section className="flex flex-col gap-4">
                 <div>
                   <h3 id="settings-notifications" className="text-sm font-medium">Notifications</h3>
@@ -1599,9 +1607,7 @@ export function SettingsPanel({
                   </div>
                 </div>
               </section>
-            </TabsContent>
 
-            <TabsContent value="general" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-4">
                 <div>
                   <h3 id="settings-voice-input" className="text-sm font-medium">Voice input</h3>
@@ -1712,109 +1718,32 @@ export function SettingsPanel({
                   <Input type="number" min={1} max={3600} value={voiceMaxDurationSeconds} disabled={!voiceInputEnabled} onChange={(event) => onVoiceInputSettingsChange({ maxDurationSeconds: Math.max(1, Math.min(3600, Number(event.target.value) || 300)) })} />
                 </label>
               </section>
-            </TabsContent>
 
-            <TabsContent value="admin" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
-              <section className="flex flex-col gap-4">
+              <section className="flex flex-col gap-3">
                 <div>
-                  <h3 id="settings-archived" className="flex items-center gap-2 text-sm font-medium">
-                    <Archive className="size-4 text-muted-foreground" />
-                    Archived chats
-                  </h3>
+                  <h3 id="settings-session" className="text-sm font-medium">Session</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    Archived chats disappear from the sidebar but remain available in chat search.
+                    Lock this chat and return to the sign-in screen.
                   </p>
                 </div>
-                {!archivedChatsLoaded ? (
-                  <div className="rounded-lg border border-dashed border-border px-3 py-8 text-center text-sm text-muted-foreground">
-                    Loading archived chats…
-                  </div>
-                ) : archivedChats.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-border px-3 py-8 text-center text-sm text-muted-foreground">
-                    No archived chats.
-                  </div>
-                ) : (
-                  <ul className="flex flex-col gap-2">
-                    {archivedChats.map((chat) => (
-                      <li
-                        key={chat.id}
-                        className="flex items-center gap-3 rounded-lg border border-border/60 bg-card/40 p-3"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-medium">{chat.title || "Untitled"}</p>
-                          <p className="mt-0.5 text-xs text-muted-foreground">
-                            Archived chat
-                          </p>
-                        </div>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => void updateArchivedChat(chat.id, false)}
-                        >
-                          <ArchiveRestore className="size-3.5" />
-                          Restore
-                        </Button>
-                        <Button
-                          type="button"
-                          size="icon-sm"
-                          variant="ghost"
-                          aria-label={`Delete ${chat.title || "archived chat"}`}
-                          onClick={() => void deleteArchivedChat(chat.id)}
-                        >
-                          <Trash2 className="size-3.5" />
-                        </Button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                <div className="border-t border-border/60 pt-5">
-                  <div>
-                    <h3 id="settings-shared" className="flex items-center gap-2 text-sm font-medium">
-                      <Link2 className="size-4 text-muted-foreground" />
-                      Shared chats
-                    </h3>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      Manage active read-only links for your chats.
-                    </p>
-                  </div>
-                  {sharedChats.length === 0 ? (
-                    <div className="mt-3 rounded-lg border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">
-                      No active shared chats.
-                    </div>
-                  ) : (
-                    <ul className="mt-3 flex flex-col gap-2">
-                      {sharedChats.map((chat) => (
-                        <li key={chat.id} className="flex flex-wrap items-center gap-3 rounded-lg border border-border/60 bg-card/40 p-3">
-                          <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm font-medium">{chat.title || "Untitled"}</p>
-                            <p className="mt-0.5 text-xs text-muted-foreground">
-                              {chat.share?.passwordProtected ? "Password protected" : "Public link"}
-                            </p>
-                          </div>
-                          {chat.share ? (
-                            <a
-                              href={`/share?id=${encodeURIComponent(chat.share.id)}`}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-input px-2.5 text-xs font-medium hover:bg-accent"
-                            >
-                              <Link2 className="size-3.5" />
-                              Open link
-                            </a>
-                          ) : null}
-                          <Button type="button" size="sm" variant="outline" onClick={() => void deactivateShare(chat)}>
-                            Deactivate
-                          </Button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
+                <Button
+                  variant="outline"
+                  className="w-full justify-start gap-2"
+                  onClick={() => {
+                    onOpenChange(false);
+                    onLogout();
+                  }}
+                >
+                  <Lock className="size-4" />
+                  Lock screen
+                </Button>
+                
               </section>
-            </TabsContent>
+ </TabsContent>
+<TabsContent value="models" className="mt-0 space-y-10 px-6 py-6 sm:px-8 sm:py-8 min-w-0">
 
-            <TabsContent value="models" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+              <div id="settings-usage"><PlanUsagePanel snapshot={usageSnapshot} onRefresh={onRefreshUsage} /></div>
+
               <section className="flex flex-col gap-4">
                 <div>
                   <h3 id="settings-providers" className="text-sm font-medium">AI providers and connections</h3>
@@ -2064,9 +1993,9 @@ export function SettingsPanel({
                   </ul>
                 )}
               </section>
-            </TabsContent>
+ </TabsContent>
+<TabsContent value="agent" className="mt-0 space-y-10 px-6 py-6 sm:px-8 sm:py-8">
 
-            <TabsContent value="agent" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <div className="mb-8">
  <div id="settings-skills"><SkillsSettings /></div>
  </div>
@@ -2106,9 +2035,7 @@ export function SettingsPanel({
                   </div>
                 ) : null}
               </section>
-            </TabsContent>
 
-            <TabsContent value="agent" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-4">
                 <div>
                   <h3 id="settings-mcp" className="text-sm font-medium">Custom MCP servers</h3>
@@ -2228,9 +2155,75 @@ export function SettingsPanel({
                   ))}
                 </ul>
               </section>
-            </TabsContent>
 
-            <TabsContent value="devices" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+              <section className="flex flex-col gap-3">
+                <div>
+                  <h3 id="settings-memories" className="text-sm font-medium">Memories</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Durable facts injected into every turn. The agent can
+                    write these itself.
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    placeholder="Add a memory…"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void addMemory();
+                      }
+                    }}
+                  />
+                  <Button
+                    size="icon"
+                    onClick={() => void addMemory()}
+                    disabled={busy || !draft.trim()}
+                    aria-label="Add memory"
+                  >
+                    <Plus className="size-4" />
+                  </Button>
+                </div>
+                <ul className="flex flex-col gap-2">
+                  {memories.length === 0 ? (
+                    <li className="rounded-lg border border-dashed border-border px-3 py-8 text-center text-sm text-muted-foreground">
+                      No memories yet.
+                    </li>
+                  ) : (
+                    memories.map((m) => (
+                      <li
+                        key={m.id}
+                        className="group flex items-start gap-2 rounded-lg border border-border/60 bg-card/40 p-3"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm whitespace-pre-wrap">
+                            {m.content}
+                          </p>
+                          {m.tags && m.tags.length > 0 ? (
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {m.tags.join(" · ")}
+                            </p>
+                          ) : null}
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className="opacity-100 sm:opacity-60 sm:group-hover:opacity-100"
+                          onClick={() => void removeMemory(m.id)}
+                          disabled={deletingMemoryIds.has(m.id)}
+                          aria-label="Delete memory"
+                        >
+                          <Trash2 className="size-3.5" />
+                        </Button>
+                      </li>
+                    ))
+                  )}
+                </ul>
+              </section>
+ </TabsContent>
+<TabsContent value="devices" className="mt-0 space-y-10 px-6 py-6 sm:px-8 sm:py-8">
+
               <section className="flex flex-col gap-5">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
@@ -2300,95 +2293,110 @@ export function SettingsPanel({
                   )}
                 </div>
               </section>
-            </TabsContent>
-            <TabsContent value="agent" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
-              <section className="flex flex-col gap-3">
+ </TabsContent>
+<TabsContent value="admin" className="mt-0 space-y-10 px-6 py-6 sm:px-8 sm:py-8">
+{isHostAdmin ? (
+                <div id="settings-users"><AdminUsersPanel /></div>) : null}
+
+              <section className="flex flex-col gap-4">
                 <div>
-                  <h3 id="settings-memories" className="text-sm font-medium">Memories</h3>
+                  <h3 id="settings-archived" className="flex items-center gap-2 text-sm font-medium">
+                    <Archive className="size-4 text-muted-foreground" />
+                    Archived chats
+                  </h3>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    Durable facts injected into every turn. The agent can
-                    write these itself.
+                    Archived chats disappear from the sidebar but remain available in chat search.
                   </p>
                 </div>
-                <div className="flex gap-2">
-                  <Input
-                    value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
-                    placeholder="Add a memory…"
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        void addMemory();
-                      }
-                    }}
-                  />
-                  <Button
-                    size="icon"
-                    onClick={() => void addMemory()}
-                    disabled={busy || !draft.trim()}
-                    aria-label="Add memory"
-                  >
-                    <Plus className="size-4" />
-                  </Button>
-                </div>
-                <ul className="flex flex-col gap-2">
-                  {memories.length === 0 ? (
-                    <li className="rounded-lg border border-dashed border-border px-3 py-8 text-center text-sm text-muted-foreground">
-                      No memories yet.
-                    </li>
-                  ) : (
-                    memories.map((m) => (
+                {!archivedChatsLoaded ? (
+                  <div className="rounded-lg border border-dashed border-border px-3 py-8 text-center text-sm text-muted-foreground">
+                    Loading archived chats…
+                  </div>
+                ) : archivedChats.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-border px-3 py-8 text-center text-sm text-muted-foreground">
+                    No archived chats.
+                  </div>
+                ) : (
+                  <ul className="flex flex-col gap-2">
+                    {archivedChats.map((chat) => (
                       <li
-                        key={m.id}
-                        className="group flex items-start gap-2 rounded-lg border border-border/60 bg-card/40 p-3"
+                        key={chat.id}
+                        className="flex items-center gap-3 rounded-lg border border-border/60 bg-card/40 p-3"
                       >
                         <div className="min-w-0 flex-1">
-                          <p className="text-sm whitespace-pre-wrap">
-                            {m.content}
+                          <p className="truncate text-sm font-medium">{chat.title || "Untitled"}</p>
+                          <p className="mt-0.5 text-xs text-muted-foreground">
+                            Archived chat
                           </p>
-                          {m.tags && m.tags.length > 0 ? (
-                            <p className="mt-1 text-xs text-muted-foreground">
-                              {m.tags.join(" · ")}
-                            </p>
-                          ) : null}
                         </div>
                         <Button
-                          variant="ghost"
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void updateArchivedChat(chat.id, false)}
+                        >
+                          <ArchiveRestore className="size-3.5" />
+                          Restore
+                        </Button>
+                        <Button
+                          type="button"
                           size="icon-sm"
-                          className="opacity-100 sm:opacity-60 sm:group-hover:opacity-100"
-                          onClick={() => void removeMemory(m.id)}
-                          disabled={deletingMemoryIds.has(m.id)}
-                          aria-label="Delete memory"
+                          variant="ghost"
+                          aria-label={`Delete ${chat.title || "archived chat"}`}
+                          onClick={() => void deleteArchivedChat(chat.id)}
                         >
                           <Trash2 className="size-3.5" />
                         </Button>
                       </li>
-                    ))
+                    ))}
+                  </ul>
+                )}
+                <div className="border-t border-border/60 pt-5">
+                  <div>
+                    <h3 id="settings-shared" className="flex items-center gap-2 text-sm font-medium">
+                      <Link2 className="size-4 text-muted-foreground" />
+                      Shared chats
+                    </h3>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Manage active read-only links for your chats.
+                    </p>
+                  </div>
+                  {sharedChats.length === 0 ? (
+                    <div className="mt-3 rounded-lg border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">
+                      No active shared chats.
+                    </div>
+                  ) : (
+                    <ul className="mt-3 flex flex-col gap-2">
+                      {sharedChats.map((chat) => (
+                        <li key={chat.id} className="flex flex-wrap items-center gap-3 rounded-lg border border-border/60 bg-card/40 p-3">
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-medium">{chat.title || "Untitled"}</p>
+                            <p className="mt-0.5 text-xs text-muted-foreground">
+                              {chat.share?.passwordProtected ? "Password protected" : "Public link"}
+                            </p>
+                          </div>
+                          {chat.share ? (
+                            <a
+                              href={`/share?id=${encodeURIComponent(chat.share.id)}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-input px-2.5 text-xs font-medium hover:bg-accent"
+                            >
+                              <Link2 className="size-3.5" />
+                              Open link
+                            </a>
+                          ) : null}
+                          <Button type="button" size="sm" variant="outline" onClick={() => void deactivateShare(chat)}>
+                            Deactivate
+                          </Button>
+                        </li>
+                      ))}
+                    </ul>
                   )}
-                </ul>
-              </section>
-            </TabsContent>
-
-            <TabsContent value="general" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
-              <section className="flex flex-col gap-3">
-                <div>
-                  <h3 id="settings-session" className="text-sm font-medium">Session</h3>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Lock this chat and return to the sign-in screen.
-                  </p>
                 </div>
-                <Button
-                  variant="outline"
-                  className="w-full justify-start gap-2"
-                  onClick={() => {
-                    onOpenChange(false);
-                    onLogout();
-                  }}
-                >
-                  <Lock className="size-4" />
-                  Lock screen
-                </Button>
-                {isHostAdmin ? (
+              </section>
+
+{isHostAdmin ? (
                   <div className="mt-3 border-t border-destructive/30 pt-4">
                     <h3 id="settings-maintenance" className="text-sm font-medium">Metis maintenance</h3>
                     <p className="mt-1 text-xs text-muted-foreground">
@@ -2406,8 +2414,7 @@ export function SettingsPanel({
                     </div>
                   </div>
                 ) : null}
-              </section>
-            </TabsContent>
+ </TabsContent>
           </div>
         </Tabs>
       </DialogContent>
