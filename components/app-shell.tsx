@@ -608,6 +608,11 @@ type ChatPage = {
 
 type ChatSessionState = {
   input?: string;
+  inputUpdatedAt?: string;
+  queuedUpdatedAt?: string;
+  browserUrl?: string;
+  browserUrlUpdatedAt?: string;
+  extraFields?: Record<string, unknown>;
   remoteCwd?: string;
   terminalCwd?: string;
   fileCwd?: string;
