@@ -5,6 +5,7 @@ import {
   listNotes,
   type NoteWriteInput,
 } from "@/lib/shared-context";
+import { searchProjects } from "@/lib/projects";
 import { featureFlags } from "@/lib/feature-flags";
 
 export const runtime = "nodejs";
@@ -22,6 +23,7 @@ function inputFromBody(body: Record<string, unknown>): NoteWriteInput {
     scope: body.scope === "global" || body.scope === "chat" || body.scope === "workspace" ? body.scope : undefined,
     chatId: typeof body.chatId === "string" ? body.chatId.trim() : undefined,
     workspaceId: typeof body.workspaceId === "string" ? body.workspaceId.trim() : undefined,
+    projectId: typeof body.projectId === "string" ? body.projectId.trim() : undefined,
     position: position ? { x: Number(position.x), y: Number(position.y) } : undefined,
     size: size ? { width: Number(size.width), height: Number(size.height) } : undefined,
     archived: typeof body.archived === "boolean" ? body.archived : undefined,
@@ -38,16 +40,30 @@ export async function GET(req: Request) {
   const chatId = url.searchParams.get("chatId")?.trim() || undefined;
   const workspaceId = url.searchParams.get("workspaceId")?.trim() || undefined;
   if (chatId && !getChat(chatId, userId)) return Response.json({ error: "Chat not found" }, { status: 404 });
-  return Response.json({
-    notes: listNotes({
-      ownerId: userId,
-      chatId,
-      workspaceId,
-      scope: url.searchParams.get("scope") as NoteWriteInput["scope"] || undefined,
-      includeArchived: url.searchParams.get("includeArchived") === "true",
-      search: url.searchParams.get("search") || undefined,
-    }),
+  const search = url.searchParams.get("search")?.trim() || undefined;
+  let notes = listNotes({
+    ownerId: userId,
+    chatId,
+    workspaceId,
+    scope: url.searchParams.get("scope") as NoteWriteInput["scope"] || undefined,
+    includeArchived: url.searchParams.get("includeArchived") === "true",
+    search,
+    projectId: url.searchParams.get("projectId")?.trim() || undefined,
   });
+  if (search) {
+    const matchingIds = new Set(searchProjects(search, userId).map((project) => project.id));
+    if (matchingIds.size) {
+      const extra = listNotes({
+        ownerId: userId,
+        chatId,
+        workspaceId,
+        includeArchived: url.searchParams.get("includeArchived") === "true",
+      }).filter((note) => note.projectId && matchingIds.has(note.projectId));
+      const seen = new Set(notes.map((note) => note.id));
+      notes = [...notes, ...extra.filter((note) => !seen.has(note.id))];
+    }
+  }
+  return Response.json({ notes });
 }
 
 export async function POST(req: Request) {

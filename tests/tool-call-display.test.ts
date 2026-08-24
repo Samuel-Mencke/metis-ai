@@ -18,6 +18,10 @@ import {
 
 type LayoutTool = { id: string; name?: string; kind?: string; status?: string; input?: string; todos?: Array<{ content: string }> };
 
+test("classifies system context compaction as a tool-like chip", () => {
+ assert.equal(classifyToolKind("context_compaction"), "compaction");
+});
+
 test("compactToolPreview hides JSON payloads from titles", () => {
   assert.equal(compactToolPreview('{"status":"success","value":{"content":"const x = 1"}}'), undefined);
   assert.equal(compactToolPreview("ls -la src"), "ls -la src");

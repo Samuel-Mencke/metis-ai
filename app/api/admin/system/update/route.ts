@@ -3,12 +3,25 @@ import { promisify } from "node:util";
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
 import { config } from "@/lib/config";
 import { isHostAdmin } from "@/lib/user-access";
+import { checkForUpdate } from "@/lib/github-releases";
 
 const execFileAsync = promisify(execFile);
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 1_800;
+
+export async function GET(req: Request) {
+ if (!(await isAuthenticated(req))) return Response.json({ error: "Unauthorized" }, { status: 401 });
+ const userId = await getAuthenticatedUserId(req);
+ if (!isHostAdmin(userId)) return Response.json({ error: "Only host administrators can check for updates." }, { status: 403 });
+ try {
+ const update = await checkForUpdate(config.root);
+ return Response.json(update, { headers: { "Cache-Control": "private, no-store" } });
+ } catch (error) {
+ return Response.json({ error: error instanceof Error ? error.message : "Could not check for updates." }, { status: 502 });
+ }
+}
 
 export async function POST(req: Request) {
   if (!(await isAuthenticated(req))) return Response.json({ error: "Unauthorized" }, { status: 401 });

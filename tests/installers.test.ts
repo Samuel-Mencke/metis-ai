@@ -77,7 +77,6 @@ test("all platform installers expose an explicit network-host option", () => {
     const content = readFileSync(path.join(root, "install", file), "utf8");
     const publicContent = readFileSync(path.join(installerDir, file), "utf8");
     for (const source of [content, publicContent]) {
-      assert.match(source, /Host web application on local network/);
       assert.match(source, /AI_CHAT_HOST/);
       assert.match(source, /AI_CHAT_WORKER_CONCURRENCY[^\n]*25/);
       assert.match(source, /0\.0\.0\.0/);
@@ -107,9 +106,10 @@ test("windows bootstrap has no param\(\) so irm \| iex is valid", () => {
 test("platform installers collect configuration before side effects and support dry-run", () => {
   for (const file of ["linux.sh", "macos.sh"]) {
     const content = readFileSync(path.join(root, "install", file), "utf8");
-    assert.match(content, /can_prompt/);
+    assert.doesNotMatch(content, /Initial (username|login)|Initial password|ask_secret|password-file/);
     assert.match(content, /--dry-run/);
     assert.match(content, /run-service\.sh/);
+ assert.match(content, /first-run UI|without account prompts|Install Metis AI without account prompts/);
     const dryRunAt = content.indexOf("if (( dry_run ))");
     const cloneAt = content.indexOf("git clone");
     assert.ok(dryRunAt >= 0 && cloneAt > dryRunAt, `${file} must dry-run before clone`);

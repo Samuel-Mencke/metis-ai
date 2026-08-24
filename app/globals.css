@@ -470,23 +470,7 @@
 }
 
 .streaming-answer {
-  animation: soft-message-in 240ms ease-out both;
-}
-
-@keyframes streaming-token-in {
-  from {
-    opacity: 0;
-    transform: translateY(2px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.streaming-token-fade {
-  display: inline;
-  animation: streaming-token-in 180ms ease-out both;
+  /* Instant: replaying a fade on every token used to hitch the stream. */
 }
 
 .streaming-markdown > .markdown-body,
@@ -587,7 +571,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .streaming-token-fade,
   .sidebar-panel-enter,
   .sidebar-panel-exit,
   .workspace-panel-enter,
@@ -597,7 +580,13 @@
 }
 
 /* Browser agent pointer: restrained dark glass arrow inspired by the reference image. */
+@keyframes metis-cursor-in {
+  from { opacity: 0; transform: translate(-95%, -29%) scale(.86); }
+  to { opacity: 1; transform: translate(-95%, -29%) scale(1); }
+}
+
 .metis-browser-agent-cursor {
+  animation: metis-cursor-in 140ms ease-out;
   position: absolute;
   z-index: 30;
   width: 46px;

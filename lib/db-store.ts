@@ -181,7 +181,8 @@ export function listChatsForUser(
                 json_extract(data, '$.pinned') AS pinned,
                 json_extract(data, '$.archived') AS archived,
                 json_extract(data, '$.share') AS share,
-                json_extract(data, '$.automationRunId') AS automationRunId
+                json_extract(data, '$.automationRunId') AS automationRunId,
+         json_extract(data, '$.projectId') AS projectId
          FROM chats WHERE owner_id = ?`,
       ).all(ownerId)
     : db.prepare(
@@ -199,7 +200,8 @@ export function listChatsForUser(
                 json_extract(data, '$.pinned') AS pinned,
                 json_extract(data, '$.archived') AS archived,
                 json_extract(data, '$.share') AS share,
-                json_extract(data, '$.automationRunId') AS automationRunId
+                json_extract(data, '$.automationRunId') AS automationRunId,
+         json_extract(data, '$.projectId') AS projectId
          FROM chats`,
       ).all();
   const result: ChatIndexEntry[] = rows.flatMap((row) => {
@@ -230,6 +232,7 @@ export function listChatsForUser(
         ...(item.pinned === 1 || item.pinned === true ? { pinned: true } : {}),
         ...(archived ? { archived: true } : {}),
         ...(share ? { share: publicShare(share) as ChatIndexEntry["share"] } : {}),
+    ...(typeof item.projectId === "string" && item.projectId ? { projectId: item.projectId } : {}),
       }];
     })
     .sort((a, b) => {
@@ -455,7 +458,7 @@ export function createChat(
   browserContext?: BrowserContext,
   ownerId?: string,
   model?: { id?: string; params?: Array<{ id: string; value: string }> },
-  options?: { incognito?: boolean },
+  options?: { incognito?: boolean; projectId?: string },
 ): Chat {
   return transaction(() => {
     if (!workerProjectionLeaseValid()) {
@@ -468,6 +471,7 @@ export function createChat(
       ...(options?.incognito
         ? { incognito: true, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() }
         : {}),
+      ...(options?.projectId ? { projectId: options.projectId } : {}),
       title: title.trim() || "New chat",
       titleSource: "default",
       ...(model?.id ? { modelId: model.id } : {}),
@@ -527,6 +531,7 @@ export function updateChat(
     pendingQuestion?: PendingChatQuestion | null;
     badge?: ChatBadge | null;
     touchUpdatedAt?: boolean;
+    projectId?: string | null;
   },
   ownerId?: string,
 ) {
@@ -590,6 +595,12 @@ export function updateChat(
       if (patch.archived) next.archived = true;
       else delete next.archived;
     }
+    if (patch.projectId === null) delete next.projectId;
+    else if (typeof patch.projectId === "string") {
+      const id = patch.projectId.trim();
+      if (id) next.projectId = id;
+      else delete next.projectId;
+    }
     if (patch.canvas === null) delete next.canvas;
     else if (patch.canvas !== undefined) next.canvas = patch.canvas;
     if (patch.workspaces === null) {
@@ -612,9 +623,34 @@ export function updateChat(
       next.workspaces = [...patch.workspaces].slice(-20);
     }
     if (patch.browserContext === null) delete next.browserContext;
-    else if (patch.browserContext) next.browserContext = { ...patch.browserContext, updatedAt: now() };
+    else if (patch.browserContext) {
+      const incomingTs = Date.parse(patch.browserContext.updatedAt || "") || 0;
+      const existingTs = Date.parse(next.browserContext?.updatedAt || "") || 0;
+      if (!existingTs || incomingTs >= existingTs) {
+        next.browserContext = {
+          ...patch.browserContext,
+          updatedAt: patch.browserContext.updatedAt || now(),
+        };
+      }
+    }
     if (patch.sessionState === null) delete next.sessionState;
-    else if (patch.sessionState) next.sessionState = { ...(next.sessionState || {}), ...patch.sessionState };
+    else if (patch.sessionState) {
+      const previous = next.sessionState || {};
+      const merged = { ...previous, ...patch.sessionState };
+      const incomingInputTs = Date.parse(patch.sessionState.inputUpdatedAt || "") || 0;
+      const existingInputTs = Date.parse(previous.inputUpdatedAt || "") || 0;
+      if ("input" in patch.sessionState && existingInputTs && incomingInputTs && incomingInputTs < existingInputTs) {
+        merged.input = previous.input;
+        merged.inputUpdatedAt = previous.inputUpdatedAt;
+      }
+      const incomingUrlTs = Date.parse(patch.sessionState.browserUrlUpdatedAt || "") || 0;
+      const existingUrlTs = Date.parse(previous.browserUrlUpdatedAt || "") || 0;
+      if ("browserUrl" in patch.sessionState && existingUrlTs && incomingUrlTs && incomingUrlTs < existingUrlTs) {
+        merged.browserUrl = previous.browserUrl;
+        merged.browserUrlUpdatedAt = previous.browserUrlUpdatedAt;
+      }
+      next.sessionState = merged;
+    }
     if (patch.runStatus) {
       const previousStatus = next.runStatus || "idle";
       if (!canTransitionRunStatus(previousStatus, patch.runStatus)) {

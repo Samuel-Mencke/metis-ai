@@ -13,9 +13,14 @@ services:
       AI_CHAT_HOST: "0.0.0.0"
       PORT: "3100"
       AI_CHAT_INTERNAL_URL: http://app:3100/api/internal/mcp-question
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     volumes:
       - ${METIS_DATA_DIR:-./data}:/data
-      - ${METIS_WORKSPACE}:/workspace
+      - ${METIS_WORKSPACE:-./workspace}:/workspace
     ports:
       - "${AI_CHAT_BIND:-127.0.0.1}:${PORT:-3100}:3100"
     depends_on:
@@ -36,7 +41,7 @@ services:
       AI_CHAT_INTERNAL_URL: http://app:3100/api/internal/mcp-question
     volumes:
       - ${METIS_DATA_DIR:-./data}:/data
-      - ${METIS_WORKSPACE}:/workspace
+      - ${METIS_WORKSPACE:-./workspace}:/workspace
     depends_on:
       - mcp
 
@@ -55,6 +60,6 @@ services:
       AI_CHAT_INTERNAL_URL: http://app:3100/api/internal/mcp-question
     volumes:
       - ${METIS_DATA_DIR:-./data}:/data
-      - ${METIS_WORKSPACE}:/workspace
+      - ${METIS_WORKSPACE:-./workspace}:/workspace
     ports:
       - "127.0.0.1:${MCP_PORT:-8787}:${MCP_PORT:-8787}"

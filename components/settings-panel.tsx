@@ -18,6 +18,7 @@ import {
   Monitor,
   MoreHorizontal,
   PlugZap,
+ Puzzle,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -58,6 +59,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { MemoryItem } from "@/components/memories-panel";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { SkillsSettings } from "@/components/skills-settings";
 import { AdminUsersPanel } from "@/components/admin-users-panel";
 import type { AgentMode, ToolPermissionCategory } from "@/lib/store";
 import { TOOL_PERMISSION_CATEGORIES } from "@/lib/modes";
@@ -349,6 +351,40 @@ type Props = {
   isHostAdmin?: boolean;
 };
 
+const SETTINGS_SECTIONS: Record<string, Array<{ id: string; label: string }>> = {
+  general: [
+    { id: "settings-token-compression", label: "Token compression" },
+    { id: "settings-notifications", label: "Notifications" },
+    { id: "settings-browser", label: "Browser" },
+    { id: "settings-default-model", label: "Default model" },
+    { id: "settings-subagent-model", label: "Subagent model" },
+    { id: "settings-voice-input", label: "Voice input" },
+    { id: "settings-session", label: "Session" },
+  ],
+  models: [
+    { id: "settings-providers", label: "Providers" },
+  ],
+  agent: [
+    { id: "settings-skills", label: "Skills" },
+    { id: "settings-modes", label: "Agent modes" },
+    { id: "settings-mcp", label: "MCP servers" },
+    { id: "settings-memories", label: "Memories" },
+  ],
+  devices: [
+    { id: "settings-remote-clients", label: "Remote clients" },
+  ],
+  admin: [
+    { id: "settings-users", label: "Users" },
+    { id: "settings-archived", label: "Archived chats" },
+    { id: "settings-shared", label: "Shared chats" },
+    { id: "settings-maintenance", label: "Maintenance" },
+  ],
+};
+
+function scrollSettingsSection(id: string) {
+  document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 export function SettingsPanel({
   open,
   onOpenChange,
@@ -518,7 +554,7 @@ export function SettingsPanel({
   }, [loadBrowserStorage]);
 
   useEffect(() => {
-    if (!open || settingsTab !== "browser-storage") return;
+    if (!open || settingsTab !== "general") return;
     void loadBrowserStorage();
   }, [loadBrowserStorage, open, settingsTab]);
 
@@ -609,7 +645,7 @@ export function SettingsPanel({
   }, [loadRemoteClients]);
 
   useEffect(() => {
-    if (!open || settingsTab !== "remote-clients") return;
+    if (!open || settingsTab !== "devices") return;
     void loadRemoteClients();
     const timer = window.setInterval(() => void loadRemoteClients(), 2_000);
     return () => window.clearInterval(timer);
@@ -1237,91 +1273,56 @@ export function SettingsPanel({
               className="h-10 w-full"
               options={[
                 { value: "general", label: "General" },
-                { value: "voice", label: "Voice input" },
-                { value: "browser-storage", label: "Browser storage" },
-                { value: "compression", label: "Token compression" },
-                { value: "usage", label: "Usage" },
-                { value: "archived", label: "Chats" },
-                { value: "providers", label: "Providers" },
-                { value: "modes", label: "Agent modes" },
-                { value: "mcp", label: "MCP Servers" },
-                { value: "remote-clients", label: "Remote Clients" },
-                ...(isHostAdmin ? [{ value: "users", label: "Users" }] : []),
-                { value: "memories", label: `Memories (${memories.length})` },
-                { value: "session", label: "Session" },
+                { value: "models", label: "Models" },
+                { value: "agent", label: "Agent" },
+ { value: "devices", label: "Devices" },
+ { value: "admin", label: isHostAdmin ? "Admin" : "Chats" },
               ]}
             />
           </div>
           <TabsList className="hidden h-auto w-full shrink-0 flex-wrap justify-start gap-1.5 rounded-none border-b border-border bg-muted/20 px-4 py-3 md:flex md:h-full md:min-h-0 md:flex-nowrap md:flex-col md:items-start md:justify-start md:overflow-y-auto md:border-b-0 md:border-r md:px-3 md:py-5">
             <TabsTrigger value="general" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
-              <Settings2 data-icon="inline-start" />
-              General
-            </TabsTrigger>
-            <TabsTrigger value="voice" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
-              <Mic data-icon="inline-start" />
-              Voice input
-            </TabsTrigger>
-            <TabsTrigger value="browser-storage" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
-              <Globe2 data-icon="inline-start" />
-              Browser storage
-            </TabsTrigger>
-            <TabsTrigger value="compression" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
-              <Settings2 data-icon="inline-start" />
-              Token compression
-            </TabsTrigger>
-            <TabsTrigger value="usage" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
-              <MessagesSquare data-icon="inline-start" />
-              Usage
-            </TabsTrigger>
-            <TabsTrigger value="archived" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
-              <MessagesSquare data-icon="inline-start" />
-              Chats
-            </TabsTrigger>
-            <TabsTrigger value="providers" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
-              <KeyRound data-icon="inline-start" />
-              Providers
-            </TabsTrigger>
-            <TabsTrigger value="modes" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
-              <Settings2 data-icon="inline-start" />
-              Agent modes
-            </TabsTrigger>
-            <TabsTrigger value="mcp" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
-              <Server data-icon="inline-start" />
-              MCP Servers
-            </TabsTrigger>
-            <TabsTrigger value="remote-clients" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
-              <PlugZap data-icon="inline-start" />
-              Remote Clients
-            </TabsTrigger>
-            {isHostAdmin ? (
-              <TabsTrigger value="users" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
-                <Users data-icon="inline-start" />
-                Users
-              </TabsTrigger>
-            ) : null}
-            <TabsTrigger value="memories" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
-              <Brain data-icon="inline-start" />
-              Memories
-              <span className="ml-1 text-xs text-muted-foreground">
-                {memories.length}
-              </span>
-            </TabsTrigger>
-            <TabsTrigger value="session" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
-              <Lock data-icon="inline-start" />
-              Session
-            </TabsTrigger>
-          </TabsList>
+ <Settings2 data-icon="inline-start" />
+ General
+ </TabsTrigger>
+ <TabsTrigger value="models" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
+ <KeyRound data-icon="inline-start" />
+ Models
+ </TabsTrigger>
+ <TabsTrigger value="agent" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
+ <Puzzle data-icon="inline-start" />
+ Agent
+ </TabsTrigger>
+ <TabsTrigger value="devices" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
+ <PlugZap data-icon="inline-start" />
+ Devices
+ </TabsTrigger>
+ <TabsTrigger value="admin" className="min-h-10 justify-start px-3.5 py-2.5 md:h-auto md:w-full md:flex-none">
+ <Users data-icon="inline-start" />
+ {isHostAdmin ? "Admin" : "Chats"}
+ </TabsTrigger>
+       {(SETTINGS_SECTIONS[settingsTab] || []).map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          className="ml-4 hidden w-[calc(100%-1rem)] truncate rounded-md border-l border-border/40 px-2.5 py-1 text-left text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground md:block"
+          onClick={() => scrollSettingsSection(item.id)}
+        >
+          {item.label}
+        </button>
+      ))}
+      </TabsList>
 
           <div className="min-h-0 min-w-0 overflow-x-hidden overflow-y-auto">
             {isHostAdmin ? (
-              <TabsContent value="users" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
-                <AdminUsersPanel />
+              <TabsContent value="admin" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+                <div id="settings-users"><AdminUsersPanel /></div>
               </TabsContent>
             ) : null}
-            <TabsContent value="compression" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+            <TabsContent value="general" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-5">
                 <div>
-                  <h3 className="text-sm font-medium">Token compression</h3>
+                  <h3 id="settings-token-compression" className="text-sm font-medium">Token compression</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
                     Reduce noisy tool output and redundant context before it reaches the model.
                   </p>
@@ -1407,10 +1408,10 @@ export function SettingsPanel({
                 </p>
               </section>
             </TabsContent>
-            <TabsContent value="usage" className="mt-0 min-w-0 px-6 py-6 sm:px-8 sm:py-8">
+            <TabsContent value="models" className="mt-0 min-w-0 px-6 py-6 sm:px-8 sm:py-8">
               <PlanUsagePanel snapshot={usageSnapshot} onRefresh={onRefreshUsage} />
             </TabsContent>
-            <TabsContent value="browser-storage" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+            <TabsContent value="general" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-4">
                 <div className="flex items-start justify-between gap-3">
                   <div>
@@ -1449,7 +1450,7 @@ export function SettingsPanel({
             <TabsContent value="general" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-4">
                 <div>
-                  <h3 className="text-sm font-medium">Notifications</h3>
+                  <h3 id="settings-notifications" className="text-sm font-medium">Notifications</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
                     Get notified when the agent needs input or finishes a
                     response.
@@ -1530,96 +1531,14 @@ export function SettingsPanel({
                     ? `Custom sound: ${finishSound.name}`
                     : "No custom sound uploaded. The default completion sound plays when sound cues are on. Removing a custom file restores that default."}
                 </p>
-                <div className="border-t border-border/60 pt-4">
-                  <h3 className="text-sm font-medium">Browser</h3>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Disable the in-app browser on weak machines. This hides the workspace tab, live preview, and browser tools.
-                  </p>
-                  <div className="mt-3 flex items-center justify-between gap-4">
-                    <div>
-                      <p className="text-xs text-muted-foreground">Browser workspace</p>
-                      <p className="mt-1 text-xs text-muted-foreground/70">
-                        When off, agents cannot use browser tools and the sidebar tab is removed.
-                      </p>
-                    </div>
-                    <Button
-                      type="button"
-                      variant={browserEnabled ? "default" : "outline"}
-                      aria-pressed={browserEnabled}
-                      onClick={() => onBrowserSettingsChange({
-                        browserEnabled: !browserEnabled,
-                        ...(!browserEnabled ? {} : {}),
-                      })}
-                      className="shrink-0"
-                    >
-                      {browserEnabled ? "On" : "Off"}
-                    </Button>
-                  </div>
-                  <h3 className="mt-4 text-sm font-medium">Browser stream</h3>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Configure the live browser preview, frame rate, and default viewport.
-                  </p>
-                  <div className="mt-3 flex items-center justify-between gap-4">
-                    <div>
-                      <p className="text-xs text-muted-foreground">Realtime updates</p>
-                      <p className="mt-1 text-xs text-muted-foreground/70">
-                        When off, the preview updates only after browser actions.
-                      </p>
-                    </div>
-                    <Button
-                      type="button"
-                      variant={browserRealtime ? "default" : "outline"}
-                      aria-pressed={browserRealtime}
-                      onClick={() => onBrowserSettingsChange({ browserRealtime: !browserRealtime })}
-                      className="shrink-0"
-                    >
-                      {browserRealtime ? "On" : "Action only"}
-                    </Button>
-                  </div>
-                  <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                    <label className="grid gap-1 text-xs text-muted-foreground">
-                      FPS
-                      <Input
-                        type="number"
-                        min={1}
-                        max={30}
-                        value={browserFps}
-                        onChange={(event) => onBrowserSettingsChange({
-                          browserFps: Math.max(1, Math.min(30, Number(event.target.value) || 5)),
-                        })}
-                        aria-label="Browser stream FPS"
-                      />
-                    </label>
-                    <label className="grid gap-1 text-xs text-muted-foreground">
-                      Width
-                      <Input
-                        type="number"
-                        min={320}
-                        max={2560}
-                        value={browserViewportWidth}
-                        onChange={(event) => onBrowserSettingsChange({
-                          browserViewportWidth: Math.max(320, Math.min(2560, Number(event.target.value) || 1280)),
-                        })}
-                        aria-label="Browser default width"
-                      />
-                    </label>
-                    <label className="grid gap-1 text-xs text-muted-foreground">
-                      Height
-                      <Input
-                        type="number"
-                        min={240}
-                        max={1600}
-                        value={browserViewportHeight}
-                        onChange={(event) => onBrowserSettingsChange({
-                          browserViewportHeight: Math.max(240, Math.min(1600, Number(event.target.value) || 800)),
-                        })}
-                        aria-label="Browser default height"
-                      />
-                    </label>
-                  </div>
-                </div>
-                <div className="border-t border-border/60 pt-4">
-                  <h3 className="text-sm font-medium">Default model</h3>
+                <div id="settings-browser" className="border-t border-border/60 pt-4">
+                <h3 className="text-sm font-medium">Browser</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Browser settings live in the browser tab. Open a chat, switch to Browser, then use the gear next to reload.
+                </p>
+              </div>
+              <div className="border-t border-border/60 pt-4">
+                <h3 id="settings-default-model" className="text-sm font-medium">Default model</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
                     Choose the model used for new chats. Each user has an independent default.
                   </p>
@@ -1643,7 +1562,7 @@ export function SettingsPanel({
                   </div>
                 </div>
                 <div className="border-t border-border/60 pt-4">
-                  <h3 className="text-sm font-medium">Subagent model</h3>
+                  <h3 id="settings-subagent-model" className="text-sm font-medium">Subagent model</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
                     Optionally use one model for delegated subagents. When disabled, the agent chooses the model.
                   </p>
@@ -1682,10 +1601,10 @@ export function SettingsPanel({
               </section>
             </TabsContent>
 
-            <TabsContent value="voice" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+            <TabsContent value="general" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-4">
                 <div>
-                  <h3 className="text-sm font-medium">Voice input</h3>
+                  <h3 id="settings-voice-input" className="text-sm font-medium">Voice input</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
                     Choose how speech is transcribed before it is inserted into the composer.
                   </p>
@@ -1795,10 +1714,10 @@ export function SettingsPanel({
               </section>
             </TabsContent>
 
-            <TabsContent value="archived" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+            <TabsContent value="admin" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-4">
                 <div>
-                  <h3 className="flex items-center gap-2 text-sm font-medium">
+                  <h3 id="settings-archived" className="flex items-center gap-2 text-sm font-medium">
                     <Archive className="size-4 text-muted-foreground" />
                     Archived chats
                   </h3>
@@ -1851,7 +1770,7 @@ export function SettingsPanel({
                 )}
                 <div className="border-t border-border/60 pt-5">
                   <div>
-                    <h3 className="flex items-center gap-2 text-sm font-medium">
+                    <h3 id="settings-shared" className="flex items-center gap-2 text-sm font-medium">
                       <Link2 className="size-4 text-muted-foreground" />
                       Shared chats
                     </h3>
@@ -1895,10 +1814,10 @@ export function SettingsPanel({
               </section>
             </TabsContent>
 
-            <TabsContent value="providers" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+            <TabsContent value="models" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-4">
                 <div>
-                  <h3 className="text-sm font-medium">AI providers and connections</h3>
+                  <h3 id="settings-providers" className="text-sm font-medium">AI providers and connections</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
                     Credentials are stored encrypted on the server and are never returned to the browser.
                     Configure API keys, OAuth, SDK, CLI, and local connections together in one list.
@@ -2147,10 +2066,13 @@ export function SettingsPanel({
               </section>
             </TabsContent>
 
-            <TabsContent value="modes" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
-              <section className="flex flex-col gap-4">
+            <TabsContent value="agent" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+              <div className="mb-8">
+ <div id="settings-skills"><SkillsSettings /></div>
+ </div>
+ <section className="flex flex-col gap-4">
                 <div>
-                  <h3 className="text-sm font-medium">Agent modes</h3>
+                  <h3 id="settings-modes" className="text-sm font-medium">Agent modes</h3>
                   <p className="mt-1 text-xs text-muted-foreground">Create reusable modes with custom instructions and server-enforced tool permissions.</p>
                 </div>
                 <div className="space-y-3 rounded-xl border border-border/60 bg-muted/20 p-4">
@@ -2186,10 +2108,10 @@ export function SettingsPanel({
               </section>
             </TabsContent>
 
-            <TabsContent value="mcp" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+            <TabsContent value="agent" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-4">
                 <div>
-                  <h3 className="text-sm font-medium">Custom MCP servers</h3>
+                  <h3 id="settings-mcp" className="text-sm font-medium">Custom MCP servers</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
                     Add remote HTTP or local stdio MCP servers. Secret values are write-only.
                   </p>
@@ -2308,11 +2230,11 @@ export function SettingsPanel({
               </section>
             </TabsContent>
 
-            <TabsContent value="remote-clients" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+            <TabsContent value="devices" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-5">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <h3 className="text-sm font-medium">Remote Clients</h3>
+                    <h3 id="settings-remote-clients" className="text-sm font-medium">Remote Clients</h3>
                     <p className="mt-1 max-w-2xl text-xs text-muted-foreground">
                       Clients use an outbound encrypted connection. New clients start with full access.
                     </p>
@@ -2379,10 +2301,10 @@ export function SettingsPanel({
                 </div>
               </section>
             </TabsContent>
-            <TabsContent value="memories" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+            <TabsContent value="agent" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-3">
                 <div>
-                  <h3 className="text-sm font-medium">Memories</h3>
+                  <h3 id="settings-memories" className="text-sm font-medium">Memories</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
                     Durable facts injected into every turn. The agent can
                     write these itself.
@@ -2447,10 +2369,10 @@ export function SettingsPanel({
               </section>
             </TabsContent>
 
-            <TabsContent value="session" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
+            <TabsContent value="general" className="mt-0 px-6 py-6 sm:px-8 sm:py-8">
               <section className="flex flex-col gap-3">
                 <div>
-                  <h3 className="text-sm font-medium">Session</h3>
+                  <h3 id="settings-session" className="text-sm font-medium">Session</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
                     Lock this chat and return to the sign-in screen.
                   </p>
@@ -2468,7 +2390,7 @@ export function SettingsPanel({
                 </Button>
                 {isHostAdmin ? (
                   <div className="mt-3 border-t border-destructive/30 pt-4">
-                    <h3 className="text-sm font-medium">Metis maintenance</h3>
+                    <h3 id="settings-maintenance" className="text-sm font-medium">Metis maintenance</h3>
                     <p className="mt-1 text-xs text-muted-foreground">
                       Prepare a production update or reset Metis to its clean initial state.
                     </p>

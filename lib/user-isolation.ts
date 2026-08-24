@@ -1,5 +1,19 @@
 import path from "node:path";
 
+export type SupportedPlatform = "win32" | "darwin" | "linux";
+
+export type HostOsUser = {
+ username: string;
+ uid?: number;
+ gid?: number;
+ home: string;
+};
+
+export function hostPlatform(platform: NodeJS.Platform = process.platform): SupportedPlatform {
+ if (platform === "win32" || platform === "darwin" || platform === "linux") return platform;
+ return "linux";
+}
+
 export type PosixIdentity = {
   username: string;
   uid: number;
@@ -28,6 +42,20 @@ export function parsePasswdLine(line: string): PosixIdentity | undefined {
   const home = fields[5]?.trim() || "";
   if (!username || !Number.isInteger(uid) || !Number.isInteger(gid)) return undefined;
   return { username, uid, gid, home };
+}
+
+export function parseMacOsUserLine(line: string): HostOsUser | undefined {
+ const fields = line.trim().split(/\s+/);
+ if (fields.length < 2) return undefined;
+ const uid = Number(fields[1]);
+ if (!fields[0] || !Number.isInteger(uid)) return undefined;
+ return { username: fields[0], uid, home: "" };
+}
+
+export function parseWindowsUserLine(line: string): HostOsUser | undefined {
+ const [username, home = ""] = line.split("\t");
+ if (!username?.trim()) return undefined;
+ return { username: username.trim(), home: home.trim() };
 }
 
 const NOLOGIN_SHELLS = new Set([

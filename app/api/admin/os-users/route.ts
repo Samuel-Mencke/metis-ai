@@ -1,4 +1,5 @@
 import { getAuthenticatedUserId, isAuthenticated } from "@/lib/auth";
+import { hostPlatform } from "@/lib/user-isolation";
 import { isHostAdmin, listHostOsUsers } from "@/lib/user-access";
 
 export const runtime = "nodejs";
@@ -13,6 +14,7 @@ export async function GET(req: Request) {
     return Response.json({ error: "Forbidden" }, { status: 403 });
   }
   return Response.json({
+ platform: hostPlatform(),
     users: listHostOsUsers().map(({ username, uid, gid, home }) => ({
       username,
       uid,

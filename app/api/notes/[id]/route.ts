@@ -25,6 +25,7 @@ function patchFromBody(body: Record<string, unknown>): NoteWriteInput {
     position: position ? { x: Number(position.x), y: Number(position.y) } : undefined,
     size: size ? { width: Number(size.width), height: Number(size.height) } : undefined,
     archived: typeof body.archived === "boolean" ? body.archived : undefined,
+    projectId: body.projectId === null ? null : typeof body.projectId === "string" ? body.projectId.trim() : undefined,
     expectedVersion: typeof body.version === "number" ? Math.floor(body.version) : undefined,
     author: body.author === "agent" ? "agent" : "user",
   };

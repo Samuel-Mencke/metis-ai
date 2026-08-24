@@ -76,6 +76,7 @@ export type ToolKind =
   | "todo"
   | "browser"
   | "memory"
+ | "compaction"
   | "other";
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -182,7 +183,8 @@ export function innerToolName(name: string, input?: unknown, result?: unknown): 
 export function classifyToolKind(name: string, input?: unknown, result?: unknown): ToolKind {
   const inner = innerToolName(name, input, result);
   const value = `${inner} ${name}`.toLowerCase();
-  if (/(todo)/.test(value)) return "todo";
+  if (/compaction|context[ _-]?compact/.test(value)) return "compaction";
+ if (/(todo)/.test(value)) return "todo";
   if (/(note)/.test(value)) return "note";
   if (/(memory|remember)/.test(value)) return "memory";
   if (/(browser|navigate|playwright|webfetch)/.test(value)) return "browser";
@@ -660,6 +662,7 @@ export type ToolActionIcon =
   | "mcp"
   | "browser"
   | "subagent"
+  | "compress"
   | "other";
 
 export type ToolActionCategory = "file" | "search" | "edit" | "shell" | "browser" | "memory" | "tool";
@@ -670,6 +673,9 @@ export function resolveToolAction(name?: string, kind?: string): {
   category: ToolActionCategory;
 } {
   const value = (name || "").toLowerCase();
+  if (kind === "compaction" || /(compact|compaction)/.test(value)) {
+    return { verb: "Compacted", icon: "compress", category: "tool" };
+  }
   if (kind === "subagent" || /(subagent|delegate)/.test(value)) {
     return { verb: "Delegated", icon: "subagent", category: "tool" };
   }

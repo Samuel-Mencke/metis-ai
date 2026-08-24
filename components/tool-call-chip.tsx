@@ -15,6 +15,7 @@ import {
   LoaderCircle,
   ExternalLink,
   Search,
+  Shrink,
   StickyNote,
   Terminal,
   Trash2,
@@ -50,7 +51,7 @@ export type ToolCallData = {
   name: string;
   status: string;
   detail?: string;
-  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "automation" | "other";
+  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "automation" | "compaction" | "other";
   path?: string;
   diff?: { before?: string; after?: string; additions?: number; deletions?: number };
   input?: string;
@@ -90,6 +91,7 @@ const ACTION_ICONS: Record<ToolActionIcon, typeof BookOpen> = {
   mcp: Wrench,
   browser: Globe2,
   subagent: Bot,
+  compress: Shrink,
   other: Globe2,
 };
 

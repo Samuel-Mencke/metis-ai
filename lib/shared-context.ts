@@ -107,6 +107,7 @@ export type NoteWriteInput = {
   scope?: NoteScope;
   chatId?: string;
   workspaceId?: string;
+  projectId?: string | null;
   author?: NoteAuthor;
   expectedVersion?: number;
 };
@@ -147,6 +148,7 @@ export function listNotes(input: {
   scope?: NoteScope;
   includeArchived?: boolean;
   search?: string;
+  projectId?: string;
 }) {
   const rows = getDatabase().prepare(
     `SELECT data FROM notes
@@ -169,6 +171,7 @@ export function listNotes(input: {
   return rows
     .map(rowToNote)
     .filter((note): note is SharedNote => Boolean(note))
+    .filter((note) => !input.projectId || note.projectId === input.projectId)
     .filter((note) => !search || `${note.title}\n${note.content}`.toLocaleLowerCase().includes(search));
 }
 
@@ -226,6 +229,7 @@ export function createNote(input: NoteWriteInput & { ownerId?: string; idempoten
     title: boundedText(input.title, 200) || (input.kind === "project" ? "Untitled project" : "Untitled note"),
     content: boundedText(input.content, 50_000),
     ...(input.kind === "project" ? { kind: "project" as const } : { kind: "note" as const }),
+    ...(input.projectId ? { projectId: input.projectId } : {}),
     ...(normalizeNoteTodos(input.todos).length ? { todos: normalizeNoteTodos(input.todos) } : {}),
     color: /^#[0-9a-f]{6}$/i.test(input.color || "") ? String(input.color) : "#fef08a",
     position: {
@@ -273,6 +277,7 @@ export function updateNote(
       ...(input.title !== undefined ? { title: boundedText(input.title, 200) || current.title } : {}),
       ...(input.content !== undefined ? { content: boundedText(input.content, 50_000) } : {}),
       ...(input.kind === "project" || input.kind === "note" ? { kind: input.kind } : {}),
+    ...(input.projectId === null ? { projectId: undefined } : input.projectId ? { projectId: input.projectId } : {}),
       ...(input.todos !== undefined ? { todos: normalizeNoteTodos(input.todos) } : {}),
       ...(input.color !== undefined && /^#[0-9a-f]{6}$/i.test(input.color) ? { color: input.color } : {}),
       ...(input.position ? {

@@ -17,7 +17,7 @@ export type SseEvent =
         name: string;
         status: string;
         detail?: string;
-        kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "automation" | "other";
+        kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "automation" | "compaction" | "other";
         path?: string;
         input?: string;
         result?: string;
@@ -43,7 +43,11 @@ export type SseEvent =
       event: "compaction";
       data: {
         type: "compaction";
-        status: "started" | "completed" | "error";
+        id: string;
+ name: "context_compaction";
+ kind: "compaction";
+ systemTriggered: true;
+ status: "started" | "completed" | "error";
         beforeTokens?: number;
         targetTokens?: number;
         afterTokens?: number;

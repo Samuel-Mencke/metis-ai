@@ -79,6 +79,7 @@ export async function POST(req: Request) {
     author: "agent",
     chatId,
     workspaceId,
+    projectId: typeof body.projectId === "string" ? body.projectId.trim() : chat.projectId,
     scope: body.scope === "global" || body.scope === "workspace" ? body.scope : "chat",
     kind: body.kind === "project" ? "project" : "note",
     todos: Array.isArray(body.todos) ? body.todos as import("@/lib/store").NoteTodo[] : undefined,

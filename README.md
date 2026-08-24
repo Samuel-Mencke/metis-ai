@@ -81,18 +81,16 @@ the installer from a pipe.
 ```
 
 The same command works on macOS and Linux. Do not use `curl | bash` against
-`linux.sh` or `macos.sh` directly: piping the installer makes interactive
-prompts read the rest of the script as answers.
+`linux.sh` or `macos.sh` directly.
 
-For agents and CI, pass flags after `--` so they reach the installer, not Bash:
+The default path never creates an account or asks for credentials. Start the app and create the first account in the first-run UI. For agents and CI, pass optional configuration flags after `--`:
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install.sh)" -- \
-  --non-interactive --password 'replace-with-a-strong-password'
+ --non-interactive --port 3100
 ```
 
-Use `--help` for all available options. Prefer `--password-file` or another
-secret manager when the password should not appear in process listings.
+Use `--help` for the available options.
 
 On Windows, the one-liner is a bootstrap without a `param()` block so
 `Invoke-Expression` is valid. It saves `windows.ps1` and invokes it with
@@ -111,8 +109,8 @@ irm https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install/windo
 ```
 
 All three installers accept argument-only configuration for the install
-directory, data directory, agent workspace, ports, bind address, username,
-password, service name and public URL. Use `--help` on Linux/macOS or `-Help`
+directory, data directory, agent workspace, ports, bind address, service name
+and public URL. Use `--help` on Linux/macOS or `-Help`
 on Windows for the complete list.
 
 #### Non-interactive options
@@ -129,12 +127,8 @@ macOS use Bash options; Windows uses PowerShell named parameters.
 | Web port | `--port PORT` | `--port PORT` | `-Port PORT` | `3100` |
 | Bind address | `--host HOST` | `--host HOST` | `-Host HOST` | `127.0.0.1` |
 | MCP gateway port | `--mcp-port PORT` | `--mcp-port PORT` | `-McpPort PORT` | `8787` |
-| Initial login name | `--username NAME` | `--username NAME` | `-Username NAME` | `admin` |
-| Initial login password | `--password PASSWORD` | `--password PASSWORD` | `-Password PASSWORD` | required in non-interactive mode |
-| Password file | `--password-file FILE` | `--password-file FILE` | `-PasswordFile FILE` | unset |
 | Service/task name | `--service-name NAME` | `--service-name NAME` | `-ServiceName NAME` | `metis-ai` / `MetisAI` |
 | Public URL | `--public-url URL` | `--public-url URL` | `-PublicUrl URL` | `http://127.0.0.1:PORT` |
-| No prompts | `--non-interactive` | `--non-interactive` | `-NonInteractive` | off |
 | No prompts | `--non-interactive` | `--non-interactive` | `-NonInteractive` | off |
 | Native (no Docker) | `--native` | `--native` | `-Native` | off when Docker is available |
 | Dry run | `--dry-run` | `--dry-run` | `-DryRun` | off |
@@ -143,20 +137,17 @@ macOS use Bash options; Windows uses PowerShell named parameters.
 
 For Linux and macOS, pass installer arguments after `--` to
 `/bin/bash -c "$(curl ...)"`. For PowerShell, download `install/windows.ps1`
-and invoke it with `-File`. `--password-file`/`-PasswordFile` is preferred in
-automation so a password does not appear in the process list.
-`-SkipRuntimeInstall` only skips Windows' automatic Git/Node.js installation;
+and invoke it with `-File`. `-SkipRuntimeInstall` only skips Windows' automatic Git/Node.js installation;
 it still verifies that the required tools are available.
 
-The installer asks for all machine-specific values instead of assuming a user,
-home directory, port or public hostname. Review downloaded scripts before
+The installer uses safe defaults for machine-specific values and does not create
+the first user; complete account setup in the first-run UI. Review downloaded scripts before
 executing them in security-sensitive environments. The repository source can be
 overridden with `METIS_AI_REPO_URL`.
 
 The installers also ask whether the web application should be reachable on the
 local network. The secure default binds to `127.0.0.1`; choosing the network
-option binds to `0.0.0.0` and requires a strong password plus a firewall or
-trusted TLS reverse proxy.
+option binds to `0.0.0.0` and requires a firewall or trusted TLS reverse proxy.
 
 The scripts are hosted in the repository under `install/`; the website and
 Nginx configuration are not required for installation. Every installer writes
@@ -200,6 +191,17 @@ pnpm dev
 
 Open [http://127.0.0.1:3100](http://127.0.0.1:3100) and sign in with the
 credentials from `.env`.
+
+### Docker Compose
+
+With Docker and Compose installed, start the app, worker and MCP gateway with:
+
+```bash
+docker compose up --build
+```
+
+When `METIS_WORKSPACE` is unset, Compose mounts `./workspace` at `/workspace`.
+Set `METIS_WORKSPACE` to use a different host workspace directory.
 
 <details>
 <summary><strong>Production-style start</strong></summary>

@@ -67,6 +67,7 @@ import {
   Search,
   Share2,
   Settings,
+  Settings2,
   Square,
   StickyNote,
   Terminal,
@@ -84,10 +85,15 @@ import { RemoteFileEditor } from "@/components/remote-file-editor";
 import { RemoteTerminal } from "@/components/remote-terminal";
 import { AutomationsPanel } from "@/components/automations-panel";
 import { NotesVoid } from "@/components/notes-void";
+import { ProjectNav } from "@/components/project-nav";
+import { ProjectHome } from "@/components/project-home";
+import { UpdateBanner } from "@/components/update-banner";
 import { VoiceInput } from "@/components/voice-input";
 import { SubagentChatView } from "@/components/subagent-chat-view";
 import { RichUserText } from "@/components/rich-user-text";
 import { ProviderSetupDialog } from "@/components/provider-setup-dialog";
+import { SetupWizard } from "@/components/setup-wizard";
+import { BrowserSettingsControls } from "@/components/browser-settings-controls";
 import { CommandPalette } from "@/components/command-palette";
 import type { MemoryItem } from "@/components/memories-panel";
 import type { ChatLogEntry, ChatLogCategory } from "@/lib/chat-logs";
@@ -109,13 +115,14 @@ import {
   resolveContextTotal,
 } from "@/lib/context-window";
 import { PlanToolCallCard, ToolCallGroup, type ActivityEntry, type ToolCallData } from "@/components/tool-call-chip";
-import { classifyToolKind, layoutAssistantParts, mergeChatMessages, remoteClientHostnameMap, todosFromToolPayload } from "@/lib/tool-call-display";
+import { classifyToolKind, isToolRunning, layoutAssistantParts, mergeChatMessages, remoteClientHostnameMap, todosFromToolPayload } from "@/lib/tool-call-display";
 import { stripTranscriptDump } from "@/lib/agent-transcript";
 import { planLooksParallelizable } from "@/lib/modes";
 import {
   composerLiveText,
   decideComposerSend,
   isDuplicateComposerSend,
+  mergeQueuedFollowUps,
   shouldAutoDrainQueue,
   shouldIgnoreComposerEnter,
 } from "@/lib/composer-send";
@@ -142,10 +149,20 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  Popover,
+  PopoverContent,
+  PopoverHeader,
+  PopoverTitle,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuLabel,
   DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -540,6 +557,7 @@ type ChatIndexEntry = {
   badge?: "blue" | "red";
   pinned?: boolean;
   archived?: boolean;
+  projectId?: string;
   share?: {
     id: string;
     active: boolean;
@@ -1784,6 +1802,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [configuredModelProviders, setConfiguredModelProviders] = useState<ConfiguredModelProvider[]>([]);
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [providerSetupOpen, setProviderSetupOpen] = useState(false);
+  const [setupStatus, setSetupStatus] = useState<{ needed: boolean; hasUsers: boolean } | null>(null);
   const [modelSearch, setModelSearch] = useState("");
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [modelParams, setModelParams] = useState<ModelParamSelection[]>([]);
@@ -1802,6 +1821,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [automationsOpen, setAutomationsOpen] = useState(false);
   const [focusedNoteId, setFocusedNoteId] = useState<string | null>(null);
   const [focusedAutomationId, setFocusedAutomationId] = useState<string | null>(null);
+  const [projectHomeId, setProjectHomeId] = useState<string | null>(null);
+  const [draftProjectId, setDraftProjectId] = useState<string | null>(null);
+  const draftProjectIdRef = useRef<string | null>(null);
+  const [sidebarProjects, setSidebarProjects] = useState<Array<{ id: string; name: string }>>([]);
   const [workspaceFullscreen, setWorkspaceFullscreen] = useState(false);
   const workspaceAutoCollapsedSidebarRef = useRef(false);
   const [remoteTerminalCwd, setRemoteTerminalCwd] = useState(workspaceDefaultCwd);
@@ -1823,6 +1846,9 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [browserHistory, setBrowserHistory] = useState<Array<{ id: number; url: string; title: string | null; ts: number }>>([]);
   const [agentPointer, setAgentPointer] = useState<{ x: number; y: number; kind: string; ts: number } | null>(null);
   const agentPointerHideTimerRef = useRef<number | null>(null);
+  const composerDirtyUntilRef = useRef(0);
+  const inputUpdatedAtRef = useRef("");
+  const browserUrlUpdatedAtRef = useRef("");
   const [browserHistoryOpen, setBrowserHistoryOpen] = useState(false);
   const [browserError, setBrowserError] = useState("");
   const [browserViewport, setBrowserViewport] = useState({ width: 1280, height: 800 });
@@ -2376,6 +2402,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
 
   useEffect(() => {
     if (!activeChatId || activeChatIncognito) return;
+    const nowIso = new Date().toISOString();
+    inputUpdatedAtRef.current = nowIso;
+    browserUrlUpdatedAtRef.current = nowIso;
+    composerDirtyUntilRef.current = Date.now() + 1500;
     const timer = window.setTimeout(() => {
       void fetch(`/api/chats/${activeChatId}`, {
         method: "PATCH",
@@ -2383,6 +2413,14 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         body: JSON.stringify({
           sessionState: {
             input,
+            inputUpdatedAt: inputUpdatedAtRef.current || new Date().toISOString(),
+            browserUrl,
+            browserUrlUpdatedAt: browserUrlUpdatedAtRef.current || undefined,
+            extraFields: {
+              questionCustom,
+              questionAnswers,
+              questionCustomActive,
+            },
             terminalCwd: remoteTerminalCwd,
             fileCwd: remoteFileCwd,
             terminalTabs,
@@ -2396,7 +2434,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       });
     // Session state is best-effort autosave. Keep typing from rewriting the
     // complete denormalized chat record on every short pause.
-    }, 1_000);
+    }, 400);
     return () => window.clearTimeout(timer);
   }, [
     activeChatId,
@@ -2410,6 +2448,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     workspaceOpen,
     workspaceWidth,
     input,
+    browserUrl,
+    questionCustom,
+    questionAnswers,
+    questionCustomActive,
   ]);
 
   useEffect(() => {
@@ -2669,7 +2711,12 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       .filter((part): part is ToolMsgPart => part.type === "tool")
       .filter((part) => part.kind === "subagent"),
   );
-  const runningSubagents = subagentOutputs.filter((tool) => tool.status === "running");
+  const runningSubagents = subagentOutputs.filter((tool) => isToolRunning(tool.status));
+  const chatBarSubagents = subagentOutputs.filter((tool) => {
+    if (isToolRunning(tool.status)) return true;
+    const status = String(tool.status || "").toLowerCase();
+    return status === "completed" || status === "complete" || status === "success" || status === "failed" || status === "error";
+  });
   const selectedSubagent = activeSubagent
     ? subagentOutputs.find((tool) => tool.id === activeSubagent.id) ?? activeSubagent
     : null;
@@ -3071,7 +3118,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   );
 
   useEffect(() => {
-    if (typeof window === "undefined" || !browserEnabled || !activeChatId || !activeBrowserAgentRun) return;
+    if (typeof window === "undefined" || !browserEnabled || !activeChatId) return;
     const chatId = activeChatId;
     const source = new EventSource(`/api/browser/live?chatId=${encodeURIComponent(chatId)}`);
     source.onmessage = (event) => {
@@ -3094,7 +3141,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           agentPointerHideTimerRef.current = window.setTimeout(() => {
             setAgentPointer(null);
             agentPointerHideTimerRef.current = null;
-          }, 1350);
+          }, 4000);
           return;
         }
         if (data.type !== "action" && data.type !== "navigation") return;
@@ -3722,6 +3769,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     setRemoteTerminalCwd(loadedTerminalTabs.find((tab) => tab.id === loadedActiveTerminalTabId)?.cwd || workspaceDefaultCwd);
     setRemoteFileCwd(normalizeWorkDirectory(session.fileCwd || session.remoteCwd, workspaceDefaultCwd));
     setInput(session.input || "");
+    const extra = session.extraFields || {};
+    if (Array.isArray(extra.questionCustom)) setQuestionCustom(extra.questionCustom as string[]);
+    if (Array.isArray(extra.questionAnswers)) setQuestionAnswers(extra.questionAnswers as string[]);
+    if (Array.isArray(extra.questionCustomActive)) setQuestionCustomActive(extra.questionCustomActive as boolean[]);
     setReferenceMenu(null);
     setReferences([]);
     setMessages(snap.messages);
@@ -3759,9 +3810,18 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   }, [acceptServerSnapshot, clearUnread, modelParamsByModel]);
 
   const openDraft = useCallback(
-    (opts?: { skipNav?: boolean }) => {
+    (opts?: { skipNav?: boolean; projectId?: string | null }) => {
       setNotesOpen(false);
       setAutomationsOpen(false);
+      setProjectHomeId(null);
+      if (opts && "projectId" in opts) {
+        const nextProjectId = opts.projectId || null;
+        setDraftProjectId(nextProjectId);
+        draftProjectIdRef.current = nextProjectId;
+      } else if (!opts?.skipNav) {
+        setDraftProjectId(null);
+        draftProjectIdRef.current = null;
+      }
       const previousChatId = activeChatIdRef.current;
       persistActiveSnapshot();
       setBusySynced(Boolean(previousChatId && runtimeRef.current.has(previousChatId)));
@@ -3874,6 +3934,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     async (id: string, opts?: { skipNav?: boolean; forceReload?: boolean }) => {
       setNotesOpen(false);
       setAutomationsOpen(false);
+      setProjectHomeId(null);
       const alreadyActive = activeChatIdRef.current === id;
       const previousChatId = activeChatIdRef.current;
       if (!alreadyActive && activeChatIncognito && previousChatId) {
@@ -4023,7 +4084,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             // is still applying deltas. Keep that live state instead of
             // replacing it with the older durable snapshot.
             setMessages(() => messages);
-            setQueuedMessages(next.queuedMessages.map((message) => ({ ...message, files: [] })));
+            applyServerQueuedMessages(next.queuedMessages);
             setWorkspaces(next.workspaces);
             setBrowserTabs(next.browserContext.tabs);
             setActiveBrowserTabId(next.browserContext.activeTabId);
@@ -4055,6 +4116,13 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             setActiveTerminalTabId(loadedActiveTerminalTabId);
             setRemoteTerminalCwd(loadedTerminalTabs.find((tab) => tab.id === loadedActiveTerminalTabId)?.cwd || workspaceDefaultCwd);
             setRemoteFileCwd(normalizeWorkDirectory(session.fileCwd || session.remoteCwd, workspaceDefaultCwd));
+            if (Date.now() >= composerDirtyUntilRef.current && typeof session.input === "string") {
+              setInput(session.input);
+              const extra = session.extraFields || {};
+              if (Array.isArray(extra.questionCustom)) setQuestionCustom(extra.questionCustom as string[]);
+              if (Array.isArray(extra.questionAnswers)) setQuestionAnswers(extra.questionAnswers as string[]);
+              if (Array.isArray(extra.questionCustomActive)) setQuestionCustomActive(extra.questionCustomActive as boolean[]);
+            }
             pendingQuestionIdRef.current = next.pendingQuestion?.questionId ?? null;
             setPendingQuestion(next.pendingQuestion ?? null);
             setBusySynced(
@@ -4369,7 +4437,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       setNotesOpen(false);
       setWorkspaceOpen(false);
       setMobileNavOpen(false);
-      if (current) openDraft({ skipNav: true });
+      persistActiveSnapshot();
+        setActiveChatId(null);
+        activeChatIdRef.current = null;
+        setProjectHomeId(null);
     } else if (routeChatId === "notes") {
       setNotesOpen(true);
       setAutomationsOpen(false);
@@ -4404,11 +4475,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         const data = (await res.json()) as { chat: Chat };
         if (!acceptServerSnapshot(activeChatId, data.chat.updatedAt)) return;
         setMessages((current) => mergeMessages(current, mapApiMessages(data.chat.messages, data.chat.runStatus)));
-        setQueuedMessages(
-          Array.isArray(data.chat.queuedMessages)
-            ? data.chat.queuedMessages.map((message) => ({ ...message, files: [] }))
-            : [],
-        );
+        applyServerQueuedMessages(Array.isArray(data.chat.queuedMessages) ? data.chat.queuedMessages : []);
         if (data.chat.modelId) setModelId(data.chat.modelId);
         const serverModeId = data.chat.sessionState?.modeId || "agent";
         setModeId(serverModeId);
@@ -4604,7 +4671,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     const openLinkedAutomation = (event: Event) => {
       const detail = (event as CustomEvent<{ id?: string }>).detail;
       const id = typeof detail?.id === "string" && detail.id.trim() ? detail.id.trim() : null;
-      openDraft({ skipNav: true });
+      persistActiveSnapshot();
+        setActiveChatId(null);
+        activeChatIdRef.current = null;
+        setProjectHomeId(null);
       setFocusedAutomationId(id);
       setAutomationsOpen(true);
       setNotesOpen(false);
@@ -4633,6 +4703,15 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       const key = event.key.toLowerCase();
       const target = event.target as HTMLElement | null;
       if (target?.closest("[data-browser-viewport]")) return;
+      if (event.shiftKey && key === "tab") {
+        event.preventDefault();
+        if (modes.length) {
+          const index = Math.max(0, modes.findIndex((mode) => mode.id === modeId));
+          const nextMode = modes[(index + 1) % modes.length];
+          if (nextMode) void selectMode(nextMode.id);
+        }
+        return;
+      }
       if (modifier && key === "f") {
         event.preventDefault();
         if (notesOpen) {
@@ -4697,7 +4776,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [authed, chats, findMatchCount, findOpen, loadChat, notesOpen, openDraft]);
+  }, [authed, chats, findMatchCount, findOpen, loadChat, modes, modeId, notesOpen, openDraft]);
 
   useEffect(() => {
     if (!authed) return;
@@ -4833,7 +4912,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           })),
         }),
       });
-    }, 0);
+    }, 400);
     return () => window.clearTimeout(timer);
   }, [activeChatId, isDraft, loadingChatId, queuedMessages]);
 
@@ -5082,6 +5161,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           modelParams: stateRef.current.modelParams,
           incognito,
           modeId,
+          ...(!incognito && draftProjectIdRef.current ? { projectId: draftProjectIdRef.current } : {}),
         }),
       });
       if (!res.ok) return null;
@@ -5685,6 +5765,18 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not resume the interrupted run.");
     }
+  }
+
+  function applyServerQueuedMessages(server: PersistedQueuedMessage[]) {
+    const consumed = new Set<string>([
+      ...stateRef.current.messages.filter((message) => message.role === "user").map((message) => message.id),
+      ...queuedSendRef.current,
+    ]);
+    setQueuedMessages((current) => mergeQueuedFollowUps(
+      current,
+      server.map((message) => ({ ...message, files: [] as PendingFile[] })),
+      { consumedIds: consumed },
+    ));
   }
 
   function queueCurrentMessage(text: string, files: PendingFile[]) {
@@ -6880,6 +6972,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         drainBlocked: queueDrainBlockedRef.current,
         drainInProgress: queueDrainRef.current,
         queueLength: queuedMessages.length,
+        hasActiveRuntime: Boolean(activeChatIdRef.current && runtimeRef.current.has(activeChatIdRef.current)),
       })
     ) {
       return;
@@ -7774,7 +7867,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             endpoint={voiceEndpoint}
             connectionId={voiceConnectionId}
             onOpenSettings={() => {
-              setSettingsTab("voice");
+              setSettingsTab("general");
               setSettingsOpen(true);
             }}
             onRecordingChange={setVoiceRecording}
@@ -8014,7 +8107,36 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     </div>
   );
 
-  const sidebar = (mobile = false) => (
+  
+ const activeProjectId = projectHomeId || draftProjectId || null;
+
+ async function moveChatToProject(chatId: string, projectId: string | null) {
+ const res = await fetch(`/api/chats/${chatId}`, {
+ method: "PATCH",
+ headers: { "Content-Type": "application/json" },
+ body: JSON.stringify({ projectId }),
+ });
+ if (!res.ok) {
+ toast.error("Could not move chat");
+ return;
+ }
+ await loadChats();
+ }
+
+ function openProjectHome(projectId: string) {
+ setNotesOpen(false);
+ setAutomationsOpen(false);
+ persistActiveSnapshot();
+ setActiveChatId(null);
+ activeChatIdRef.current = null;
+ setProjectHomeId(projectId);
+ draftProjectIdRef.current = projectId;
+ setDraftProjectId(projectId);
+ navigateChat(null);
+ setMobileNavOpen(false);
+ }
+
+ const sidebar = (mobile = false) => (
     <div className="flex h-full min-w-0 flex-col overflow-hidden">
       <div
         className={cn(
@@ -8043,11 +8165,11 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           type="button"
           className={cn(
             "flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors",
-            isDraft && !notesOpen
+            isDraft && !notesOpen && !automationsOpen && !projectHomeId
               ? "text-primary"
               : "text-muted-foreground hover:bg-white/[0.03] hover:text-foreground",
           )}
-          onClick={() => openDraft()}
+          onClick={() => openDraft({ projectId: draftProjectId })}
         >
           <Plus className="size-3.5 shrink-0 opacity-60" />
           <span className="min-w-0 truncate">New chat</span>
@@ -8094,7 +8216,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               : "text-muted-foreground hover:bg-white/[0.03] hover:text-foreground",
           )}
           onClick={() => {
-            openDraft({ skipNav: true });
+            persistActiveSnapshot();
+                    setActiveChatId(null);
+                    activeChatIdRef.current = null;
+                    setProjectHomeId(null);
             setAutomationsOpen(true);
             setFocusedAutomationId(null);
             setNotesOpen(false);
@@ -8106,9 +8231,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           <CalendarClock className="size-3.5 shrink-0 opacity-60" />
           <span className="min-w-0 truncate">Automations</span>
         </button>
-        <p className="px-2.5 pb-1 pt-3 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
-          Chats
-        </p>
+        
       </div>
       <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2">
         <div className="space-y-0.5 pb-3 pt-1">
@@ -8121,10 +8244,17 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                 </div>
               ))}
             </div>
-          ) : chats.length === 0 ? (
-            <p className="px-2.5 py-3 text-xs text-muted-foreground/70">No chats yet</p>
-          ) : chats.map((c) => (
-            <Fragment key={c.id}>
+          ) : (
+            <ProjectNav
+              chats={chats}
+              activeChatId={activeChatId}
+              activeProjectId={activeProjectId}
+              notesOpen={notesOpen}
+              renderChat={(chat) => {
+                const c = chats.find((item) => item.id === chat.id);
+                if (!c) return null;
+                return (
+                  <Fragment key={c.id}>
             <div
               key={c.id}
               className={cn(
@@ -8197,6 +8327,22 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                     {c.pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
                     {c.pinned ? "Unpin" : "Pin"}
                   </DropdownMenuItem>
+                  {c.incognito ? null : (
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger>Move to project</DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent className="z-[1300]">
+                        {c.projectId ? (
+                          <DropdownMenuItem onClick={() => void moveChatToProject(c.id, null)}>Remove from project</DropdownMenuItem>
+                        ) : null}
+                        {sidebarProjects.filter((project) => project.id !== c.projectId).map((project) => (
+                          <DropdownMenuItem key={project.id} onClick={() => void moveChatToProject(c.id, project.id)}>{project.name}</DropdownMenuItem>
+                        ))}
+                        {sidebarProjects.filter((project) => project.id !== c.projectId).length === 0 && !c.projectId ? (
+                          <DropdownMenuItem disabled>No projects yet</DropdownMenuItem>
+                        ) : null}
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
+                  )}
                   <DropdownMenuItem
                     onClick={() => void updateChatFlags(c.id, { archived: true })}
                   >
@@ -8225,10 +8371,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>
-            {activeChatId === c.id && subagentOutputs.length > 0 ? (
+            {activeChatId === c.id && chatBarSubagents.length > 0 ? (
               <div className="relative ml-5 pb-1 pl-3">
                 <span className="pointer-events-none absolute bottom-5 left-0 top-0 border-l border-border/40" aria-hidden="true" />
-                {subagentOutputs.map((subagent) => {
+                {chatBarSubagents.map((subagent) => {
                   const title = subagent.subagent?.title || subagent.subagent?.prompt || subagent.name;
                   return (
                     <button
@@ -8237,6 +8383,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                       className={cn(
                         "relative flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-white/[0.04] hover:text-foreground",
                         selectedSubagent?.id === subagent.id && "bg-white/[0.08] text-foreground",
+                        !isToolRunning(subagent.status) && "opacity-70",
                       )}
                       onClick={() => {
                         setMobileNavOpen(false);
@@ -8245,7 +8392,11 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                       title={title}
                     >
                       <span className="absolute -left-3 top-1/2 w-3 border-t border-border/40" aria-hidden="true" />
-                      <span className={cn("size-1.5 shrink-0 rounded-full", subagent.status === "running" ? "animate-pulse bg-purple-400" : "bg-muted-foreground/50")} />
+                      {isToolRunning(subagent.status) ? (
+                        <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-purple-400" />
+                      ) : (
+                        <Check className="size-3 shrink-0 text-muted-foreground/70" />
+                      )}
                       <span className="min-w-0 flex-1 truncate">{title}</span>
                     </button>
                   );
@@ -8253,7 +8404,20 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               </div>
             ) : null}
             </Fragment>
-          ))}
+                );
+              }}
+              onNewChat={(projectId) => openDraft(projectId ? { projectId } : undefined)}
+              onOpenProject={openProjectHome}
+              onClearProject={() => {
+               const wasOnHub = Boolean(projectHomeId);
+               setProjectHomeId(null);
+               setDraftProjectId(null);
+               draftProjectIdRef.current = null;
+               if (wasOnHub) openDraft({ projectId: null });
+              }}
+              onMoveChat={(chatId, projectId) => void moveChatToProject(chatId, projectId)}
+            />
+          )}
         </div>
       </div>
 
@@ -8276,7 +8440,44 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     </div>
   );
 
-  if (authed === null) {
+   useEffect(() => {
+     void fetch("/api/setup", { cache: "no-store" })
+       .then(async (response) => {
+         const body = (await response.json().catch(() => ({}))) as { needed?: boolean; hasUsers?: boolean };
+         setSetupStatus({ needed: Boolean(body.needed), hasUsers: Boolean(body.hasUsers) });
+       })
+       .catch(() => setSetupStatus({ needed: false, hasUsers: true }));
+   }, []);
+
+   useEffect(() => {
+     if (!authed) return;
+     const loadProjects = () => {
+       void fetch("/api/projects", { cache: "no-store" })
+         .then(async (response) => {
+           const body = (await response.json().catch(() => ({}))) as { projects?: Array<{ id: string; name: string }> };
+           if (response.ok) setSidebarProjects(body.projects || []);
+         })
+         .catch(() => undefined);
+     };
+     loadProjects();
+     window.addEventListener("metis:projects-changed", loadProjects);
+     return () => window.removeEventListener("metis:projects-changed", loadProjects);
+   }, [authed]);
+
+ if (setupStatus?.needed) {
+   return (
+     <SetupWizard
+       open
+       hasUsers={setupStatus.hasUsers}
+       onFinished={() => {
+         setSetupStatus({ needed: false, hasUsers: true });
+         window.location.reload();
+       }}
+     />
+   );
+ }
+
+ if (authed === null || setupStatus === null) {
     return (
       <main className="flex min-h-dvh items-center justify-center text-sm text-muted-foreground">
         …
@@ -8338,7 +8539,11 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           setMobileNavOpen(false);
           navigateChat("notes");
         }}
-        onOpenNote={(noteId) => {
+        onOpenProject={(projectId) => {
+ openProjectHome(projectId);
+ setCommandPaletteOpen(false);
+ }}
+ onOpenNote={(noteId) => {
           setWorkspaceOpen(false);
           setNotesOpen(true);
           setFocusedNoteId(null);
@@ -8444,6 +8649,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       </Sheet>
 
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+        <UpdateBanner />
         {/* Thin top bar */}
         <header className="relative z-20 flex h-12 shrink-0 items-center gap-2 border-b border-border/30 bg-background/90 px-3 backdrop-blur-xl md:px-4">
           <Button
@@ -8466,7 +8672,11 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           >
             <PanelLeft className="size-4" />
           </Button>
-          {automationsOpen ? (
+          {projectHomeId && !notesOpen && !automationsOpen ? (
+            <p className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-center text-sm font-medium text-foreground md:text-left">
+              Project
+            </p>
+          ) : automationsOpen ? (
             <p className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-center text-sm font-medium text-foreground md:text-left">
               Automations
             </p>
@@ -8500,7 +8710,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               <Share2 className="size-4" />
             </Button>
           ) : null}
-          {isDraft && !notesOpen ? (
+          {isDraft && !notesOpen && !automationsOpen && !projectHomeId ? (
             <Button
               type="button"
               variant={incognito ? "secondary" : "ghost"}
@@ -8514,7 +8724,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               {incognito ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
             </Button>
           ) : null}
-          {!notesOpen ? (
+          {!notesOpen && !automationsOpen && !projectHomeId ? (
             <Button
               type="button"
               variant="ghost"
@@ -8532,10 +8742,26 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         {/* Messages / empty */}
         <div
           key={paneKey}
-          className="relative flex min-h-0 flex-1 flex-col animate-in fade-in duration-200"
+          className="relative flex min-h-0 flex-1 flex-col"
         >
-        {!notesOpen && !automationsOpen && activeChatId ? <NotesVoid chatId={activeChatId} pinnedOnly compact /> : null}
-        {automationsOpen ? (
+        {!notesOpen && !automationsOpen && activeChatId ? <NotesVoid chatId={activeChatId} pinnedOnly compact projectId={chats.find((chat) => chat.id === activeChatId)?.projectId || draftProjectId} /> : null}
+        {projectHomeId && !notesOpen && !automationsOpen ? (
+          <ProjectHome
+            projectId={projectHomeId}
+            onOpenChat={(chatId) => void loadChat(chatId)}
+            onNewChat={(projectId) => openDraft({ projectId })}
+            onOpenNotes={(noteId) => {
+              setNotesOpen(true);
+              setFocusedNoteId(noteId ?? null);
+            }}
+          onDeleted={() => {
+           setProjectHomeId(null);
+           setDraftProjectId(null);
+           draftProjectIdRef.current = null;
+           openDraft({ projectId: null });
+          }}
+          />
+        ) : automationsOpen ? (
           <div className="h-full min-h-0 flex-1 p-3 sm:p-5">
             <AutomationsPanel
               activeChatId={activeChatId}
@@ -8548,7 +8774,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
           </div>
         ) : notesOpen ? (
           <div className="h-full min-h-0 flex-1 p-3 sm:p-5">
-            <NotesVoid chatId={notesOpen ? null : activeChatId} focusNoteId={focusedNoteId} />
+            <NotesVoid chatId={notesOpen ? null : activeChatId} focusNoteId={focusedNoteId} projectId={projectHomeId || draftProjectId || chats.find((chat) => chat.id === activeChatId)?.projectId} />
           </div>
         ) : loadingChatId ? (
           <ChatLoadingSkeleton />
@@ -8856,24 +9082,24 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                             <>
                         {viewBlocks.map((block, bi, blocks) => {
                           if (block.type === "compaction") {
-                            const statusLabel = block.status === "completed"
-                              ? "Context compacted"
-                              : block.status === "error"
-                                ? "Context compaction failed"
-                                : "Compacting context";
-                            const before = typeof block.beforeTokens === "number"
-                              ? `${formatMetricNumber(block.beforeTokens)} tokens`
-                              : "unknown size";
-                            const target = typeof block.targetTokens === "number"
-                              ? `${formatMetricNumber(block.targetTokens)} target`
-                              : "target unknown";
+                            const running = block.status !== "completed" && block.status !== "error";
+                            const detail = [
+                              typeof block.beforeTokens === "number" ? `${formatMetricNumber(block.beforeTokens)} before` : null,
+                              typeof block.afterTokens === "number" ? `${formatMetricNumber(block.afterTokens)} after` : null,
+                              typeof block.targetTokens === "number" ? `${formatMetricNumber(block.targetTokens)} target` : null,
+                              typeof block.removedMessages === "number" ? `${block.removedMessages} messages` : null,
+                            ].filter(Boolean).join(" · ");
                             return (
-                              <div key={`compaction-${bi}`} className="my-2 flex flex-wrap items-center gap-2 rounded-md border border-amber-400/25 bg-amber-400/5 px-2.5 py-1.5 text-[11px] text-muted-foreground">
-                                <span className="font-medium text-amber-300">{statusLabel}</span>
-                                <span>{before} · {target}</span>
-                                {typeof block.afterTokens === "number" ? <span>· {formatMetricNumber(block.afterTokens)} after</span> : null}
-                                {typeof block.removedMessages === "number" ? <span>· {block.removedMessages} messages compacted</span> : null}
-                              </div>
+                              <ToolCallGroup
+                                key={`compaction-${bi}`}
+                                tools={[{
+                                  id: `compaction-${bi}`,
+                                  name: "context_compaction",
+                                  kind: "compaction",
+                                  status: running ? "running" : block.status === "error" ? "error" : "completed",
+                                  detail: detail || (running ? "Compacting context" : "Context compacted"),
+                                }]}
+                              />
                             );
                           }
                           if (block.type === "thinking") {
@@ -8973,8 +9199,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                               key={`text-${bi}`}
                               className={cn(
                                 "block w-full",
-                                m.streaming && bi === blocks.length - 1 && "streaming-answer",
-                                bi > 0 && blocks[bi - 1]?.type === "text" && "mt-3",
+                                                                bi > 0 && blocks[bi - 1]?.type === "text" && "mt-3",
                               )}
                             >
                               {m.streaming ? (
@@ -9322,7 +9547,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                       <span>{liveStatus || "Agent running…"}</span>
                     </div>
                   ) : null}
-                  {subagentOutputs.length > 0 ? (
+                  {runningSubagents.length > 0 ? (
                     <div className="mb-2 overflow-hidden rounded-xl border border-purple-400/20 bg-purple-400/[0.06]">
                       <button
                         type="button"
@@ -9334,12 +9559,11 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                         <span className="font-medium text-foreground/80">
                           {runningSubagents.length} subagent{runningSubagents.length === 1 ? "" : "s"} running
                         </span>
-                        {runningSubagents.length === 0 ? <span className="text-muted-foreground/70">· recent</span> : null}
                         <ChevronRight className={cn("ml-auto size-3.5 transition-transform", subagentsExpanded && "rotate-90")} />
                       </button>
                       {subagentsExpanded ? (
                         <div className="border-t border-purple-400/15 px-2 py-1">
-                          {subagentOutputs.map((tool) => (
+                          {runningSubagents.map((tool) => (
                             <button
                               key={tool.id}
                               type="button"
@@ -9349,10 +9573,9 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                               )}
                               onClick={() => setActiveSubagent(tool)}
                             >
-                              {tool.status === "running" ? <LoaderCircle className="size-3 animate-spin text-purple-300" /> : <Bot className="size-3 text-muted-foreground" />}
+                              <LoaderCircle className="size-3 animate-spin text-purple-300" />
                               <span className="min-w-0 flex-1 truncate">{tool.subagent?.title || tool.subagent?.prompt || tool.name}</span>
                               {tool.subagent?.model ? <span className="max-w-28 shrink-0 truncate text-[10px] text-muted-foreground/70">{tool.subagent.model}</span> : null}
-                              <span className="shrink-0 text-[10px] text-muted-foreground/70">{tool.status}</span>
                             </button>
                           ))}
                         </div>
@@ -9548,6 +9771,27 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                   <Button type="button" size="icon-xs" variant="ghost" className="size-7 shrink-0 rounded-lg" aria-label="Reload" title="Reload" onClick={() => void performBrowserAction("reload")}>
                     <RotateCcw className="size-3.5" />
                   </Button>
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <Button type="button" size="icon-xs" variant="ghost" className="size-7 shrink-0 rounded-lg" aria-label="Browser settings" title="Browser settings">
+                        <Settings2 className="size-3.5" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent align="start" className="w-80">
+                      <PopoverHeader>
+                        <PopoverTitle>Browser settings</PopoverTitle>
+                      </PopoverHeader>
+                      <BrowserSettingsControls
+                        compact
+                        browserEnabled={browserEnabled}
+                        browserRealtime={browserRealtime}
+                        browserFps={browserFps}
+                        browserViewportWidth={browserDefaultViewport.width}
+                        browserViewportHeight={browserDefaultViewport.height}
+                        onChange={updateBrowserSettings}
+                      />
+                    </PopoverContent>
+                  </Popover>
                   <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border border-border/30 bg-muted/35 px-2 focus-within:border-border/60 focus-within:bg-muted/45">
                     {browserUrl.startsWith("https://") ? <LockKeyhole className="size-3 shrink-0 text-muted-foreground/75" /> : <Globe2 className="size-3 shrink-0 text-muted-foreground/75" />}
                     <Input
@@ -9785,17 +10029,17 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                     </Button>
                   ) : null}
                 </div>
-                {subagentOutputs.length > 0 ? (
+                {runningSubagents.length > 0 ? (
                   <section className="shrink-0 rounded-lg border border-purple-400/20 bg-purple-400/[0.06]">
                     <div className="flex items-center gap-2 px-2.5 py-2 text-xs">
                       <Bot className="size-3.5 text-purple-300" />
                       <span className="font-medium text-foreground/80">Subagents</span>
                       <span className="text-muted-foreground/70">
-                        {runningSubagents.length} running · {subagentOutputs.length} total
+                        {runningSubagents.length} running
                       </span>
                     </div>
                     <div className="border-t border-purple-400/15 px-2 py-1">
-                      {subagentOutputs.map((tool) => (
+                      {runningSubagents.map((tool) => (
                         <button
                           key={tool.id}
                           type="button"
@@ -9805,11 +10049,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                           )}
                           onClick={() => setActiveSubagent(tool)}
                         >
-                          {tool.status === "running" ? (
-                            <LoaderCircle className="size-3 animate-spin text-purple-300" />
-                          ) : (
-                            <Bot className="size-3 text-muted-foreground" />
-                          )}
+                          <LoaderCircle className="size-3 animate-spin text-purple-300" />
                           <span className="min-w-0 flex-1 truncate">
                             {tool.subagent?.title || tool.subagent?.prompt || tool.name}
                           </span>
@@ -9818,7 +10058,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                               {tool.subagent.model}
                             </span>
                           ) : null}
-                          <span className="shrink-0 text-[10px] text-muted-foreground/70">{tool.status}</span>
+                          
                         </button>
                       ))}
                     </div>
@@ -10063,10 +10303,18 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         open={providerSetupOpen}
         onOpenChange={setProviderSetupOpen}
         onConnected={() => {
+          try { window.localStorage.setItem("metis-onboarding-completed", "1"); } catch { /* ignore */ }
+          setProviderSetupOpen(false);
           void refreshStatus();
           void loadModels();
         }}
+        onSkip={() => {
+          try { window.localStorage.setItem("metis-onboarding-completed", "1"); } catch { /* ignore */ }
+          setProviderSetupOpen(false);
+        }}
         onStartChat={() => {
+          try { window.localStorage.setItem("metis-onboarding-completed", "1"); } catch { /* ignore */ }
+          setProviderSetupOpen(false);
           openDraft();
           window.requestAnimationFrame(() => textareaRef.current?.focus());
         }}

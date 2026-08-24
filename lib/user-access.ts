@@ -1,15 +1,21 @@
 import path from "node:path";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import os from "node:os";
 import { getDatabase } from "@/lib/sqlite";
 import { config } from "@/lib/config";
 import {
   assertExecutionUid,
+ hostPlatform,
   isHostAdminUsername,
   isInsideWorkspace,
   isRootWorkspace,
   listAssignablePosixUsers,
+ parseMacOsUserLine,
+ parseWindowsUserLine,
   parsePasswdLine,
-  type PosixIdentity,
+  type HostOsUser,
+ type PosixIdentity,
 } from "@/lib/user-isolation";
 
 export type UserAccess = {
@@ -23,8 +29,8 @@ export type UserAccess = {
 
 export type UserExecutionIdentity = {
   username: string;
-  uid: number;
-  gid: number;
+  uid?: number;
+  gid?: number;
   home?: string;
   workspaceRoot: string;
 };
@@ -53,16 +59,41 @@ export function lookupPosixUser(username: string): PosixIdentity | undefined {
   }
 }
 
-export function listHostOsUsers() {
-  try {
-    return listAssignablePosixUsers(readFileSync("/etc/passwd", "utf8"), {
-      includeRoot: config.allowRootAgents,
-    });
-  } catch {
-    return [];
-  }
+export function lookupHostOsUser(username: string): HostOsUser | undefined {
+ return listHostOsUsers().find((user) => user.username.toLowerCase() === username.trim().toLowerCase());
 }
 
+function runHostCommand(command: string, args: string[]) {
+ try { return execFileSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); }
+ catch { return ""; }
+}
+
+function listMacOsUsers(): HostOsUser[] {
+ const current = os.userInfo().username;
+ const listed = runHostCommand("dscl", [".", "-list", "/Users", "UniqueID"]);
+ return listed.split("\n").map(parseMacOsUserLine).filter((user): user is HostOsUser => Boolean(user))
+ .filter((user) => ((user.uid !== undefined && user.uid >= 501) || user.username === current) && !["daemon", "nobody"].includes(user.username.toLowerCase()))
+ .map((user) => ({ ...user, home: runHostCommand("dscl", [".", "-read", `/Users/${user.username}`, "NFSHomeDirectory"]).match(/NFSHomeDirectory:\s+(.+)/)?.[1]?.trim() || `/Users/${user.username}` }))
+ .sort((a, b) => a.username.localeCompare(b.username));
+}
+
+function listWindowsUsers(): HostOsUser[] {
+ const script = "$profiles = @{}; Get-CimInstance Win32_UserProfile | ForEach-Object { if ($_.LocalPath) { $profiles[$_.SID] = $_.LocalPath } }; Get-LocalUser | ForEach-Object { Write-Output ($_.Name + [char]9 + ($profiles[$_.SID] ?? (Join-Path $env:SystemDrive (\"Users\\\" + $_.Name)))) }";
+ const listed = runHostCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
+ let users = listed.split("\n").map(parseWindowsUserLine).filter((user): user is HostOsUser => Boolean(user));
+ if (users.length === 0) {
+ const fallback = runHostCommand("wmic.exe", ["useraccount", "get", "name"]);
+ users = fallback.split("\n").map((line) => ({ username: line.trim(), home: "" })).filter((user) => Boolean(user.username));
+ }
+ return users.sort((a, b) => a.username.localeCompare(b.username));
+}
+
+export function listHostOsUsers(platform = hostPlatform()): HostOsUser[] {
+ if (platform === "darwin") return listMacOsUsers();
+ if (platform === "win32") return listWindowsUsers();
+ try { return listAssignablePosixUsers(readFileSync("/etc/passwd", "utf8"), { includeRoot: config.allowRootAgents }); }
+ catch { return []; }
+}
 export function getUserAccess(userId?: string): UserAccess {
   if (!userId?.trim()) return { userId: "", workspaceRoot: path.resolve(config.agentCwd) };
   const row = getDatabase().prepare(
@@ -71,7 +102,7 @@ export function getUserAccess(userId?: string): UserAccess {
      FROM user_workspace_access WHERE user_id = ?`,
   ).get(userId.trim()) as AccessRow | undefined;
   if (row?.workspaceRoot) {
-    const posix = row.osUsername ? lookupPosixUser(row.osUsername) : undefined;
+    const posix = row.osUsername ? lookupHostOsUser(row.osUsername) : undefined;
     return {
       ...row,
       workspaceRoot: path.resolve(row.workspaceRoot),
@@ -95,7 +126,7 @@ export function getUserExecutionIdentity(userId?: string): UserExecutionIdentity
     };
   }
   if (!access.osUsername) return undefined;
-  const posix = lookupPosixUser(access.osUsername);
+  const posix = lookupHostOsUser(access.osUsername);
   const uid = access.uid ?? posix?.uid;
   const gid = access.gid ?? posix?.gid;
   if (uid === 0 && config.allowRootAgents && isRootWorkspace(access.workspaceRoot, posix?.home || access.home)) {
@@ -107,8 +138,9 @@ export function getUserExecutionIdentity(userId?: string): UserExecutionIdentity
       workspaceRoot: access.workspaceRoot,
     };
   }
-  if (uid === undefined || gid === undefined || uid <= 0) return undefined;
-  return {
+ if (hostPlatform() === "win32") return { username: access.osUsername, home: posix?.home || access.home, workspaceRoot: access.workspaceRoot };
+ if (uid === undefined || gid === undefined || uid <= 0) return undefined;
+ return {
     username: access.osUsername,
     uid,
     gid,
@@ -138,7 +170,7 @@ export function requireUserExecutionIdentity(userId?: string): UserExecutionIden
   if (!identity) {
     throw new Error("This account has no valid OS user mapping. Provision a workspace with scripts/provision-user.ts.");
   }
-  assertExecutionUid(identity.uid, {
+ if (identity.uid !== undefined) assertExecutionUid(identity.uid, {
     allowRoot: config.allowRootAgents,
     workspaceRoot: identity.workspaceRoot,
     home: identity.home,
@@ -182,11 +214,11 @@ export function ensureUserAccess(
   workspaceRoot: string,
   osUsername?: string,
 ) {
-  const identity = osUsername ? lookupPosixUser(osUsername) : undefined;
+  const identity = osUsername ? lookupHostOsUser(osUsername) : undefined;
   if (osUsername && !identity) {
     throw new Error(`OS user ${osUsername} does not exist on this host.`);
   }
-  if (identity) {
+  if (identity?.uid !== undefined) {
     assertExecutionUid(identity.uid, {
       allowRoot: config.allowRootAgents,
       workspaceRoot,
@@ -215,8 +247,8 @@ export function ensureUserAccess(
 }
 
 export function provisionAccountAccess(userId: string, username: string) {
-  const posix = lookupPosixUser(username);
-  if (!posix || posix.uid <= 0) return false;
+  const posix = lookupHostOsUser(username);
+  if (!posix || (hostPlatform() !== "win32" && (posix.uid === undefined || posix.uid <= 0))) return false;
   const workspace = posix.home && posix.home !== "/" && posix.home !== "/root"
     ? posix.home
     : path.join("/home", username);
@@ -231,8 +263,8 @@ export function provisionAccountAccess(userId: string, username: string) {
  */
 export function provisionMissingAccountAccess(userId: string, username: string) {
   const access = getUserAccess(userId);
-  const current = access.osUsername ? lookupPosixUser(access.osUsername) : undefined;
-  if (current && (current.uid > 0 || (config.allowRootAgents && isRootWorkspace(access.workspaceRoot, current.home)))) {
+  const current = access.osUsername ? lookupHostOsUser(access.osUsername) : undefined;
+  if (current && (hostPlatform() === "win32" || (current.uid !== undefined && current.uid > 0) || (config.allowRootAgents && isRootWorkspace(access.workspaceRoot, current.home)))) {
     return true;
   }
 
@@ -241,8 +273,8 @@ export function provisionMissingAccountAccess(userId: string, username: string) 
     return true;
   }
 
-  const matching = lookupPosixUser(username);
-  if (matching && matching.uid > 0) {
+  const matching = lookupHostOsUser(username);
+  if (matching && (hostPlatform() === "win32" || (matching.uid !== undefined && matching.uid > 0))) {
     ensureUserAccess(userId, access.workspaceRoot, matching.username);
     return true;
   }

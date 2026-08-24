@@ -43,8 +43,7 @@ export function usageKeyForProvider(providerId?: string | null): string | null {
 export function usageKeyForSelection(selection: UsageSelection): string | null {
   const direct = usageKeyForProvider(selection.providerId);
   if (direct) return direct;
-  if (selection.connectionId) return `connection:${selection.connectionId}`;
-  const haystack = [selection.providerId, selection.providerName, selection.connectionLabel, selection.modelId]
+   const haystack = [selection.providerId, selection.providerName, selection.connectionLabel, selection.modelId]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();

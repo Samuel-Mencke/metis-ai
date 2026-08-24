@@ -10,49 +10,10 @@ DEFAULT_DIR="${METIS_AI_INSTALL_DIR:-$HOME/metis-ai}"
 
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 
-can_prompt() {
-  [[ -t 0 || -t 1 ]]
-}
-
-ask() {
-  local prompt="$1" default="${2:-}" value
-  if (( non_interactive )); then
-    printf '%s' "$default"
-    return 0
-  fi
-  can_prompt || die "Interactive installation needs a terminal. Use --non-interactive with --password."
-  if [[ -t 0 ]]; then
-    if [[ -n "$default" ]]; then
-      IFS= read -r -p "$prompt [$default]: " value
-    else
-      IFS= read -r -p "$prompt: " value
-    fi
-  else
-    if [[ -n "$default" ]]; then
-      IFS= read -r -p "$prompt [$default]: " value < /dev/tty
-    else
-      IFS= read -r -p "$prompt: " value < /dev/tty
-    fi
-  fi
-  printf '%s' "${value:-$default}"
-}
-
-ask_secret() {
-  local prompt="$1" value
-  can_prompt || die "Interactive installation needs a terminal. Use --non-interactive with --password."
-  if [[ -t 0 ]]; then
-    IFS= read -r -s -p "$prompt" value
-  else
-    IFS= read -r -s -p "$prompt" value < /dev/tty
-  fi
-  printf '\n' >&2
-  printf '%s' "$value"
-}
-
 confirm_install() {
   local name="$1" answer
   (( non_interactive )) && return 0
-  can_prompt || die "Interactive installation needs a terminal. Use --non-interactive with --password."
+
   if [[ -t 0 ]]; then
     IFS= read -r -p "$name is missing or too old. Install/update it automatically? [Y/n] " answer
   else
@@ -128,8 +89,8 @@ compose() {
 usage() {
   cat <<'EOF'
 Usage:
-  linux.sh                                  Guided installation
-  linux.sh --non-interactive --password P  Argument-only installation
+  linux.sh                                  Install Metis AI without account prompts
+  linux.sh --non-interactive Install without prompts (default)
 
 Options:
   --install-dir DIR       Application checkout (default: ~/metis-ai)
@@ -138,10 +99,7 @@ Options:
   --port PORT             Web port (default: 3100)
   --host HOST             Bind address (default: 127.0.0.1)
   --mcp-port PORT         MCP gateway port (default: 8787)
-  --username NAME         Initial login name (default: admin)
-  --password PASSWORD     Initial login password (minimum 8 characters)
-  --password-file FILE    Read the initial password from a file
-  --service-name NAME     systemd service prefix (default: metis-ai)
+     --service-name NAME     systemd service prefix (default: metis-ai)
   --public-url URL        URL shown to users
   --native                Force Node.js + systemd instead of Docker
   --non-interactive       Never read prompts; all values come from arguments/defaults
@@ -158,9 +116,6 @@ agent_cwd="$HOME"
 port="3100"
 ai_chat_host=""
 mcp_port="8787"
-username="admin"
-password=""
-password_file=""
 service_name="metis-ai"
 public_url=""
 force_native=0
@@ -172,10 +127,7 @@ while [[ $# -gt 0 ]]; do
     --port) [[ $# -ge 2 ]] || die "--port requires a value"; port="$2"; shift 2 ;;
     --host) [[ $# -ge 2 ]] || die "--host requires a value"; ai_chat_host="$2"; shift 2 ;;
     --mcp-port) [[ $# -ge 2 ]] || die "--mcp-port requires a value"; mcp_port="$2"; shift 2 ;;
-    --username) [[ $# -ge 2 ]] || die "--username requires a value"; username="$2"; shift 2 ;;
-    --password) [[ $# -ge 2 ]] || die "--password requires a value"; password="$2"; shift 2 ;;
-    --password-file) [[ $# -ge 2 ]] || die "--password-file requires a value"; password_file="$2"; shift 2 ;;
-    --service-name) [[ $# -ge 2 ]] || die "--service-name requires a value"; service_name="$2"; shift 2 ;;
+             --service-name) [[ $# -ge 2 ]] || die "--service-name requires a value"; service_name="$2"; shift 2 ;;
     --public-url) [[ $# -ge 2 ]] || die "--public-url requires a value"; public_url="$2"; shift 2 ;;
     --native) force_native=1; shift ;;
     --non-interactive) non_interactive=1; shift ;;
@@ -189,10 +141,6 @@ install_dir="${install_dir/#\~/$HOME}"
 agent_cwd="${agent_cwd/#\~/$HOME}"
 data_dir="${data_dir/#\~/$HOME}"
 
-if [[ -n "$password_file" ]]; then
-  [[ -r "$password_file" ]] || die "--password-file is not readable: $password_file"
-  IFS= read -r password < "$password_file" || true
-fi
 
 default_public_host() {
   local host
@@ -200,35 +148,8 @@ default_public_host() {
   printf '%s' "${host:-127.0.0.1}"
 }
 
-if (( non_interactive )); then
-  [[ -n "$password" ]] || die "--password is required with --non-interactive."
-  ai_chat_host="${ai_chat_host:-127.0.0.1}"
-  data_dir="${data_dir:-$install_dir/data}"
-else
-  can_prompt || die "Interactive installation needs a terminal. Use --non-interactive with --password."
-  install_dir="$(ask "Installation directory" "$install_dir")"
-  install_dir="${install_dir/#\~/$HOME}"
-  data_dir="$(ask "Data directory" "${data_dir:-$install_dir/data}")"
-  data_dir="${data_dir/#\~/$HOME}"
-  agent_cwd="$(ask "Agent workspace directory" "$agent_cwd")"
-  agent_cwd="${agent_cwd/#\~/$HOME}"
-  port="$(ask "Web application port" "$port")"
-  if [[ "$(ask "Host web application on local network? (y/N)" "n")" =~ ^([Yy][Ee][Ss]|[Yy]|1|[Tt][Rr][Uu][Ee])$ ]]; then
-    ai_chat_host="0.0.0.0"
-    public_host="$(default_public_host)"
-  else
-    ai_chat_host="127.0.0.1"
-    public_host="127.0.0.1"
-  fi
-  mcp_port="$(ask "MCP gateway port" "$(pick_free_port "$mcp_port")")"
-  username="$(ask "Initial username" "$username")"
-  password="$(ask_secret "Initial password: ")"
-  [[ ${#password} -ge 8 ]] || die "Password must contain at least 8 characters."
-  password_confirm="$(ask_secret "Confirm password: ")"
-  [[ "$password" == "$password_confirm" ]] || die "Passwords do not match."
-  service_name="$(ask "Service name" "$service_name")"
-  public_url="$(ask "Public URL" "${public_url:-http://${public_host}:${port}}")"
-fi
+ai_chat_host="${ai_chat_host:-127.0.0.1}"
+data_dir="${data_dir:-$install_dir/data}"
 
 data_dir="${data_dir:-$install_dir/data}"
 if [[ "$ai_chat_host" == "0.0.0.0" ]]; then
@@ -238,12 +159,10 @@ else
 fi
 public_url="${public_url:-http://${public_host}:${port}}"
 
-[[ ${#password} -ge 8 ]] || die "Password must contain at least 8 characters."
 [[ "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]] || die "Web port must be a number between 1 and 65535."
 mcp_port="$(pick_free_port "$mcp_port")"
 [[ "$mcp_port" =~ ^[0-9]+$ && "$mcp_port" -ge 1 && "$mcp_port" -le 65535 ]] || die "MCP port must be a number between 1 and 65535."
 [[ "$service_name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || die "Service name may contain letters, numbers, underscores and hyphens."
-[[ "$username" =~ ^[A-Za-z0-9_.-]{3,64}$ ]] || die "Username must be 3-64 characters: letters, numbers, underscore, dot or hyphen."
 
 if (( dry_run )); then
   cat <<EOF
@@ -256,7 +175,6 @@ Dry run; no files or services will be changed.
   mcp port:      $mcp_port
   service name:  $service_name
   public url:    $public_url
-  username:      $username
   native:        $force_native
 EOF
   exit 0
@@ -343,8 +261,7 @@ mkdir -p "$data_dir" "$agent_cwd"
   write_env_line APP_NAME "Metis AI"
   write_env_line PORT "$port"
   write_env_line AI_CHAT_HOST "$ai_chat_host"
-  write_env_line CHAT_USERNAME "$username"
-  write_env_line CHAT_PASSWORD "$chat_password"
+   write_env_line CHAT_PASSWORD "$chat_password"
   write_env_line CHAT_DATA_DIR "$data_dir"
   write_env_line AGENT_CWD "$agent_cwd"
   write_env_line AI_CHAT_ROOT "$install_dir"
@@ -368,10 +285,7 @@ mkdir -p "$data_dir" "$agent_cwd"
     printf 'METIS_DOCKER=1\n'
     write_env_line AGENT_CWD "/workspace"
     write_env_line CHAT_DATA_DIR "/data"
-    write_env_line METIS_AI_BOOTSTRAP_USERNAME "$username"
-    write_env_line METIS_AI_BOOTSTRAP_PASSWORD "$password"
-    printf 'METIS_AI_BOOTSTRAP_OPTIONAL=1\n'
-  else
+           else
     write_env_line METIS_NODE_BIN "$node_bin"
     write_env_line METIS_NODE_HOME "$node_home"
   fi
@@ -406,8 +320,6 @@ chmod 700 "$install_dir/run-service.sh"
   set +a
   cd "$install_dir"
   pnpm install --frozen-lockfile
-  METIS_AI_BOOTSTRAP_USERNAME="$username" METIS_AI_BOOTSTRAP_PASSWORD="$password" METIS_AI_BOOTSTRAP_OPTIONAL=1 \
-    pnpm exec tsx scripts/bootstrap-user.ts
   pnpm build
 )
 

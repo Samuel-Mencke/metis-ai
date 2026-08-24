@@ -14,7 +14,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install.sh | bash
 #
 # Arguments:
-#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install.sh)" -- --non-interactive --password-file ./metis-password.txt
+#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/f1shyondrugs/metis-ai/master/install.sh)" -- --non-interactive --port 3100
 
 set -euo pipefail
 

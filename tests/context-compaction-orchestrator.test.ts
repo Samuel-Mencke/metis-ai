@@ -3,6 +3,7 @@ import test from "node:test";
 import type { ModelMessage } from "ai";
 import {
   contextModeOf,
+ CONTEXT_COMPACT_RATIO,
   effectiveContextBudget,
   estimateContextTokens,
   contextWindowForSelection,
@@ -56,6 +57,35 @@ test("compaction is deterministic and idempotent", () => {
 test("limited mode reduces the effective budget explicitly", () => {
   assert.equal(contextModeOf([{ id: "contextMode", value: "limited" }]), "limited");
   assert.ok(effectiveContextBudget(200_000, "limited") < effectiveContextBudget(200_000, "normal"));
+});
+
+test("compaction triggers at exactly 80% of the actual context window", () => {
+  const contextWindow = 10_000;
+  const threshold = Math.floor(contextWindow * CONTEXT_COMPACT_RATIO);
+  const tokensOf = (messages: Array<{ role: "user" | "assistant"; content: string }>) =>
+    messages.reduce((sum, message) => sum + estimateContextTokens(message), 0);
+  const make = (chars: number) => [
+    { role: "user" as const, content: "x".repeat(Math.max(1, chars)) },
+    { role: "assistant" as const, content: "tail" },
+  ];
+  let chars = threshold * 4;
+  while (chars > 4 && tokensOf(make(chars)) >= threshold) chars -= 32;
+  const below = make(chars);
+  let atChars = chars + 32;
+  while (tokensOf(make(atChars)) < threshold) atChars += 32;
+  const at = make(atChars);
+  const belowEvents: Array<Record<string, unknown>> = [];
+  const atEvents: Array<Record<string, unknown>> = [];
+  compactProviderMessages(below, contextWindow, "normal", (event) => belowEvents.push(event));
+  compactProviderMessages(at, contextWindow, "normal", (event) => atEvents.push(event));
+  assert.equal(threshold, 8_000);
+  assert.ok(tokensOf(below) < threshold);
+  assert.ok(tokensOf(at) >= threshold);
+  assert.equal(belowEvents.length, 0);
+  assert.equal(atEvents[0]?.status, "started");
+  assert.equal(atEvents[0]?.systemTriggered, true);
+  assert.equal(atEvents[0]?.kind, "compaction");
+  assert.equal(atEvents[0]?.id, atEvents.at(-1)?.id);
 });
 
 test("compaction emits a structured start and completion event", () => {

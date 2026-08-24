@@ -10,6 +10,8 @@ import {
   type ToolPart,
   type WorkspaceItem,
 } from "@/lib/db-store";
+import { getProject, projectContextBlock } from "@/lib/projects";
+import { skillsCatalogPrompt } from "@/lib/skills";
 import { getUserAgentCwd, getMcpServers } from "@/lib/mcp";
 import { resolveAgentPath } from "@/lib/revert";
 import { appendRunEvent, enqueueJob, getJob, touchJob, updateJob } from "@/lib/db-jobs";
@@ -904,8 +906,11 @@ export async function runQueuedJob(job: AgentJob) {
     emit("status", { status: "running", message: "Waiting for the model…" });
     updateJob(job.id, { agentId: agent.agentId, runId: job.id });
     updateChat(job.chatId, { agentId: agent.agentId }, job.userId);
-    const prompt = [
-      metisAgentIdentity(),
+    const project = !job.incognito && !chat.incognito && chat.projectId ? getProject(chat.projectId, job.userId) : null;
+  const prompt = [
+    metisAgentIdentity(),
+    project ? projectContextBlock(project, job.userId) : "",
+    skillsCatalogPrompt(getGlobalModelSettings(job.userId)),
       `Current agent mode: ${activeMode.name}\n${activeMode.instructions}`,
       "Working style: precise, technically fluent, proactive. Act with your tools instead of describing steps. Reply in the user's language — German in, German out. No filler phrases. On clear orders decide and act yourself; ask back only when genuinely ambiguous or destructive.",
       runToolContract,

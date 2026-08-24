@@ -62,6 +62,7 @@ export async function PATCH(req: Request, { params }: Params) {
     pendingQuestion?: PendingChatQuestion | null;
     badge?: ChatBadge | null;
     touchUpdatedAt?: boolean;
+ projectId?: string | null;
   };
   try {
     body = (await req.json()) as {
@@ -81,6 +82,7 @@ export async function PATCH(req: Request, { params }: Params) {
       pendingQuestion?: PendingChatQuestion | null;
       badge?: ChatBadge | null;
       touchUpdatedAt?: boolean;
+ projectId?: string | null;
     };
   } catch {
     return Response.json({ error: "Invalid JSON body" }, { status: 400 });

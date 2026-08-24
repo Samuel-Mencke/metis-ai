@@ -391,7 +391,25 @@ export function getDatabase(): DatabaseSync {
     );
     CREATE INDEX IF NOT EXISTS notes_scope
       ON notes(owner_id, scope, chat_id, workspace_id, archived, updated_at DESC);
-    CREATE TABLE IF NOT EXISTS note_activities (
+    CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS projects_owner ON projects(owner_id, updated_at DESC);
+  CREATE TABLE IF NOT EXISTS project_files (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    owner_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    mime_type TEXT,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS project_files_project ON project_files(project_id, created_at DESC);
+  CREATE TABLE IF NOT EXISTS note_activities (
       id TEXT PRIMARY KEY,
       note_id TEXT NOT NULL,
       owner_id TEXT REFERENCES users(id) ON DELETE CASCADE,

@@ -3,7 +3,6 @@
 import {
   memo,
   useEffect,
-  useRef,
   useState,
   type AnchorHTMLAttributes,
   type HTMLAttributes,
@@ -302,51 +301,5 @@ export const Markdown = memo(function Markdown({
 });
 
 export const StreamingMarkdown = memo(function StreamingMarkdown({ content }: { content: string }) {
-  const targetRef = useRef(content);
-  const displayedRef = useRef("");
-  const visibleTokenRef = useRef("");
-  const [displayed, setDisplayed] = useState("");
-  const [visibleToken, setVisibleToken] = useState("");
-
-  useEffect(() => {
-    targetRef.current = content;
-    if (!content.startsWith(displayedRef.current)) {
-      displayedRef.current = "";
-      visibleTokenRef.current = "";
-      setDisplayed("");
-      setVisibleToken("");
-    }
-  }, [content]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (visibleTokenRef.current) {
-        const token = visibleTokenRef.current;
-        visibleTokenRef.current = "";
-        displayedRef.current += token;
-        setDisplayed(displayedRef.current);
-        setVisibleToken("");
-        return;
-      }
-
-      const remainder = targetRef.current.slice(displayedRef.current.length);
-      if (!remainder) return;
-      const token = remainder.match(/^\s*\S+\s*/)?.[0] || remainder[0];
-      visibleTokenRef.current = token;
-      setVisibleToken(token);
-    }, 45);
-
-    return () => window.clearInterval(timer);
-  }, []);
-
-  return (
-    <div className="streaming-markdown">
-      <Markdown content={displayed} streaming />
-      {visibleToken ? (
-        <span className="streaming-token-fade whitespace-pre-wrap">
-          {visibleToken}
-        </span>
-      ) : null}
-    </div>
-  );
+  return <Markdown content={content} streaming />;
 });

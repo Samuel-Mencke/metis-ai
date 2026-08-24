@@ -14,6 +14,9 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 
+// For first-run onboarding, the parent should open this dialog until completion and persist
+// onConnected/onSkip in localStorage under metis-onboarding-completed.
+
 type ProviderDefinition = {
   key: string;
   name: string;
@@ -46,12 +49,16 @@ export function ProviderSetupDialog({
   open,
   onOpenChange,
   onConnected,
+  onSkip,
   onStartChat,
+  embedded = false,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConnected: () => void;
+  onSkip?: () => void;
   onStartChat?: () => void;
+  embedded?: boolean;
 }) {
   const [providers, setProviders] = useState<ProviderDefinition[]>([]);
   const [selectedKey, setSelectedKey] = useState("");
@@ -214,10 +221,9 @@ export function ProviderSetupDialog({
     }
   }
 
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl">
-        <DialogHeader>
+  const body = (
+    <>
+        <DialogHeader className={embedded ? "p-0" : undefined}>
         <DialogTitle>{step === 4 ? "You’re ready to chat" : "Add your provider"}</DialogTitle>
           <DialogDescription>
             {step === 4
@@ -270,7 +276,8 @@ export function ProviderSetupDialog({
                 </button>
               ))}
             </div>
-            <div className="flex justify-end">
+            <div className="flex justify-end gap-2">
+ {onSkip && !embedded ? <Button type="button" variant="ghost" onClick={onSkip}>Skip for now</Button> : null}
               <Button type="button" onClick={() => setStep(2)} disabled={!selected}>
                 Continue <ArrowRight className="size-4" />
               </Button>
@@ -385,6 +392,16 @@ export function ProviderSetupDialog({
             {error ? <p className="text-sm text-destructive">{error}</p> : null}
           </div>
         )}
+    </>
+  );
+  if (embedded) {
+    if (!open) return null;
+    return <div className="space-y-4">{body}</div>;
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-xl" onPointerDownOutside={(event) => event.preventDefault()}>
+        {body}
       </DialogContent>
     </Dialog>
   );

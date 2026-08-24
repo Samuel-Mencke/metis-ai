@@ -15,7 +15,7 @@ export type ToolPart = {
   name: string;
   status: "running" | "completed" | "error" | string;
   detail?: string;
-  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "automation" | "other";
+  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "automation" | "compaction" | "other";
   path?: string;
   input?: string;
   result?: string;
@@ -81,9 +81,22 @@ export type ChatMessage = {
 };
 
 export type MessagePart =
-  | { type: "thinking"; content: string; done?: boolean; durationMs?: number }
-  | ({ type: "tool" } & ToolPart)
-  | { type: "text"; content: string };
+ | { type: "thinking"; content: string; done?: boolean; durationMs?: number }
+ | ({ type: "tool" } & ToolPart)
+ | {
+ type: "compaction";
+ id: string;
+ name: "context_compaction";
+ kind: "compaction";
+ status: "started" | "completed" | "error";
+ systemTriggered: true;
+ beforeTokens?: number;
+ targetTokens?: number;
+ afterTokens?: number;
+ removedMessages?: number;
+ message?: string;
+ }
+ | { type: "text"; content: string };
 
 export type WorkspaceItem = {
   id: string;
@@ -137,6 +150,33 @@ export type SharedNote = {
   updatedAt: string;
   archived: boolean;
   version: number;
+  projectId?: string;
+};
+
+export type Project = {
+  id: string;
+  ownerId?: string;
+  name: string;
+  icon: string;
+  color: string;
+  instructions: string;
+  memoryMode: "default" | "project_only";
+  logoMimeType?: string;
+  logoStoredName?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ProjectFile = {
+  id: string;
+  projectId: string;
+  ownerId?: string;
+  name: string;
+  mimeType: string;
+  text?: string;
+  storedName?: string;
+  size: number;
+  createdAt: string;
 };
 
 export type NoteActivity = {
@@ -287,8 +327,22 @@ export type ChatShare = {
   updatedAt: string;
 };
 
+export type ChatInputState = {
+  composer: string;
+  queuedFollowUps: Array<{ id: string; text: string; referenceText?: string }>;
+  browserUrl?: string;
+  extraFields?: Record<string, unknown>;
+  updatedAt: string;
+};
+
 export type ChatSessionState = {
   input?: string;
+  /** ISO timestamp for last-write-wins merge of composer text across devices. */
+  inputUpdatedAt?: string;
+  queuedUpdatedAt?: string;
+  browserUrl?: string;
+  browserUrlUpdatedAt?: string;
+  extraFields?: Record<string, unknown>;
   remoteCwd?: string;
   terminalCwd?: string;
   fileCwd?: string;
@@ -374,6 +428,7 @@ export type Chat = {
   lastMessageSent?: string;
   createdAt: string;
   updatedAt: string;
+  projectId?: string;
 };
 
 export type ChatIndexEntry = {
@@ -394,6 +449,7 @@ export type ChatIndexEntry = {
   archived?: boolean;
   lastMessageSent?: string;
   share?: Omit<ChatShare, "passwordHash">;
+  projectId?: string;
 };
 
 export type Memory = {
@@ -440,6 +496,7 @@ export type GlobalModelSettings = {
     browser?: boolean;
   };
   customModes?: AgentMode[];
+  enabledSkills?: Record<string, boolean>;
 };
 
 function ensureDirs() {

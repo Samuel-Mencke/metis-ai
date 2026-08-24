@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { EditableMarkdown } from "@/components/editable-markdown";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { NotePinDialog } from "@/components/note-pin-dialog";
+import { NoteProjectMenu, type NoteProjectOption } from "@/components/note-project-menu";
 import { cn } from "@/lib/utils";
 
 type View = { x: number; y: number; zoom: number };
@@ -40,11 +41,13 @@ export function NotesVoid({
   focusNoteId,
   pinnedOnly = false,
   compact = false,
+  projectId = null,
 }: {
   chatId?: string | null;
   focusNoteId?: string | null;
   pinnedOnly?: boolean;
   compact?: boolean;
+  projectId?: string | null;
 }) {
   const [notes, setNotes] = useState<SharedNote[]>([]);
   const [globalPinnedIds, setGlobalPinnedIds] = useState<string[]>([]);
@@ -59,11 +62,34 @@ export function NotesVoid({
   const [unpinTarget, setUnpinTarget] = useState<{ note: SharedNote; count: number } | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "saving" | "saved" | "offline" | "error">("loading");
   const [error, setError] = useState("");
+  const [projects, setProjects] = useState<NoteProjectOption[]>([]);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const saveTimers = useRef(new Map<string, number>());
   const loadAbortRef = useRef<AbortController | null>(null);
   const hasInitializedViewRef = useRef(false);
+ const notesRef = useRef<SharedNote[]>([]);
+ const localDraftsRef = useRef(new Map<string, { title?: string; content?: string }>());
+ const dirtyNoteIdsRef = useRef(new Set<string>());
+ const consumedFocusNoteIdRef = useRef<string | null>(null);
+ notesRef.current = notes;
+
+ const mergeLoadedNotes = useCallback((serverNotes: SharedNote[]) => {
+ const currentById = new Map(notesRef.current.map((note) => [note.id, note]));
+ const merged = serverNotes.map((serverNote) => {
+ const local = currentById.get(serverNote.id);
+ const draft = localDraftsRef.current.get(serverNote.id);
+ return draft && local
+ ? { ...serverNote, ...(draft.title !== undefined ? { title: draft.title } : {}), ...(draft.content !== undefined ? { content: draft.content } : {}) }
+ : serverNote;
+ });
+ const serverIds = new Set(serverNotes.map((note) => note.id));
+ for (const local of notesRef.current) {
+ if (dirtyNoteIdsRef.current.has(local.id) && !serverIds.has(local.id)) merged.push(local);
+ }
+ notesRef.current = merged;
+ setNotes(merged);
+ }, []);
 
   const load = useCallback(async () => {
     loadAbortRef.current?.abort();
@@ -89,7 +115,7 @@ export function NotesVoid({
         setGlobalPinnedIds(pinBody.globalNoteIds || []);
         setConfiguredPinnedIds(pinBody.pinnedNoteIds || []);
       }
-      setNotes(next);
+      mergeLoadedNotes(next);
       if (!chatId) {
         const pinResponse = await fetch("/api/context/pins", { cache: "no-store", signal: controller.signal });
         const pinBody = await pinResponse.json().catch(() => ({})) as { globalNoteIds?: string[]; configuredNoteIds?: string[] };
@@ -108,7 +134,7 @@ export function NotesVoid({
       setError(cause instanceof Error ? cause.message : "Could not load notes.");
       setStatus("offline");
     }
-  }, [chatId, pinnedOnly]);
+  }, [chatId, mergeLoadedNotes, pinnedOnly]);
 
   useEffect(() => {
     const timers = saveTimers.current;
@@ -120,9 +146,25 @@ export function NotesVoid({
   }, [load]);
 
   useEffect(() => {
-    if (!focusNoteId) return;
+    const loadProjects = () => {
+      void fetch("/api/projects", { cache: "no-store" })
+        .then(async (response) => {
+          const body = (await response.json().catch(() => ({}))) as { projects?: NoteProjectOption[] };
+          if (response.ok) setProjects(body.projects || []);
+        })
+        .catch(() => undefined);
+    };
+    loadProjects();
+    const refresh = () => loadProjects();
+    window.addEventListener("metis:projects-changed", refresh);
+    return () => window.removeEventListener("metis:projects-changed", refresh);
+  }, []);
+
+  useEffect(() => {
+    if (!focusNoteId || consumedFocusNoteIdRef.current === focusNoteId) return;
     const note = notes.find((item) => item.id === focusNoteId);
     if (!note) return;
+ consumedFocusNoteIdRef.current = focusNoteId;
     setFrontNoteId(note.id);
     setView((current) => {
       const bounds = surfaceRef.current?.getBoundingClientRect();
@@ -166,56 +208,107 @@ export function NotesVoid({
 
   const visibleNotes = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
-    return query
-      ? notes.filter((note) => note.content.toLocaleLowerCase().includes(query))
-      : notes;
-  }, [notes, search]);
+    if (!query) return notes;
+    const projectNameById = new Map(
+      projects.map((project) => [project.id, project.name.toLocaleLowerCase()]),
+    );
+    return notes.filter((note) => {
+      if (note.content.toLocaleLowerCase().includes(query)) return true;
+      if (note.title.toLocaleLowerCase().includes(query)) return true;
+      const projectName = note.projectId ? projectNameById.get(note.projectId) : undefined;
+      return Boolean(projectName?.includes(query));
+    });
+  }, [notes, projects, search]);
 
   const orderedNotes = useMemo(
     () => [...notes].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)),
     [notes],
   );
 
-  const update = useCallback(async (note: SharedNote, patch: Partial<SharedNote>) => {
-    setStatus("saving");
-    try {
-      const response = await fetch(`/api/notes/${encodeURIComponent(note.id)}`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          "Idempotency-Key": requestKey(),
-        },
-        body: JSON.stringify({ ...patch, version: note.version }),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        if (response.status === 409 && body.note) {
-          setNotes((current) => current.map((item) => item.id === note.id ? body.note as SharedNote : item));
-        }
-        throw new Error(body.error || "Could not save note.");
-      }
-      setNotes((current) => current.map((item) => item.id === note.id ? body.note as SharedNote : item));
-      setStatus("saved");
-      setError("");
-    } catch (cause) {
-      setStatus("error");
-      setError(cause instanceof Error ? cause.message : "Could not save note.");
-    }
-  }, []);
+  const mergeServerNote = useCallback((serverNote: SharedNote, local?: SharedNote) => {
+ const draft = localDraftsRef.current.get(serverNote.id);
+ return draft && local
+ ? { ...serverNote, ...(draft.title !== undefined ? { title: draft.title } : {}), ...(draft.content !== undefined ? { content: draft.content } : {}) }
+ : serverNote;
+ }, []);
 
-  const scheduleUpdate = useCallback((note: SharedNote, patch: Partial<SharedNote>) => {
-    setNotes((current) => current.map((item) => item.id === note.id ? { ...item, ...patch } : item));
-    const existing = saveTimers.current.get(note.id);
-    if (existing) window.clearTimeout(existing);
-    const timer = window.setTimeout(() => {
-      const current = notes.find((item) => item.id === note.id) || note;
-      void update({ ...current, ...patch }, patch);
-      saveTimers.current.delete(note.id);
-    }, 500);
-    saveTimers.current.set(note.id, timer);
-  }, [notes, update]);
+ const update = useCallback(async (note: SharedNote, patch: Omit<Partial<SharedNote>, "projectId"> & { projectId?: string | null }) => {
+ setStatus("saving");
+ try {
+ const response = await fetch(`/api/notes/${encodeURIComponent(note.id)}`, {
+ method: "PATCH",
+ headers: {
+ "Content-Type": "application/json",
+ "Idempotency-Key": requestKey(),
+ },
+ body: JSON.stringify({ ...patch, version: note.version }),
+ });
+ const body = await response.json().catch(() => ({}));
+ if (!response.ok) {
+ if (response.status === 409 && body.note) {
+ const serverNote = body.note as SharedNote;
+ const current = notesRef.current.find((item) => item.id === note.id);
+ const merged = mergeServerNote(serverNote, current);
+ notesRef.current = notesRef.current.map((item) => item.id === note.id ? merged : item);
+ setNotes(notesRef.current);
+ }
+ throw new Error(body.error || "Could not save note.");
+ }
+ const returnedNote = body.note as SharedNote;
+ const draft = localDraftsRef.current.get(note.id);
+ if (draft) {
+ if (patch.title !== undefined && draft.title === patch.title) delete draft.title;
+ if (patch.content !== undefined && draft.content === patch.content) delete draft.content;
+ if (draft.title === undefined && draft.content === undefined) {
+ localDraftsRef.current.delete(note.id);
+ dirtyNoteIdsRef.current.delete(note.id);
+ }
+ }
+ const current = notesRef.current.find((item) => item.id === note.id);
+ const merged = mergeServerNote(returnedNote, current);
+ notesRef.current = notesRef.current.map((item) => item.id === note.id ? merged : item);
+ setNotes(notesRef.current);
+ setStatus("saved");
+ setError("");
+ } catch (cause) {
+ setStatus("error");
+ setError(cause instanceof Error ? cause.message : "Could not save note.");
+ }
+ }, [mergeServerNote]);
 
-  const create = async (kind: "note" | "project" = "note") => {
+ const scheduleUpdate = useCallback((note: SharedNote, patch: Partial<SharedNote>) => {
+ const current = notesRef.current.find((item) => item.id === note.id) || note;
+ if (patch.title !== undefined || patch.content !== undefined) {
+ const draft = localDraftsRef.current.get(note.id) || {};
+ if (patch.title !== undefined) draft.title = patch.title;
+ if (patch.content !== undefined) draft.content = patch.content;
+ localDraftsRef.current.set(note.id, draft);
+ dirtyNoteIdsRef.current.add(note.id);
+ }
+ const nextNotes = notesRef.current.map((item) => item.id === note.id ? { ...item, ...patch } : item);
+ notesRef.current = nextNotes;
+ setNotes(nextNotes);
+ const existing = saveTimers.current.get(note.id);
+ if (existing) window.clearTimeout(existing);
+ const timer = window.setTimeout(() => {
+ const latest = notesRef.current.find((item) => item.id === note.id) || { ...current, ...patch };
+ void update(latest, patch);
+ saveTimers.current.delete(note.id);
+ }, 500);
+ saveTimers.current.set(note.id, timer);
+ }, [update]);
+
+ const setNoteProject = useCallback((note: SharedNote, nextProjectId: string | null) => {
+   const current = notesRef.current.find((item) => item.id === note.id) || note;
+   const next = { ...current };
+   if (nextProjectId) next.projectId = nextProjectId;
+   else delete next.projectId;
+   notesRef.current = notesRef.current.map((item) => item.id === note.id ? next : item);
+   setNotes(notesRef.current);
+   void update(current, { projectId: nextProjectId });
+ }, [update]);
+
+ const create = async () => {
     setStatus("saving");
     try {
       const response = await fetch("/api/notes", {
@@ -223,19 +316,19 @@ export function NotesVoid({
         headers: { "Content-Type": "application/json", "Idempotency-Key": requestKey() },
         body: JSON.stringify({
           scope: "global",
-          kind,
-          title: kind === "project" ? "New project" : undefined,
-          content: "",
-          todos: kind === "project" ? [] : undefined,
+          kind: "note",
+                   content: "",
+          ...(projectId ? { projectId } : {}),
           position: { x: -view.x + 80, y: -view.y + 80 },
-          size: kind === "project" ? { width: 340, height: 280 } : undefined,
-          color: NOTE_COLORS[notes.length % NOTE_COLORS.length],
+                   color: NOTE_COLORS[notes.length % NOTE_COLORS.length],
         }),
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || "Could not create note.");
-      setNotes((current) => [body.note as SharedNote, ...current.filter((item) => item.id !== body.note.id)]);
-      await load();
+      const created = body.note as SharedNote;
+      const nextNotes = [created, ...notesRef.current.filter((item) => item.id !== created.id)];
+      notesRef.current = nextNotes;
+      setNotes(nextNotes);
       setStatus("saved");
     } catch (cause) {
       setStatus("error");
@@ -439,8 +532,7 @@ export function NotesVoid({
           {status === "loading" ? "Loading…" : status === "saving" ? "Saving…" : status === "offline" ? "Offline" : status === "error" ? "Error" : status === "saved" ? "Saved" : `${visibleNotes.length} notes`}
         </span>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          {!compact ? <Button type="button" size="xs" onClick={() => void create("note")}><Plus className="size-3.5" />New note</Button> : null}
-          {!compact ? <Button type="button" size="xs" variant="outline" onClick={() => void create("project")}><Plus className="size-3.5" />New project</Button> : null}
+          {!compact ? <Button type="button" size="xs" onClick={() => void create()}><Plus className="size-3.5" />New note</Button> : null}
           <Button type="button" size="xs" variant="ghost" title="Arrange notes in a tidy, consistent layout" aria-label="Arrange notes in a tidy, consistent layout" onClick={() => arrangeNotes()}><LayoutGrid className="size-3.5" />Arrange</Button>
           <Button type="button" size="icon-xs" variant="ghost" title="Fit all notes" aria-label="Fit all notes" onClick={() => fitAll()}><Maximize2 className="size-3.5" /></Button>
           <Button type="button" size="icon-xs" variant="ghost" title="Zoom out" aria-label="Zoom out" onClick={() => setView((current) => ({ ...current, zoom: Math.max(0.2, current.zoom - 0.1) }))}><ZoomOut className="size-3.5" /></Button>
@@ -557,7 +649,8 @@ export function NotesVoid({
           setDrag(null);
           document.body.style.removeProperty("user-select");
           document.body.style.removeProperty("cursor");
-          if (surfaceRef.current?.hasPointerCapture(event.pointerId)) surfaceRef.current.releasePointerCapture(event.pointerId);
+          const captureTarget = event.target instanceof Element ? event.target : event.currentTarget;
+ if (captureTarget.hasPointerCapture(event.pointerId)) captureTarget.releasePointerCapture(event.pointerId);
         }}
         onPointerCancel={() => {
           setDrag(null);
@@ -583,6 +676,7 @@ export function NotesVoid({
               backgroundColor: note.color,
               ["--note-color" as string]: note.color,
               zIndex: note.id === frontNoteId ? visibleNotes.length + 1 : index + 1,
+              touchAction: "none",
             }}
             onPointerDown={(event) => {
               event.stopPropagation();
@@ -592,7 +686,7 @@ export function NotesVoid({
               setDrag({ id: note.id, dx: point.x - note.position.x, dy: point.y - note.position.y, mode: "move" });
               document.body.style.userSelect = "none";
               document.body.style.cursor = "move";
-              surfaceRef.current?.setPointerCapture(event.pointerId);
+              event.currentTarget.setPointerCapture(event.pointerId);
             }}
           >
             <div className="flex select-none items-center gap-1 border-b border-black/10 px-2 py-1">
@@ -632,11 +726,11 @@ export function NotesVoid({
                   {note.title || (note.kind === "project" ? "Untitled project" : "Untitled note")}
                 </button>
               )}
-              {note.kind === "project" ? (
-                <span className="rounded bg-black/10 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wide text-black/70">
-                  Project
-                </span>
-              ) : null}
+              <NoteProjectMenu
+                projectId={note.projectId}
+                projects={projects}
+                onChange={(nextProjectId) => setNoteProject(note, nextProjectId)}
+              />
               <Button
                 type="button"
                 size="icon-xs"

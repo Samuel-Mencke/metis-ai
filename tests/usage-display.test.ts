@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   matchUsageProvider,
   parseCursorUsageBody,
+ usageKeyForProvider,
   selectPrimaryUsageWindow,
  usageKeyForSelection,
   type UsageProvider,
@@ -12,6 +14,19 @@ const providers: UsageProvider[] = [
   { key: "zai", name: "z.ai Coding Plan", status: "live", windows: [{ label: "5h", usedPercent: 12, resetsAt: null }] },
   { key: "codex", name: "Codex", status: "no_auth", windows: [], error: "login required" },
 ];
+
+test("unknown and empty usage selections do not invent quota keys", () => {
+ assert.equal(usageKeyForProvider("unknown-provider"), null);
+ assert.equal(usageKeyForSelection({ providerId: "unknown-provider", connectionId: "connection-1" }), null);
+ assert.equal(usageKeyForSelection({}), null);
+});
+
+test("plan usage paths use the runtime home directory", () => {
+ const source = readFileSync(new URL("../lib/plan-usage.ts", import.meta.url), "utf8");
+ assert.equal(source.includes("/home/samuel"), false);
+ assert.match(source, /homedir\(\)/);
+ assert.match(source, /path\.join\(homedir\(\), [\"']AiApi-Wrapper\/\.env[\"']\)/);
+});
 
 test("usage selection resolves a compatible z.ai connection by its real connection metadata", () => {
   assert.equal(usageKeyForSelection({

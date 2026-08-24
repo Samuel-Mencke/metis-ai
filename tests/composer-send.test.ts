@@ -4,6 +4,7 @@ import {
   composerLiveText,
   decideComposerSend,
   isDuplicateComposerSend,
+  mergeQueuedFollowUps,
   shouldAutoDrainQueue,
   shouldIgnoreComposerEnter,
 } from "../lib/composer-send";
@@ -114,6 +115,44 @@ test("shouldAutoDrainQueue waits for sendInFlight and the drain lock", () => {
       queueLength: 1,
     }),
     true,
+  );
+  assert.equal(
+    shouldAutoDrainQueue({
+      busy: false,
+      sendInFlight: false,
+      waitingForQuestion: false,
+      drainBlocked: false,
+      drainInProgress: false,
+      queueLength: 1,
+      hasActiveRuntime: true,
+    }),
+    false,
+  );
+});
+
+test("mergeQueuedFollowUps keeps local follow-ups when a stale snapshot is empty", () => {
+  const local = [{ id: "q-1", text: "later" }];
+  assert.deepEqual(
+    mergeQueuedFollowUps(local, []),
+    local,
+  );
+});
+
+test("mergeQueuedFollowUps drops follow-ups that already became user messages", () => {
+  const local = [{ id: "q-1", text: "later" }, { id: "q-2", text: "after that" }];
+  const server = [{ id: "q-2", text: "after that" }];
+  assert.deepEqual(
+    mergeQueuedFollowUps(local, server, { consumedIds: ["q-1"] }),
+    [{ id: "q-2", text: "after that" }],
+  );
+});
+
+test("mergeQueuedFollowUps prefers the local copy so attachments survive a GET", () => {
+  const local = [{ id: "q-1", text: "with file", files: ["a"] }];
+  const server = [{ id: "q-1", text: "with file" }];
+  assert.deepEqual(
+    mergeQueuedFollowUps(local, server),
+    local,
   );
 });
 

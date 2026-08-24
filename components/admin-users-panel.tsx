@@ -18,15 +18,21 @@ type AdminUser = {
 
 type OsUser = {
   username: string;
-  uid: number;
-  gid: number;
+  uid?: number;
+  gid?: number;
   home: string;
 };
+
+type OsPlatform = "win32" | "darwin" | "linux";
+
+function platformLabel(platform: OsPlatform) {
+ return platform === "win32" ? "Windows user" : platform === "darwin" ? "Mac user" : "Linux user";
+}
 
 const selectClassName =
   "h-8 w-full min-w-0 rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 dark:bg-input/30";
 
-function LinuxUserField({
+function OsUserField({
   value,
   onChange,
   osUsers,
@@ -42,16 +48,16 @@ function LinuxUserField({
       <Input
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        placeholder="Linux user (must exist on host)"
+        placeholder="OS user (must exist on host)"
         aria-label={ariaLabel}
         className="h-8 font-normal"
         autoComplete="off"
       />
     );
   }
-  const options = osUsers.some((user) => user.username === value) || !value
+  const options: OsUser[] = osUsers.some((user) => user.username === value) || !value
     ? osUsers
-    : [{ username: value, uid: -1, gid: -1, home: "" }, ...osUsers];
+    : [{ username: value, uid: undefined, gid: undefined, home: "" }, ...osUsers];
   return (
     <select
       value={value}
@@ -62,7 +68,7 @@ function LinuxUserField({
       <option value="">None</option>
       {options.map((user) => (
         <option key={user.username} value={user.username}>
-          {user.uid > 0 ? `${user.username} · uid ${user.uid}` : user.username}
+          {user.uid !== undefined ? `${user.username} · uid ${user.uid}` : user.username}
         </option>
       ))}
     </select>
@@ -72,6 +78,7 @@ function LinuxUserField({
 export function AdminUsersPanel() {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [osUsers, setOsUsers] = useState<OsUser[]>([]);
+ const [platform, setPlatform] = useState<OsPlatform>("linux");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [username, setUsername] = useState("");
@@ -95,7 +102,8 @@ export function AdminUsersPanel() {
       if (!usersResponse.ok) throw new Error(usersBody.error || "Could not load users.");
       setUsers(usersBody.users || []);
       if (osResponse.ok) {
-        const osBody = await osResponse.json().catch(() => ({})) as { users?: OsUser[] };
+ const osBody = await osResponse.json().catch(() => ({})) as { platform?: OsPlatform; users?: OsUser[] };
+ setPlatform(osBody.platform || "linux");
         setOsUsers(osBody.users || []);
       }
     } catch (error) {
@@ -176,11 +184,11 @@ export function AdminUsersPanel() {
         body: JSON.stringify({ osUsername: next || null }),
       });
       const body = await response.json().catch(() => ({})) as { error?: string };
-      if (!response.ok) throw new Error(body.error || "Could not update Linux user.");
-      toast.success("Linux user updated");
+      if (!response.ok) throw new Error(body.error || "Could not update OS user.");
+      toast.success(`${platformLabel(platform)} updated`);
       await load();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not update Linux user.");
+      toast.error(error instanceof Error ? error.message : "Could not update OS user.");
     } finally {
       setBusy(false);
     }
@@ -252,7 +260,7 @@ export function AdminUsersPanel() {
             Users
           </h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            Admins can create accounts, assign a Linux user, set workspace folders, and promote other admins.
+            Admins can create accounts, assign an OS user, set workspace folders, and promote other admins.
           </p>
         </div>
         <Button type="button" size="xs" variant="ghost" onClick={() => void load()} disabled={loading}>
@@ -268,12 +276,12 @@ export function AdminUsersPanel() {
           <Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password (min 8)" aria-label="New password" />
         </div>
         <label className="flex flex-col gap-1 text-[11px] font-medium text-muted-foreground">
-          Linux user
-          <LinuxUserField
+          {platformLabel(platform)}
+          <OsUserField
             value={osUsername}
             onChange={selectCreateOsUser}
             osUsers={osUsers}
-            ariaLabel="New Linux user"
+            ariaLabel={`New ${platformLabel(platform)}`}
           />
         </label>
         <Input
@@ -318,13 +326,13 @@ export function AdminUsersPanel() {
                 </div>
               </div>
               <label className="flex flex-col gap-1 text-[11px] font-medium text-muted-foreground">
-                Linux user
+                {platformLabel(platform)}
                 <div className="flex gap-1">
-                  <LinuxUserField
+                  <OsUserField
                     value={osEdits[user.id] ?? user.osUsername ?? ""}
                     onChange={(value) => setOsEdits((current) => ({ ...current, [user.id]: value }))}
                     osUsers={osUsers}
-                    ariaLabel={`${user.username} Linux user`}
+                    ariaLabel={`${user.username} ${platformLabel(platform)}`}
                   />
                   <Button type="button" size="xs" disabled={busy} onClick={() => void saveOsUser(user)}>Save</Button>
                 </div>

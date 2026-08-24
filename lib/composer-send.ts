@@ -56,6 +56,7 @@ export function shouldAutoDrainQueue(options: {
   drainBlocked: boolean;
   drainInProgress: boolean;
   queueLength: number;
+  hasActiveRuntime?: boolean;
 }) {
   return (
     !options.busy &&
@@ -63,6 +64,35 @@ export function shouldAutoDrainQueue(options: {
     !options.waitingForQuestion &&
     !options.drainBlocked &&
     !options.drainInProgress &&
+    !options.hasActiveRuntime &&
     options.queueLength > 0
   );
+}
+
+export function mergeQueuedFollowUps<T extends { id: string }>(
+  local: T[],
+  server: T[],
+  options?: { consumedIds?: Iterable<string> },
+): T[] {
+  const consumed = new Set(options?.consumedIds);
+  const byId = new Map<string, T>();
+  for (const item of server) {
+    if (!consumed.has(item.id)) byId.set(item.id, item);
+  }
+  for (const item of local) {
+    if (consumed.has(item.id)) {
+      byId.delete(item.id);
+      continue;
+    }
+    byId.set(item.id, item);
+  }
+  const merged: T[] = [];
+  const seen = new Set<string>();
+  for (const item of [...local, ...server]) {
+    const next = byId.get(item.id);
+    if (!next || seen.has(next.id)) continue;
+    seen.add(next.id);
+    merged.push(next);
+  }
+  return merged;
 }

@@ -35,10 +35,10 @@ const CACHE_TTL_MS = 60_000;
 const cache = new Map<string, UsageSnapshot>();
 const inflight = new Map<string, Promise<UsageSnapshot>>();
 
-const HOME = process.env.HOME || "/home/samuel";
+const HOME = homedir();
 const CODEX_BIN = process.env.CODEX_BIN || `${HOME}/.npm-global/bin/codex`;
 const GATEWAY_DB = process.env.GATEWAY_DB_PATH || `${HOME}/AiApi-Wrapper/data/gateway.db`;
-const WRAPPER_ENV = `${HOME}/AiApi-Wrapper/.env`;
+const WRAPPER_ENV = process.env.WRAPPER_ENV || path.join(homedir(), "AiApi-Wrapper/.env");
 
 function readWrapperEnvKey(names: string[]): string | undefined {
   try {

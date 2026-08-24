@@ -12,11 +12,15 @@ import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import {
   appendMessage,
   getChat,
+  getGlobalModelSettings,
   updateChat,
   upsertMessage,
   type Chat,
   type ToolPart,
 } from "@/lib/db-store";
+import { getProject, projectContextBlock } from "@/lib/projects";
+import type { MessagePart } from "@/lib/store";
+import { skillsCatalogPrompt } from "@/lib/skills";
 import { getJob, appendRunEvent, updateJob } from "@/lib/db-jobs";
 import { buildAttachmentPrompt } from "@/lib/uploads";
 import { config } from "@/lib/config";
@@ -47,7 +51,8 @@ import { metisAgentIdentity } from "@/lib/agent-identity";
 import { compress } from "@/lib/compression";
 import {
   contextModeOf,
-  effectiveContextBudget,
+  CONTEXT_COMPACT_RATIO,
+ effectiveContextBudget,
   estimateContextTokens,
   type ContextMode,
   contextWindowForSelection,
@@ -83,6 +88,7 @@ type ProviderContext = {
   onTool: (tool: ToolPart) => void;
   onThinking: (data: { text?: string; replace?: boolean; done?: boolean; durationMs?: number }) => void;
   onStream: (data: Record<string, unknown>) => void;
+ onCompaction: (event: CompactionEvent) => void;
 };
 
 function telemetryCategory(message: string): TaskCategory {
@@ -104,6 +110,10 @@ function finalizeAlternativeTools(tools: ToolPart[]) {
 
 type CompactionEvent = {
   type: "compaction";
+ id: string;
+ name: "context_compaction";
+ kind: "compaction";
+ systemTriggered: true;
   status: "started" | "completed" | "error";
   beforeTokens?: number;
   targetTokens?: number;
@@ -238,8 +248,12 @@ function providerPrompt(
         reference.content ? `  Context:\n${reference.content}` : "",
       ].filter(Boolean).join("\n")).join("\n")
     : "";
+  const chat = getChat(job.chatId, job.userId);
+  const project = chat?.projectId ? getProject(chat.projectId, job.userId) : null;
   const prompt = [
     metisAgentIdentity(),
+    project ? projectContextBlock(project, job.userId) : "",
+    skillsCatalogPrompt(getGlobalModelSettings(job.userId)),
     "Working style: precise, technically fluent, proactive. Act with your tools instead of describing steps. Reply in the user's language — German in, German out. No filler phrases. On clear orders decide and act yourself; ask back only when genuinely ambiguous or destructive.",
     "Answer the user directly and do not claim to have used tools you were not given.",
     "If web_search or x_search are available, use them for current documentation or facts instead of narrating that you are researching.",
@@ -454,7 +468,12 @@ function compactIfNeeded(
   if (!contextWindow || contextWindow <= 0 || messages.length < 2) return messages;
   const total = messages.reduce((sum, message) => sum + estimateContextTokens(message), 0);
   const budget = effectiveContextBudget(contextWindow, contextMode);
-  if (total <= budget) return messages;
+ if (total / contextWindow < CONTEXT_COMPACT_RATIO) return messages;
+ // One compact per pressure wave. A recap is already canonical; compacting it
+ // again would drop the tail and break idempotency on the next runner step.
+ if (messages.some((message) => modelMessageText(message).includes(COMPACTION_MARKER))) {
+   return messages;
+ }
 
   // A prior recap is already canonical. Re-summarizing it would make repeated
   // compaction non-idempotent and can slowly erase the original task.
@@ -471,8 +490,13 @@ function compactIfNeeded(
     tailTokens += estimateContextTokens(message);
   }
   const oldMessages = source.slice(0, index);
+ const compactionId = `context-compaction-${Date.now()}`;
   onCompaction?.({
     type: "compaction",
+ id: compactionId,
+ name: "context_compaction",
+ kind: "compaction",
+ systemTriggered: true,
     status: "started",
     beforeTokens: total,
     targetTokens: budget,
@@ -523,6 +547,10 @@ function compactIfNeeded(
   }
   onCompaction?.({
     type: "compaction",
+ id: compactionId,
+ name: "context_compaction",
+ kind: "compaction",
+ systemTriggered: true,
     status: "completed",
     beforeTokens: total,
     targetTokens: budget,
@@ -1033,7 +1061,7 @@ async function runAiSdk(context: ProviderContext): Promise<ProviderResult> {
     context.job,
     resolvedContextWindow(context),
     contextModeOf(effectiveModelParams(context.chat, context.job)),
-    (event) => context.onStream(event),
+    context.onCompaction,
   );
   const route = routeTask(context.job.message);
   const stream = (nextMessages: ModelMessage[], remainingSteps: number) => streamText({
@@ -1107,7 +1135,7 @@ async function runOAuthAiSdk(
       context.job,
       resolvedContextWindow(context),
       contextModeOf(effectiveModelParams(context.chat, context.job)),
-      (event) => context.onStream(event),
+      context.onCompaction,
     );
     const route = routeTask(context.job.message);
     const stream = (nextMessages: ModelMessage[], remainingSteps: number) => streamText({
@@ -1602,6 +1630,7 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
   let chat = getChat(job.chatId, job.userId) || initialChat;
   let text = "";
   const tools: ToolPart[] = [];
+ const parts: MessagePart[] = [];
   const controller = new AbortController();
   let modelSwitchTarget: { modelId: string; modelParams?: Array<{ id: string; value: string }> } | null = null;
   const cancellationWatcher = setInterval(() => {
@@ -1629,6 +1658,7 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       role: "assistant",
       content: text,
       ...(tools.length ? { tools: persistToolsForMessage(job.chatId, assistantMessageId, tools) } : {}),
+ ...(parts.length ? { parts } : {}),
     });
     checkpointDirty = false;
   };
@@ -1715,7 +1745,13 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       ...(normalizedTool.subagent ? { subagent: normalizedTool.subagent } : {}),
     });
   };
-  const onThinking = (data: { text?: string; replace?: boolean; done?: boolean; durationMs?: number }) => {
+  const onCompaction = (event: CompactionEvent) => {
+ const part: MessagePart = { ...event };
+ parts.push(part);
+ checkpoint(true);
+ emit("compaction", event);
+ };
+ const onThinking = (data: { text?: string; replace?: boolean; done?: boolean; durationMs?: number }) => {
     emit("thinking", data);
     if (data.done !== true) {
       emit("status", { status: "running", message: "Thinking…" });
@@ -1740,6 +1776,7 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       signal: controller.signal,
       onText,
       onTool,
+ onCompaction,
       onThinking: (data) => emit("thinking", data),
       onStream: (data) => emit(data.type === "compaction" ? "compaction" : "stream", data),
     });
@@ -1809,6 +1846,7 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       role: "assistant",
       content: text,
       ...(tools.length ? { tools: persistToolsForMessage(job.chatId, assistantMessageId, tools) } : {}),
+ ...(parts.length ? { parts } : {}),
       runMetadata: {
         providerId: definition.key,
         modelId: parsed.modelId,
@@ -1876,6 +1914,7 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
         content: text,
         errorMessage: message,
         ...(tools.length ? { tools: persistToolsForMessage(job.chatId, assistantMessageId, tools) } : {}),
+ ...(parts.length ? { parts } : {}),
       });
       updateChat(job.chatId, {
         runStatus: "error",

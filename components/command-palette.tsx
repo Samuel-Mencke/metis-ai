@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ArrowRight,
   FileDown,
+ FolderKanban,
   LayoutPanelLeft,
   MessageSquare,
   PanelLeft,
@@ -43,6 +44,13 @@ type NoteSearchResult = {
   updatedAt: string;
 };
 
+type ProjectSearchResult = {
+ id: string;
+ name: string;
+ color: string;
+ icon: string;
+};
+
 type Props = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -50,6 +58,7 @@ type Props = {
   onOpenChat: (chatId: string, messageId?: string) => void;
   onOpenNotes: () => void;
   onOpenNote: (noteId: string) => void;
+ onOpenProject: (projectId: string) => void;
   onOpenMemories: () => void;
   onOpenSettings: () => void;
   onOpenWorkspace: () => void;
@@ -91,6 +100,7 @@ export function CommandPalette({
   onOpenChat,
   onOpenNotes,
   onOpenNote,
+ onOpenProject,
   onOpenMemories,
   onOpenSettings,
   onOpenWorkspace,
@@ -102,6 +112,7 @@ export function CommandPalette({
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [noteResults, setNoteResults] = useState<NoteSearchResult[]>([]);
+ const [projectResults, setProjectResults] = useState<ProjectSearchResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
 
@@ -117,6 +128,7 @@ export function CommandPalette({
     setQuery("");
     setResults([]);
     setNoteResults([]);
+    setProjectResults([]);
     setActiveIndex(0);
     const timer = window.setTimeout(() => inputRef.current?.focus(), 0);
     return () => window.clearTimeout(timer);
@@ -127,6 +139,7 @@ export function CommandPalette({
     if (!normalized) {
       setResults([]);
       setNoteResults([]);
+      setProjectResults([]);
       setLoading(false);
       return;
     }
@@ -134,12 +147,16 @@ export function CommandPalette({
     const timer = window.setTimeout(async () => {
       setLoading(true);
       try {
-        const [chatResponse, noteResponse] = await Promise.all([
+        const [chatResponse, noteResponse, projectResponse] = await Promise.all([
           fetch(`/api/chats/search?q=${encodeURIComponent(normalized)}`, {
             signal: controller.signal,
             cache: "no-store",
           }),
           fetch(`/api/notes?search=${encodeURIComponent(normalized)}`, {
+            signal: controller.signal,
+            cache: "no-store",
+          }),
+          fetch(`/api/projects?q=${encodeURIComponent(normalized)}`, {
             signal: controller.signal,
             cache: "no-store",
           }),
@@ -151,11 +168,16 @@ export function CommandPalette({
           : { notes: [] };
         setResults(chatData.results || []);
         setNoteResults(noteData.notes || []);
+ const projectData = projectResponse.ok
+ ? ((await projectResponse.json()) as { projects?: ProjectSearchResult[] })
+ : { projects: [] };
+ setProjectResults(projectData.projects || []);
         setActiveIndex(0);
       } catch (error) {
         if ((error as Error).name !== "AbortError") {
           setResults([]);
           setNoteResults([]);
+          setProjectResults([]);
         }
       } finally {
         if (!controller.signal.aborted) setLoading(false);
@@ -191,14 +213,20 @@ export function CommandPalette({
       onOpenChat(result.chatId, result.messageId);
       return;
     }
-    const noteResult = noteResults[activeIndex - commandCount - results.length];
+    const projectResult = projectResults[activeIndex - commandCount - results.length];
+ if (projectResult) {
+ onOpenChange(false);
+ onOpenProject(projectResult.id);
+ return;
+ }
+ const noteResult = noteResults[activeIndex - commandCount - results.length - projectResults.length];
     if (noteResult) {
       onOpenChange(false);
       onOpenNote(noteResult.noteId);
     }
   };
 
-  const resultCount = results.length + noteResults.length;
+  const resultCount = results.length + noteResults.length + projectResults.length;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -326,16 +354,46 @@ export function CommandPalette({
                     <ArrowRight className="mt-1 size-3.5 shrink-0 text-muted-foreground" />
                   </button>
                 ))
-              ) : results.length === 0 && noteResults.length === 0 ? (
+              ) : results.length === 0 && noteResults.length === 0 && projectResults.length === 0 ? (
                 <p className="px-2 py-6 text-center text-sm text-muted-foreground">No chats found.</p>
               ) : null}
-              {noteResults.length > 0 ? (
+              {projectResults.length > 0 ? (
+ <>
+ <p className="px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+ Projects
+ </p>
+ {projectResults.map((project, index) => {
+ const resultIndex = commandCount + results.length + index;
+ return (
+ <button
+ key={project.id}
+ type="button"
+ className={cn(
+ "flex w-full items-center gap-3 rounded-md px-2 py-2 text-left",
+ resultIndex === activeIndex ? "bg-muted" : "hover:bg-muted/60",
+ )}
+ onMouseEnter={() => setActiveIndex(resultIndex)}
+ onClick={() => {
+ onOpenChange(false);
+ onOpenProject(project.id);
+ }}
+ >
+ <FolderKanban className="size-4 shrink-0 text-muted-foreground" />
+ <span className="size-2.5 shrink-0 rounded-sm" style={{ backgroundColor: project.color }} />
+ <span className="min-w-0 flex-1 truncate text-sm">{highlightMatches(project.name, query)}</span>
+ <ArrowRight className="size-3.5 shrink-0 text-muted-foreground" />
+ </button>
+ );
+ })}
+ </>
+ ) : null}
+ {noteResults.length > 0 ? (
                 <>
                   <p className="px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                     Shared Notes
                   </p>
                   {noteResults.map((note, index) => {
-                    const resultIndex = commandCount + results.length + index;
+                    const resultIndex = commandCount + results.length + projectResults.length + index;
                     return (
                       <button
                         key={note.noteId}

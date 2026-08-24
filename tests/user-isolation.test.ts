@@ -7,6 +7,9 @@ import {
   isInsideWorkspace,
   isRootWorkspace,
   parsePasswdLine,
+ parseMacOsUserLine,
+ parseWindowsUserLine,
+ hostPlatform,
   listAssignablePosixUsers,
 } from "../lib/user-isolation";
 
@@ -69,4 +72,13 @@ test("listAssignablePosixUsers keeps login shells and optional root", () => {
   assert.deepEqual(regular.map((user) => user.username), ["alice", "carol"]);
   const withRoot = listAssignablePosixUsers(passwd, { includeRoot: true });
   assert.deepEqual(withRoot.map((user) => user.username), ["alice", "carol", "root"]);
+});
+
+
+test("host identity parsers preserve platform-specific identity fields", () => {
+ assert.deepEqual(parseMacOsUserLine("alice 501"), { username: "alice", uid: 501, home: "" });
+ assert.deepEqual(parseWindowsUserLine("alice\tC:\\Users\\alice"), { username: "alice", home: "C:\\Users\\alice" });
+ assert.equal(hostPlatform("win32"), "win32");
+ assert.equal(hostPlatform("darwin"), "darwin");
+ assert.equal(hostPlatform("linux"), "linux");
 });
