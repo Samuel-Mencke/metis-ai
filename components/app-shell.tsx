@@ -8804,6 +8804,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         {!notesOpen && !automationsOpen && activeChatId ? <NotesVoid chatId={activeChatId} pinnedOnly compact projectId={chats.find((chat) => chat.id === activeChatId)?.projectId || draftProjectId} /> : null}
         {projectHomeId && !notesOpen && !automationsOpen ? (
           <ProjectHome
+            key={projectHomeId}
             projectId={projectHomeId}
             onOpenChat={(chatId) => void loadChat(chatId)}
             onNewChat={(projectId) => openDraft({ projectId })}

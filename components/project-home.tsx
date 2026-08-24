@@ -32,6 +32,35 @@ function formatBytes(size: number) {
  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function ProjectHomeSkeleton() {
+ return (
+ <div
+ className="mx-auto flex h-full min-h-0 w-full max-w-2xl flex-col gap-8 overflow-hidden px-6 py-8"
+ aria-busy="true"
+ aria-label="Loading project"
+ data-slot="project-home-skeleton"
+ >
+ <header className="flex items-start gap-4">
+ <div className="size-14 shrink-0 animate-pulse rounded-lg bg-muted" />
+ <div className="min-w-0 flex-1 space-y-2">
+ <div className="h-8 w-2/3 animate-pulse rounded-md bg-muted" />
+ <div className="h-3 w-40 animate-pulse rounded bg-muted" />
+ </div>
+ <div className="flex shrink-0 gap-2">
+ <div className="h-9 w-24 animate-pulse rounded-md bg-muted" />
+ <div className="h-9 w-20 animate-pulse rounded-md bg-muted" />
+ </div>
+ </header>
+ <div className="h-28 animate-pulse rounded-xl border border-border/40 bg-muted/40" />
+ <div className="grid gap-4 sm:grid-cols-2">
+ <div className="h-36 animate-pulse rounded-xl border border-border/40 bg-muted/40" />
+ <div className="h-36 animate-pulse rounded-xl border border-border/40 bg-muted/40" />
+ </div>
+ <div className="h-40 animate-pulse rounded-xl border border-border/40 bg-muted/40" />
+ </div>
+ );
+}
+
 async function fileToBase64(file: File) {
  const buf = await file.arrayBuffer();
  const bytes = new Uint8Array(buf);
@@ -67,25 +96,40 @@ export function ProjectHome({
  const [dragOver, setDragOver] = useState(false);
  const logoInputRef = useRef<HTMLInputElement>(null);
  const fileInputRef = useRef<HTMLInputElement>(null);
+ const loadGenerationRef = useRef(0);
 
- const load = useCallback(() => {
-  void fetch(`/api/projects/${encodeURIComponent(projectId)}`, { cache: "no-store" })
-   .then(async (response) => {
-    const body = (await response.json().catch(() => ({}))) as ProjectHomeData & { error?: string };
-    if (!response.ok) throw new Error(body.error || "Could not load project.");
-    setData(body);
-    setName(body.project.name);
-    setInstructions(body.project.instructions || "");
-    setMemoryMode(body.project.memoryMode);
-    setColor(body.project.color);
-    setIcon(body.project.icon);
-    setError("");
-   })
-   .catch((cause) => setError(cause instanceof Error ? cause.message : "Could not load project."));
+ const applyBody = (body: ProjectHomeData) => {
+ setData(body);
+ setName(body.project.name);
+ setInstructions(body.project.instructions || "");
+ setMemoryMode(body.project.memoryMode);
+ setColor(body.project.color);
+ setIcon(body.project.icon);
+ setError("");
+ };
+
+ const load = useCallback((signal?: AbortSignal) => {
+ const generation = loadGenerationRef.current;
+ void fetch(`/api/projects/${encodeURIComponent(projectId)}`, { cache: "no-store", signal })
+ .then(async (response) => {
+ const body = (await response.json().catch(() => ({}))) as ProjectHomeData & { error?: string };
+ if (signal?.aborted || generation !== loadGenerationRef.current) return;
+ if (!response.ok) throw new Error(body.error || "Could not load project.");
+ applyBody(body);
+ })
+ .catch((cause) => {
+ if (signal?.aborted || (cause instanceof DOMException && cause.name === "AbortError") || (cause instanceof Error && cause.name === "AbortError")) return;
+ setError(cause instanceof Error ? cause.message : "Could not load project.");
+ });
  }, [projectId]);
 
  useEffect(() => {
-  load();
+ const controller = new AbortController();
+ loadGenerationRef.current += 1;
+ setData(null);
+ setError("");
+ load(controller.signal);
+ return () => controller.abort();
  }, [load]);
 
  async function save(patch: Record<string, unknown>) {
@@ -159,30 +203,8 @@ export function ProjectHome({
   onDeleted();
  }
 
- if (error && !data) return <p className="p-6 text-sm text-destructive">{error}</p>;
- if (!data) {
-    return (
-      <div className="mx-auto flex h-full min-h-0 w-full max-w-2xl flex-col gap-8 overflow-hidden px-6 py-8" aria-busy="true" aria-label="Loading project">
-        <header className="flex items-start gap-4">
-          <div className="size-14 shrink-0 animate-pulse rounded-lg bg-muted" />
-          <div className="min-w-0 flex-1 space-y-2">
-            <div className="h-8 w-2/3 animate-pulse rounded-md bg-muted" />
-            <div className="h-3 w-40 animate-pulse rounded bg-muted" />
-          </div>
-          <div className="flex shrink-0 gap-2">
-            <div className="h-9 w-24 animate-pulse rounded-md bg-muted" />
-            <div className="h-9 w-20 animate-pulse rounded-md bg-muted" />
-          </div>
-        </header>
-        <div className="h-28 animate-pulse rounded-xl border border-border/40 bg-muted/40" />
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="h-36 animate-pulse rounded-xl border border-border/40 bg-muted/40" />
-          <div className="h-36 animate-pulse rounded-xl border border-border/40 bg-muted/40" />
-        </div>
-        <div className="h-40 animate-pulse rounded-xl border border-border/40 bg-muted/40" />
-      </div>
-    );
-  }
+ if (error && (!data || data.project.id !== projectId)) return <p className="p-6 text-sm text-destructive">{error}</p>;
+ if (!data || data.project.id !== projectId) return <ProjectHomeSkeleton />;
 
  return (
   <div className="mx-auto flex h-full min-h-0 w-full max-w-2xl flex-col gap-8 overflow-y-auto px-6 py-8">
@@ -384,7 +406,7 @@ export function ProjectHome({
         onClick={() => {
          void fetch(`/api/projects/${encodeURIComponent(projectId)}/files/${encodeURIComponent(file.id)}`, {
           method: "DELETE",
-         }).then(load);
+         }).then(() => load());
         }}
        >
         <X className="size-3.5" />

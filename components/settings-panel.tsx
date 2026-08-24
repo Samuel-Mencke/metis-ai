@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useState, type ChangeEvent } from "re
 import {
   Archive,
   ArchiveRestore,
+  ArrowLeft,
   Bell,
   Brain,
   Check,
@@ -353,13 +354,13 @@ type Props = {
 
 const SETTINGS_SECTIONS: Record<string, Array<{ id: string; label: string }>> = {
   general: [
-    { id: "settings-token-compression", label: "Token compression" },
-    { id: "settings-notifications", label: "Notifications" },
-    { id: "settings-browser", label: "Browser" },
- { id: "settings-browser-storage", label: "Browser storage" },
     { id: "settings-default-model", label: "Default model" },
     { id: "settings-subagent-model", label: "Subagent model" },
+    { id: "settings-token-compression", label: "Token compression" },
+    { id: "settings-notifications", label: "Notifications" },
     { id: "settings-voice-input", label: "Voice input" },
+    { id: "settings-browser", label: "Browser" },
+    { id: "settings-browser-storage", label: "Browser storage" },
     { id: "settings-session", label: "Session" },
   ],
   models: [
@@ -474,6 +475,8 @@ export function SettingsPanel({
   const [browserStorageError, setBrowserStorageError] = useState("");
   const [browserStorageDeleteTarget, setBrowserStorageDeleteTarget] = useState<string | null>(null);
   const [browserStorageClearAll, setBrowserStorageClearAll] = useState(false);
+  const [settingsPane, setSettingsPane] = useState<"tab" | "browser-storage">("tab");
+  const [browserStorageQuery, setBrowserStorageQuery] = useState("");
   const [compressionPreview, setCompressionPreview] = useState("");
   const [compressionPreviewResult, setCompressionPreviewResult] = useState<{
     text: string;
@@ -571,9 +574,15 @@ export function SettingsPanel({
   }, [loadBrowserStorage]);
 
   useEffect(() => {
-    if (!open || settingsTab !== "general") return;
+   if (!open) {
+    setSettingsPane("tab");
+    setBrowserStorageQuery("");
+    return;
+   }
+   if (settingsTab === "general" || settingsPane === "browser-storage") {
     void loadBrowserStorage();
-  }, [loadBrowserStorage, open, settingsTab]);
+   }
+  }, [loadBrowserStorage, open, settingsPane, settingsTab]);
 
   const createRemoteEnrollment = useCallback(async (platform = remotePlatform) => {
     setRemoteBusy(true);
@@ -1260,6 +1269,12 @@ export function SettingsPanel({
     reader.readAsDataURL(file);
   }
 
+  const filteredBrowserStorage = browserStorage.filter((item) => {
+   const query = browserStorageQuery.trim().toLowerCase();
+   if (!query) return true;
+   return item.origin.toLowerCase().includes(query) || item.storageTypes.some((type) => type.toLowerCase().includes(query));
+  });
+
   const selectableProviders = providerDefinitions;
   const sortedProviderConnections = [...providerConnections].sort((a, b) => {
     const aName = providerDefinitions.find((provider) => provider.key === a.providerKey)?.name || a.providerKey;
@@ -1281,11 +1296,11 @@ export function SettingsPanel({
           </DialogDescription>
         </DialogHeader>
 
-        <Tabs value={settingsTab} onValueChange={onSettingsTabChange} className="min-h-0 flex-1 gap-0 md:grid md:items-stretch md:grid-cols-[13rem_minmax(0,1fr)]">
+        <Tabs value={settingsTab} onValueChange={(tab) => { setSettingsPane("tab"); setBrowserStorageQuery(""); onSettingsTabChange(tab); }} className="min-h-0 flex-1 gap-0 md:grid md:items-stretch md:grid-cols-[13rem_minmax(0,1fr)]">
           <div className="border-b border-border bg-muted/20 p-3 md:hidden">
             <CustomSelect
               value={settingsTab}
-              onValueChange={onSettingsTabChange}
+              onValueChange={(tab) => { setSettingsPane("tab"); setBrowserStorageQuery(""); onSettingsTabChange(tab); }}
               ariaLabel="Settings section"
               className="h-10 w-full"
               options={[
@@ -1316,11 +1331,21 @@ export function SettingsPanel({
            {expanded
            ? visibleSettingsSections(tab.value, isHostAdmin).map((item) => (
            <button
-           key={item.id}
-           type="button"
-           className="ml-4 hidden w-[calc(100%-1rem)] truncate rounded-md border-l border-border/40 px-2.5 py-1 text-left text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground md:block"
-           onClick={() => scrollSettingsSection(item.id)}
-           >
+            key={item.id}
+            type="button"
+            className={cn(
+            "ml-4 hidden w-[calc(100%-1rem)] truncate rounded-md border-l border-border/40 px-2.5 py-1 text-left text-xs text-muted-foreground hover:bg-muted/50 hover:text-foreground md:block",
+            item.id === "settings-browser-storage" && settingsPane === "browser-storage" && "bg-muted/60 text-foreground",
+            )}
+            onClick={() => {
+            if (item.id === "settings-browser-storage") {
+            setSettingsPane("browser-storage");
+            return;
+            }
+            setSettingsPane("tab");
+            scrollSettingsSection(item.id);
+            }}
+            >
            {item.label}
            </button>
            ))
@@ -1331,7 +1356,127 @@ export function SettingsPanel({
           </TabsList>
 
           <div className="min-h-0 min-w-0 overflow-x-hidden overflow-y-auto">
+ {settingsPane === "browser-storage" ? (
+ <div
+ className="flex h-full min-h-0 flex-col gap-5 px-6 py-6 sm:px-8 sm:py-8"
+ data-slot="browser-storage-manager"
+ >
+ <button
+ type="button"
+ className="inline-flex w-fit items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+ onClick={() => setSettingsPane("tab")}
+ >
+ <ArrowLeft className="size-3.5" />
+ Back to General
+ </button>
+ <div className="flex items-start justify-between gap-3">
+ <div>
+ <h3 className="text-sm font-medium">Browser storage</h3>
+ <p className="mt-1 text-xs text-muted-foreground">
+ Persistent website sessions are stored privately for your account. Search the list and clear individual origins without scrolling General.
+ </p>
+ </div>
+ <Button type="button" variant="destructive" size="sm" onClick={() => setBrowserStorageClearAll(true)} disabled={!browserStorage.length}>
+ Clear all
+ </Button>
+ </div>
+ <Input
+ value={browserStorageQuery}
+ onChange={(event) => setBrowserStorageQuery(event.target.value)}
+ placeholder="Search websites"
+ aria-label="Search stored websites"
+ />
+ {browserStorageLoading ? <p className="text-xs text-muted-foreground">Loading stored websites…</p> : null}
+ {browserStorageError ? <p className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">{browserStorageError}</p> : null}
+ {!browserStorageLoading && !browserStorageError && !browserStorage.length ? (
+ <p className="rounded-md border border-border/60 p-4 text-xs text-muted-foreground">No persistent website data stored yet.</p>
+ ) : null}
+ {!browserStorageLoading && !browserStorageError && browserStorage.length > 0 && filteredBrowserStorage.length === 0 ? (
+ <p className="rounded-md border border-border/60 p-4 text-xs text-muted-foreground">No websites match that search.</p>
+ ) : null}
+ <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
+ {filteredBrowserStorage.map((item) => (
+ <div key={item.origin} className="flex items-center justify-between gap-3 rounded-md border border-border/60 p-3">
+ <div className="min-w-0">
+ <p className="truncate text-sm">{item.origin}</p>
+ <p className="mt-1 text-[11px] text-muted-foreground">
+ {item.storageTypes.join(" · ")}
+ {item.sizeBytes === null ? " · size unavailable" : ` · ${item.sizeBytes} bytes`}
+ </p>
+ </div>
+ <Button type="button" variant="outline" size="sm" onClick={() => setBrowserStorageDeleteTarget(item.origin)}>
+ Clear
+ </Button>
+ </div>
+ ))}
+ </div>
+ </div>
+ ) : (
+ <>
 <TabsContent value="general" className="mt-0 space-y-10 px-6 py-6 sm:px-8 sm:py-8">
+
+ <section className="flex flex-col gap-4">
+                <h3 id="settings-default-model" className="text-sm font-medium">Default model</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Choose the model used for new chats. Each user has an independent default.
+                  </p>
+                  <div className="mt-3 flex min-w-0 items-center gap-1">
+                    <ModelPicker
+                      models={models}
+                      value={modelId}
+                      onValueChange={onModelIdChange}
+                      favoriteModelKeys={favoriteModelKeys}
+                      onToggleFavorite={onToggleFavoriteModel}
+                      className="min-w-0 flex-1"
+                    />
+                    {models.find((model) => model.id === modelId) ? (
+                      <ModelOptionsMenu
+                        model={models.find((model) => model.id === modelId)!}
+                        modelParams={modelParams}
+                        onModelParamsChange={onModelParamsChange}
+                        className="opacity-100"
+                      />
+                    ) : null}
+                  </div>
+ </section>
+
+ <section className="flex flex-col gap-4">
+                  <h3 id="settings-subagent-model" className="text-sm font-medium">Subagent model</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Optionally use one model for delegated subagents. When disabled, the agent chooses the model.
+                  </p>
+                  <div className="mt-3 flex items-center justify-between gap-4">
+                    <p className="text-xs text-muted-foreground">Use a standard model</p>
+                    <Button
+                      type="button"
+                      variant={subagentModelEnabled ? "default" : "outline"}
+                      aria-pressed={subagentModelEnabled}
+                      onClick={() => onSubagentModelEnabledChange(!subagentModelEnabled)}
+                      className="shrink-0"
+                    >
+                      {subagentModelEnabled ? "On" : "Off"}
+                    </Button>
+                  </div>
+                  <div className="mt-3 flex min-w-0 items-center gap-1">
+                    <ModelPicker
+                      models={models}
+                      value={subagentModelId}
+                      onValueChange={onSubagentModelIdChange}
+                      favoriteModelKeys={favoriteModelKeys}
+                      onToggleFavorite={onToggleFavoriteModel}
+                      disabled={!subagentModelEnabled}
+                      className="min-w-0 flex-1"
+                    />
+                    {models.find((model) => model.id === subagentModelId) ? (
+                      <ModelOptionsMenu
+                        model={models.find((model) => model.id === subagentModelId)!}
+                        modelParams={subagentModelParams}
+                        onModelParamsChange={onSubagentModelParamsChange}
+                        className="opacity-100"
+                      />
+                    ) : null}
+                  </div>
+ </section>
 
               <section className="flex flex-col gap-5">
                 <div>
@@ -1422,41 +1567,6 @@ export function SettingsPanel({
               </section>
 
               <section className="flex flex-col gap-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <h3 id="settings-browser-storage" className="text-sm font-medium">Embedded browser storage</h3>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      Persistent website sessions are stored privately for your account.
-                    </p>
-                  </div>
-                  <Button type="button" variant="destructive" size="sm" onClick={() => setBrowserStorageClearAll(true)} disabled={!browserStorage.length}>
-                    Clear all
-                  </Button>
-                </div>
-                {browserStorageLoading ? <p className="text-xs text-muted-foreground">Loading stored websites…</p> : null}
-                {browserStorageError ? <p className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">{browserStorageError}</p> : null}
-                {!browserStorageLoading && !browserStorageError && !browserStorage.length ? (
-                  <p className="rounded-md border border-border/60 p-4 text-xs text-muted-foreground">No persistent website data stored yet.</p>
-                ) : null}
-                <div className="space-y-2">
-                  {browserStorage.map((item) => (
-                    <div key={item.origin} className="flex items-center justify-between gap-3 rounded-md border border-border/60 p-3">
-                      <div className="min-w-0">
-                        <p className="truncate text-sm">{item.origin}</p>
-                        <p className="mt-1 text-[11px] text-muted-foreground">
-                          {item.storageTypes.join(" · ")}
-                          {item.sizeBytes === null ? " · size unavailable" : ` · ${item.sizeBytes} bytes`}
-                        </p>
-                      </div>
-                      <Button type="button" variant="outline" size="sm" onClick={() => setBrowserStorageDeleteTarget(item.origin)}>
-                        Clear
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              </section>
-
-              <section className="flex flex-col gap-4">
                 <div>
                   <h3 id="settings-notifications" className="text-sm font-medium">Notifications</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
@@ -1539,74 +1649,7 @@ export function SettingsPanel({
                     ? `Custom sound: ${finishSound.name}`
                     : "No custom sound uploaded. The default completion sound plays when sound cues are on. Removing a custom file restores that default."}
                 </p>
-                <div id="settings-browser" className="border-t border-border/60 pt-4">
-                <h3 className="text-sm font-medium">Browser</h3>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Browser settings live in the browser tab. Open a chat, switch to Browser, then use the gear next to reload.
-                </p>
-              </div>
-              <div className="border-t border-border/60 pt-4">
-                <h3 id="settings-default-model" className="text-sm font-medium">Default model</h3>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Choose the model used for new chats. Each user has an independent default.
-                  </p>
-                  <div className="mt-3 flex min-w-0 items-center gap-1">
-                    <ModelPicker
-                      models={models}
-                      value={modelId}
-                      onValueChange={onModelIdChange}
-                      favoriteModelKeys={favoriteModelKeys}
-                      onToggleFavorite={onToggleFavoriteModel}
-                      className="min-w-0 flex-1"
-                    />
-                    {models.find((model) => model.id === modelId) ? (
-                      <ModelOptionsMenu
-                        model={models.find((model) => model.id === modelId)!}
-                        modelParams={modelParams}
-                        onModelParamsChange={onModelParamsChange}
-                        className="opacity-100"
-                      />
-                    ) : null}
-                  </div>
-                </div>
-                <div className="border-t border-border/60 pt-4">
-                  <h3 id="settings-subagent-model" className="text-sm font-medium">Subagent model</h3>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Optionally use one model for delegated subagents. When disabled, the agent chooses the model.
-                  </p>
-                  <div className="mt-3 flex items-center justify-between gap-4">
-                    <p className="text-xs text-muted-foreground">Use a standard model</p>
-                    <Button
-                      type="button"
-                      variant={subagentModelEnabled ? "default" : "outline"}
-                      aria-pressed={subagentModelEnabled}
-                      onClick={() => onSubagentModelEnabledChange(!subagentModelEnabled)}
-                      className="shrink-0"
-                    >
-                      {subagentModelEnabled ? "On" : "Off"}
-                    </Button>
-                  </div>
-                  <div className="mt-3 flex min-w-0 items-center gap-1">
-                    <ModelPicker
-                      models={models}
-                      value={subagentModelId}
-                      onValueChange={onSubagentModelIdChange}
-                      favoriteModelKeys={favoriteModelKeys}
-                      onToggleFavorite={onToggleFavoriteModel}
-                      disabled={!subagentModelEnabled}
-                      className="min-w-0 flex-1"
-                    />
-                    {models.find((model) => model.id === subagentModelId) ? (
-                      <ModelOptionsMenu
-                        model={models.find((model) => model.id === subagentModelId)!}
-                        modelParams={subagentModelParams}
-                        onModelParamsChange={onSubagentModelParamsChange}
-                        className="opacity-100"
-                      />
-                    ) : null}
-                  </div>
-                </div>
-              </section>
+ </section>
 
               <section className="flex flex-col gap-4">
                 <div>
@@ -1719,6 +1762,36 @@ export function SettingsPanel({
                 </label>
               </section>
 
+ <section className="flex flex-col gap-4">
+ <div>
+ <h3 id="settings-browser" className="text-sm font-medium">Browser</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Browser settings live in the browser tab. Open a chat, switch to Browser, then use the gear next to reload.
+                </p>
+ </div>
+ </section>
+
+ <section className="flex flex-col gap-4">
+ <div className="flex items-start justify-between gap-3">
+ <div>
+ <h3 id="settings-browser-storage" className="text-sm font-medium">Browser storage</h3>
+ <p className="mt-1 text-xs text-muted-foreground">
+ Persistent website sessions for the embedded browser. Search and clear origins in a dedicated view so General stays short.
+ </p>
+ </div>
+ <Button type="button" variant="outline" size="sm" onClick={() => setSettingsPane("browser-storage")}>
+ Manage
+ </Button>
+ </div>
+ <p className="text-xs text-muted-foreground">
+ {browserStorageLoading
+ ? "Loading stored websites…"
+ : browserStorage.length
+ ? `${browserStorage.length} website${browserStorage.length === 1 ? "" : "s"} stored`
+ : "No persistent website data stored yet."}
+ </p>
+ </section>
+
               <section className="flex flex-col gap-3">
                 <div>
                   <h3 id="settings-session" className="text-sm font-medium">Session</h3>
@@ -1739,6 +1812,7 @@ export function SettingsPanel({
                 </Button>
                 
               </section>
+
  </TabsContent>
 <TabsContent value="models" className="mt-0 space-y-10 px-6 py-6 sm:px-8 sm:py-8 min-w-0">
 
@@ -2415,6 +2489,8 @@ export function SettingsPanel({
                   </div>
                 ) : null}
  </TabsContent>
+ </>
+ )}
           </div>
         </Tabs>
       </DialogContent>
