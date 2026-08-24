@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { config } from "@/lib/config";
 import { getDatabase } from "@/lib/sqlite";
 import {
   findActiveConnection,
@@ -36,7 +37,7 @@ const cache = new Map<string, UsageSnapshot>();
 const inflight = new Map<string, Promise<UsageSnapshot>>();
 
 const HOME = homedir();
-const CODEX_BIN = process.env.CODEX_BIN || `${HOME}/.npm-global/bin/codex`;
+const CODEX_BIN = process.env.CODEX_BIN || path.join(config.root, "node_modules/.bin/codex");
 const GATEWAY_DB = process.env.GATEWAY_DB_PATH || `${HOME}/AiApi-Wrapper/data/gateway.db`;
 const WRAPPER_ENV = process.env.WRAPPER_ENV || path.join(homedir(), "AiApi-Wrapper/.env");
 
@@ -103,6 +104,13 @@ type CodexUsageHome = {
   cleanup: () => void;
 };
 
+export function readCodexUsageOAuthCredentials(secret: string) {
+  // The Codex app server can exchange the refresh token even when the cached
+  // access token has expired. Rejecting the credential here prevents that
+  // refresh and incorrectly reports a configured account as disconnected.
+  return readCodexOAuthCredentials(secret, { allowExpired: true });
+}
+
 function createCodexUsageHome(ownerId?: string): CodexUsageHome | null {
   if (!ownerId) return null;
   try {
@@ -114,7 +122,7 @@ function createCodexUsageHome(ownerId?: string): CodexUsageHome | null {
     let auth: Record<string, unknown> = {};
     let authTokens: CodexUsageHome["authTokens"];
     if (connection.authType === "oauth") {
-      const oauth = readCodexOAuthCredentials(credential.secret);
+      const oauth = readCodexUsageOAuthCredentials(credential.secret);
       authTokens = {
         accessToken: oauth.access,
         chatgptAccountId: oauth.accountId,
