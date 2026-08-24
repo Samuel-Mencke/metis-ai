@@ -168,7 +168,7 @@ export function getUserAgentCwd(userId?: string): string {
   const workspace = getUserAccess(userId).workspaceRoot;
   fs.mkdirSync(workspace, { recursive: true });
   const identity = getUserExecutionIdentity(userId);
-  if (identity) {
+  if (identity && typeof identity.uid === "number" && typeof identity.gid === "number") {
     try {
       fs.chownSync(workspace, identity.uid, identity.gid);
     } catch {
