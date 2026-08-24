@@ -6,7 +6,11 @@ import {
   discoverProviderModels,
   readCodexOAuthCredentials,
 } from "../lib/providers/discovery";
-import { codexWindowLabel, normalizeCodexWindow } from "../lib/plan-usage";
+import {
+  codexWindowLabel,
+  normalizeCodexWindow,
+  readCodexUsageOAuthCredentials,
+} from "../lib/plan-usage";
 import type { ProviderConnectionWithSecret } from "../lib/provider-connections";
 
 function codexSecret(overrides: Record<string, unknown> = {}) {
@@ -93,4 +97,10 @@ test("Codex quota windows preserve five-hour and weekly reset data", () => {
     usedPercent: 42,
     resetsAt: new Date(1_900_000_000 * 1_000).toISOString(),
   });
+});
+
+test("Codex quota can bootstrap from refreshable OAuth credentials after access expiry", () => {
+  const credentials = readCodexUsageOAuthCredentials(codexSecret({ expires: Date.now() - 1 }));
+  assert.equal(credentials.refresh, "refresh-token");
+  assert.equal(credentials.accountId, "account-1");
 });

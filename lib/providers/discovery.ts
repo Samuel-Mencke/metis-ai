@@ -131,7 +131,7 @@ export function modelSupportsChatTools(id: string, displayName = "") {
   return true;
 }
 
-function parseDiscoveredModel(value: unknown): DiscoveredModel | null {
+export function parseDiscoveredModel(value: unknown): DiscoveredModel | null {
   if (!value || typeof value !== "object") return null;
   const item = value as Record<string, unknown>;
   const id = typeof item.id === "string"

@@ -24,7 +24,9 @@ test("unknown and empty usage selections do not invent quota keys", () => {
 test("plan usage paths use the runtime home directory", () => {
  const source = readFileSync(new URL("../lib/plan-usage.ts", import.meta.url), "utf8");
  assert.equal(source.includes("/home/samuel"), false);
+ assert.equal(source.includes(".npm-global/bin/codex"), false);
  assert.match(source, /homedir\(\)/);
+ assert.match(source, /path\.join\(config\.root, [\"']node_modules\/\.bin\/codex[\"']\)/);
  assert.match(source, /path\.join\(homedir\(\), [\"']AiApi-Wrapper\/\.env[\"']\)/);
 });
 
