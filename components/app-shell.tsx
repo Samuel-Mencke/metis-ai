@@ -265,7 +265,7 @@ type ToolPart = {
   name: string;
   status: string;
   detail?: string;
-  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "other";
+  kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "automation" | "compaction" | "other";
   path?: string;
   diff?: { before?: string; after?: string; additions?: number; deletions?: number };
   todos?: Array<{ id?: string; content: string; status?: string }>;
