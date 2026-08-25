@@ -1386,7 +1386,7 @@ function stdioGatewayConfig(
 
 function modeMcpEnv(context: ProviderContext): Record<string, string> {
   const gateway = getMcpServers(
-    providerMcpContext(context, { runtimeApprovalGate: false }),
+    providerMcpContext(context),
   ).gateway;
   return gateway.type === "http" ? {} : gateway.env;
 }
