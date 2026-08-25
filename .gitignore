@@ -29,3 +29,4 @@ data/artifacts/
 .env.bak*
 *.env.bak*
 config.yaml.bak*
+.research/

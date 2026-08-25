@@ -4,6 +4,8 @@ export type ProviderKind =
   | "codex-agent"
   | "claude-agent"
   | "antigravity-agent"
+  | "grok-agent"
+  | "opencode-agent"
   | "compatible";
 
 export type ProviderAuthType =

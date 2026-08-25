@@ -35,7 +35,8 @@ export function toolContractPrompt(input: ToolContractInput): string {
     "Use direct Metis core tools such as read_file, list_directory, execute_command, write_file, browser_* and write_todos when they are listed. Do not invent MCP server IDs such as 'metis'; call_mcp_tool is only for an exact server/tool pair returned by search_tools or list_mcp_servers.",
     planRule,
     todoRule,
-    "Tool calls are stateful actions, not narration. Wait for the result, preserve errors, and continue from the returned state.",
+            "Tool calls are stateful actions, not narration. Wait for the result, preserve errors, and continue from the returned state.",
+        "Prefer Metis MCP / gateway tools over repeating tool names in chat. Native provider tools are a fallback when a Metis tool is not listed. Do not narrate the tool catalog.",
   ].join("\n");
 }
 

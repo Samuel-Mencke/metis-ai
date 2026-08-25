@@ -16,6 +16,7 @@ export type ToolPart = {
   status: "running" | "completed" | "error" | string;
   detail?: string;
   kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "automation" | "compaction" | "other";
+  source?: "mcp" | "native" | "browser";
   path?: string;
   input?: string;
   result?: string;

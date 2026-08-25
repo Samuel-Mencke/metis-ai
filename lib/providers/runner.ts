@@ -43,6 +43,8 @@ import {
   type OAuthProviderKey,
 } from "@/lib/providers/oauth";
 import { antigravitySupportsEffort, runAntigravitySdkJob, runOfficialAntigravityJob } from "@/lib/providers/official-antigravity";
+import { canonicalizeToolPart } from "@/lib/providers/tool-events";
+import { runAcpStdioAgent } from "@/lib/providers/acp-stdio";
 import type { AgentJob } from "@/lib/jobs";
 import { allModes, modeById } from "@/lib/modes";
 import { classifyToolKind, innerToolName, todosFromToolPayload } from "@/lib/tool-call-display";
@@ -256,6 +258,7 @@ function providerPrompt(
     skillsCatalogPrompt(getGlobalModelSettings(job.userId)),
     "Working style: precise, technically fluent, proactive. Act with your tools instead of describing steps. Reply in the user's language — German in, German out. No filler phrases. On clear orders decide and act yourself; ask back only when genuinely ambiguous or destructive.",
     "Answer the user directly and do not claim to have used tools you were not given.",
+    "This is a Metis-branded tool surface: prefer the attached Metis MCP gateway tools, execute them silently, and never paste raw tool/MCP dumps into the user-visible reply.",
     "If web_search or x_search are available, use them for current documentation or facts instead of narrating that you are researching.",
     METIS_SHARED_AGENT_CONTROL,
     toolContractPrompt({
@@ -1631,12 +1634,54 @@ async function runAntigravity(context: ProviderContext): Promise<ProviderResult>
 }
 
 
+async function runGrok(context: ProviderContext): Promise<ProviderResult> {
+  const binary = typeof context.connection.config.binaryPath === "string" && context.connection.config.binaryPath.trim()
+    ? context.connection.config.binaryPath.trim()
+    : "grok";
+  const result = await runAcpStdioAgent({
+    command: binary,
+    args: ["agent", "stdio"],
+    cwd: getUserAgentCwd(context.job.userId),
+    prompt: [providerPrompt(context.job, ["mcp"], true, effectiveModelParams(context.chat, context.job)), providerConversationPrompt(context)]
+      .filter(Boolean)
+      .join("\n\nUser request:\n"),
+    mcp: getMcpServers(providerMcpContext(context)),
+    signal: context.signal,
+    clientName: "metis-ai",
+    onText: context.onText,
+    onTool: context.onTool,
+  });
+  return result.sessionId ? { agentId: `grok:${result.sessionId}` } : {};
+}
+
+async function runOpenCode(context: ProviderContext): Promise<ProviderResult> {
+  const binary = typeof context.connection.config.binaryPath === "string" && context.connection.config.binaryPath.trim()
+    ? context.connection.config.binaryPath.trim()
+    : "opencode";
+  const result = await runAcpStdioAgent({
+    command: binary,
+    args: ["acp"],
+    cwd: getUserAgentCwd(context.job.userId),
+    prompt: [providerPrompt(context.job, ["mcp"], true, effectiveModelParams(context.chat, context.job)), providerConversationPrompt(context)]
+      .filter(Boolean)
+      .join("\n\nUser request:\n"),
+    mcp: getMcpServers(providerMcpContext(context)),
+    signal: context.signal,
+    clientName: "metis-ai",
+    onText: context.onText,
+    onTool: context.onTool,
+  });
+  return result.sessionId ? { agentId: `opencode:${result.sessionId}` } : {};
+}
+
 async function runProvider(context: ProviderContext): Promise<ProviderResult> {
   const providerKey = context.connection.providerKey || parseModelKey(context.job.modelId).providerKey;
   const execution = providerExecution(providerKey);
   if (execution === "antigravity-cli") return runAntigravity(context);
   if (execution === "codex-sdk") return runCodex(context);
   if (execution === "claude-agent") return runClaude(context);
+  if (execution === "grok-cli") return runGrok(context);
+  if (execution === "opencode-cli") return runOpenCode(context);
   return runAiSdk(context);
 }
 
@@ -1668,6 +1713,8 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
     definition.kind !== "compatible" &&
     definition.kind !== "antigravity-agent" &&
     definition.kind !== "codex-agent" &&
+    definition.kind !== "grok-agent" &&
+    definition.kind !== "opencode-agent" &&
     !credential.secret
   ) {
     throw new Error(`${definition.name} requires a configured credential.`);
@@ -1760,6 +1807,7 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
     emit("text", { text: value });
   };
   const onTool = (tool: ToolPart) => {
+    tool = canonicalizeToolPart(tool);
     // write_todos is a state surface, not an append-only tool history. Give it
     // one stable id per run so every update replaces the same Tasks card in
     // persistence and in the live SSE UI instead of creating ghost checklists.

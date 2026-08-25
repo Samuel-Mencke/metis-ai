@@ -278,6 +278,34 @@ export const PROVIDERS: ProviderDefinition[] = [
     ),
     setupHint: "Default: paste a Gemini API key to run the official google-antigravity SDK. OAuth still uses the agy CLI if you want that path.",
   },
+  {
+    key: "grok-build",
+    name: "Grok Build",
+    description: "Grok Build CLI agent over ACP stdio (grok agent stdio), with Metis MCP attached.",
+    kind: "grok-agent",
+    authTypes: ["local", "oauth"],
+    capabilities: agentCapabilities,
+    models: models({
+      id: "grok-build",
+      displayName: "Grok Build",
+      tags: ["coding", "agent"],
+    }),
+    setupHint: "Install the Grok CLI and run grok login. Metis launches grok agent stdio and injects the Metis MCP gateway.",
+  },
+  {
+    key: "opencode",
+    name: "OpenCode",
+    description: "OpenCode CLI agent over ACP-style stdio, with Metis MCP attached.",
+    kind: "opencode-agent",
+    authTypes: ["local", "oauth"],
+    capabilities: agentCapabilities,
+    models: models({
+      id: "opencode",
+      displayName: "OpenCode",
+      tags: ["coding", "agent"],
+    }),
+    setupHint: "Install OpenCode and run opencode auth login. Metis prefers the Metis MCP gateway over OpenCode builtins.",
+  },
 ];
 
 const providerMap = new Map(PROVIDERS.map((provider) => [provider.key, provider]));

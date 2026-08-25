@@ -1,0 +1,158 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import type { ToolPart } from "@/lib/store";
+import { canonicalizeToolPart } from "@/lib/providers/tool-events";
+import { type McpServerMap } from "@/lib/mcp";
+
+export type AcpRunInput = {
+  command: string;
+  args: string[];
+  cwd: string;
+  prompt: string;
+  env?: Record<string, string>;
+  mcp: McpServerMap;
+  signal: AbortSignal;
+  clientName?: string;
+  onText: (text: string) => void;
+  onTool: (tool: ToolPart) => void;
+};
+
+function mcpServersForAcp(servers: McpServerMap) {
+  return Object.entries(servers).map(([name, server]) => {
+    if (server.type === "http") {
+      const headers = Object.entries(server.headers || {}).map(([headerName, value]) => ({
+        name: headerName,
+        value,
+      }));
+      return { type: "http" as const, name, url: server.url, headers };
+    }
+    return {
+      type: "stdio" as const,
+      name,
+      command: server.command,
+      args: server.args,
+      env: Object.entries(server.env || {}).map(([envName, value]) => ({ name: envName, value })),
+    };
+  });
+}
+
+function writeRpc(child: ChildProcess, id: number, method: string, params: unknown) {
+  const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params });
+  child.stdin!.write(payload + String.fromCharCode(10));
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function asString(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+export async function runAcpStdioAgent(input: AcpRunInput): Promise<{ sessionId?: string }> {
+  const child: ChildProcess = spawn(input.command, input.args, {
+    cwd: input.cwd,
+    env: { ...process.env, ...(input.env || {}) },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  if (input.signal.aborted) child.kill("SIGTERM");
+  input.signal.addEventListener("abort", () => child.kill("SIGTERM"), { once: true });
+
+  let buffer = "";
+  const pending = new Map<number, (value: Record<string, unknown>) => void>();
+  let sessionId: string | undefined;
+  let nextId = 1;
+
+  const wait = (id: number) => new Promise<Record<string, unknown>>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${input.command} ACP RPC timed out`)), 60_000);
+    pending.set(id, (value) => {
+      clearTimeout(timer);
+      resolve(value);
+    });
+  });
+
+  const handleLine = (line: string) => {
+    let parsed: unknown;
+    try { parsed = JSON.parse(line); } catch { return; }
+    const record = asRecord(parsed);
+    if (typeof record.id === "number" && pending.has(record.id)) {
+      pending.get(record.id)!(asRecord(record.result) || record);
+      pending.delete(record.id);
+      return;
+    }
+    if (record.method === "session/update") {
+      const params = asRecord(record.params);
+      const update = asRecord(params.update);
+      const kind = asString(update.sessionUpdate);
+      if (kind === "agent_message_chunk" || kind === "agent_thought_chunk") {
+        const content = asRecord(update.content);
+        const text = asString(content.text);
+        if (text) input.onText(text);
+      }
+      if (kind === "tool_call" || kind === "tool_call_update") {
+        const title = asString(update.title) || asString(update.toolCallId) || "tool";
+        const statusRaw = asString(update.status).toLowerCase();
+        const status = statusRaw === "completed" || statusRaw === "failed" || statusRaw === "error"
+          ? (statusRaw === "completed" ? "completed" : "error")
+          : "running";
+        input.onTool(canonicalizeToolPart({
+          id: asString(update.toolCallId) || crypto.randomUUID(),
+          name: title,
+          status,
+          input: update.rawInput ? JSON.stringify(update.rawInput) : undefined,
+          result: update.content ? JSON.stringify(update.content) : undefined,
+        }));
+      }
+    }
+  };
+
+  child.stdout!.setEncoding("utf8");
+  child.stdout!.on("data", (chunk: string) => {
+    buffer += chunk;
+    const newline = String.fromCharCode(10);
+    const lines = buffer.split(newline);
+    buffer = lines.pop() || "";
+    for (const line of lines) if (line.trim()) handleLine(line.trim());
+  });
+
+  const exit = new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      if (code && code !== 0) reject(new Error(`${input.command} exited ${code}`));
+      else resolve();
+    });
+  });
+
+  try {
+    const initId = nextId++;
+    writeRpc(child, initId, "initialize", {
+      protocolVersion: 1,
+      clientInfo: { name: input.clientName || "metis-ai", version: "1.0.0" },
+      clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
+    });
+    await wait(initId);
+
+    const sessionReq = nextId++;
+    writeRpc(child, sessionReq, "session/new", {
+      cwd: input.cwd,
+      mcpServers: mcpServersForAcp(input.mcp),
+    });
+    const session = await wait(sessionReq);
+    sessionId = asString(session.sessionId);
+
+    const promptId = nextId++;
+    writeRpc(child, promptId, "session/prompt", {
+      sessionId,
+      prompt: [{ type: "text", text: input.prompt }],
+    });
+    await wait(promptId);
+    child.stdin!.end();
+    await exit;
+    return { sessionId };
+  } catch (error) {
+    child.kill("SIGTERM");
+    throw error;
+  }
+}
+

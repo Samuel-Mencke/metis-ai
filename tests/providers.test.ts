@@ -46,7 +46,7 @@ test("model keys remain compatible with legacy Cursor IDs", () => {
 
 test("registry includes native and generic provider paths", () => {
   const keys = new Set(listProviderDefinitions().map((provider) => provider.key));
-  for (const key of ["cursor", "openai", "anthropic", "google", "xai", "openrouter", "ollama", "compatible", "codex", "claude-code", "antigravity"]) {
+  for (const key of ["cursor", "openai", "anthropic", "google", "xai", "openrouter", "ollama", "compatible", "codex", "claude-code", "antigravity", "grok-build", "opencode"]) {
     assert.equal(keys.has(key), true, `missing provider ${key}`);
   }
 });
@@ -118,6 +118,8 @@ test("every implemented provider routes to a tool-capable runtime", () => {
     codex: "codex-sdk",
     "claude-code": "claude-agent",
     antigravity: "antigravity-cli",
+    "grok-build": "grok-cli",
+    opencode: "opencode-cli",
   };
   const keys = listProviderDefinitions().map((provider) => provider.key).sort();
   assert.deepEqual(keys, Object.keys(expected).sort());
