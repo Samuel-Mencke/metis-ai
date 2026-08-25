@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { ImagePlus, Plus, StickyNote, Trash2, Upload, X } from "lucide-react";
 import { ProjectAvatar, ProjectIconGlyph } from "@/components/project-avatar";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -44,6 +44,7 @@ function ProjectHomeSkeleton() {
  <div className="size-14 shrink-0 animate-pulse rounded-lg bg-muted" />
  <div className="min-w-0 flex-1 space-y-2">
  <div className="h-8 w-2/3 animate-pulse rounded-md bg-muted" />
+ <p className="text-sm text-muted-foreground">Loading project…</p>
  <div className="h-3 w-40 animate-pulse rounded bg-muted" />
  </div>
  <div className="flex shrink-0 gap-2">
@@ -123,10 +124,12 @@ export function ProjectHome({
  });
  }, [projectId]);
 
- useEffect(() => {
+ useLayoutEffect(() => {
  const controller = new AbortController();
  loadGenerationRef.current += 1;
  setData(null);
+ setName("");
+ setInstructions("");
  setError("");
  load(controller.signal);
  return () => controller.abort();

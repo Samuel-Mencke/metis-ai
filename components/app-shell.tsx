@@ -8186,6 +8186,9 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
  persistActiveSnapshot();
  setActiveChatId(null);
  activeChatIdRef.current = null;
+ if (projectHomeId !== projectId) {
+ setPaneKey((k) => k + 1);
+ }
  setProjectHomeId(projectId);
  draftProjectIdRef.current = projectId;
  setDraftProjectId(projectId);

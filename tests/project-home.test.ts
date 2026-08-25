@@ -17,8 +17,11 @@ test("project hub shows a skeleton until the requested project payload is loaded
 
 test("switching project hubs remounts, clears stale data, and aborts the previous fetch", () => {
   assert.match(shellSource, /<ProjectHome\s+key=\{projectHomeId\}/);
+  assert.match(shellSource, /function openProjectHome\(projectId: string\) \{[\s\S]*?setPaneKey\(\(k\) => k \+ 1\)/);
+  assert.match(homeSource, /useLayoutEffect\(/);
   assert.match(homeSource, /const controller = new AbortController\(\)/);
   assert.match(homeSource, /setData\(null\)/);
+  assert.match(homeSource, /setName\(""\)/);
   assert.match(homeSource, /loadGenerationRef\.current \+= 1/);
   assert.match(homeSource, /generation !== loadGenerationRef\.current/);
   assert.match(homeSource, /return \(\) => controller\.abort\(\)/);
