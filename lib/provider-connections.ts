@@ -114,7 +114,7 @@ function validateBaseUrl(baseUrl: string | undefined) {
 
 function sanitizeConfig(value: Record<string, unknown> | undefined) {
   if (!value) return {};
-  const allowedKeys = new Set(["project", "location", "organization", "modelIds", "pendingOAuthFlow", "purpose"]);
+  const allowedKeys = new Set(["project", "location", "organization", "modelIds", "pendingOAuthFlow", "purpose", "binaryPath"]);
   const result: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value)) {
     if (!allowedKeys.has(key)) continue;
@@ -126,6 +126,10 @@ function sanitizeConfig(value: Record<string, unknown> | undefined) {
           .filter(Boolean)
           .slice(0, 500);
       }
+      continue;
+    }
+    if (key === "binaryPath") {
+      if (typeof item === "string" && item.trim()) result[key] = item.trim().slice(0, 500);
       continue;
     }
     if (key === "pendingOAuthFlow") {
