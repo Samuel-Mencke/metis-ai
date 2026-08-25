@@ -178,7 +178,7 @@ function providerRemoteTools(context: ProviderContext): ToolSet {
     execute: (args: Record<string, unknown>) => Promise<unknown>,
   ) => tool({
     description,
-    parameters: remoteToolSchema,
+    inputSchema: remoteToolSchema,
     execute,
   } as never) as ToolSet[string];
   const tools: ToolSet = {

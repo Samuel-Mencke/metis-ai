@@ -139,6 +139,9 @@ export const CORE_MCP_TOOL_ALLOWLIST = [
   "repo_search",
   "inspect_codebase",
   "find_symbol",
+  "verify_work",
+  "ledger_review",
+  "audio_fingerprint",
   "write_todos",
   "create_plan",
   "edit_plan",
@@ -227,7 +230,7 @@ export async function mcpBridgeTools(
     const schema = sanitizeJsonSchema(definition.inputSchema || { type: "object", properties: {} });
     tools[definition.name] = tool({
       description: (definition.description || definition.name).slice(0, 500),
-      parameters: jsonSchema(schema as Parameters<typeof jsonSchema>[0]),
+      inputSchema: jsonSchema(schema as Parameters<typeof jsonSchema>[0]),
       execute: bridgedExecute,
     } as never) as ToolSet[string];
   }
