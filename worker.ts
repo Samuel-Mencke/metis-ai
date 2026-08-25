@@ -17,10 +17,14 @@ import { logError } from "@/lib/error-logs";
 
 const pollMs = Number(process.env.AI_CHAT_WORKER_POLL_MS || 500);
 const concurrency = parseWorkerConcurrency(process.env.AI_CHAT_WORKER_CONCURRENCY);
-const configuredMaxJobMs = Number(process.env.AI_CHAT_WORKER_MAX_JOB_MS || 30 * 60 * 1000);
-const maxJobMs = Number.isFinite(configuredMaxJobMs)
-  ? Math.max(60_000, configuredMaxJobMs)
-  : 30 * 60 * 1000;
+const HARD_CAP_MS = 7 * 24 * 60 * 60_000;
+const configuredMaxJobMsRaw = process.env.AI_CHAT_WORKER_MAX_JOB_MS;
+const configuredMaxJobMs = configuredMaxJobMsRaw === undefined || configuredMaxJobMsRaw === ""
+  ? 0
+  : Number(configuredMaxJobMsRaw);
+const maxJobMs = !Number.isFinite(configuredMaxJobMs) || configuredMaxJobMs <= 0
+  ? 0
+  : Math.max(60_000, configuredMaxJobMs);
 const configuredCrashRetries = Number(process.env.AI_CHAT_WORKER_CRASH_RETRIES || 2);
 const crashRetries = Number.isFinite(configuredCrashRetries)
   ? Math.max(0, Math.min(5, Math.floor(configuredCrashRetries)))
@@ -130,14 +134,16 @@ function runJobInIsolatedProcess(claimedJob: Awaited<ReturnType<typeof claimNext
     let forceKillTimer: NodeJS.Timeout | undefined;
     let stderr = "";
     const requestedJobMaxMs = Number(getJob(jobId)?.maxRuntimeMs);
-    const jobMaxMs = Number.isFinite(requestedJobMaxMs)
-      ? Math.max(60_000, Math.min(requestedJobMaxMs, 7 * 24 * 60 * 60_000))
+    const jobMaxMs = Number.isFinite(requestedJobMaxMs) && requestedJobMaxMs > 0
+      ? Math.max(60_000, Math.min(requestedJobMaxMs, HARD_CAP_MS))
       : maxJobMs;
-    const timeout = setTimeout(() => {
-      markFailed(`Worker job exceeded the ${Math.round(jobMaxMs / 60_000)} minute limit.`);
-      child.kill("SIGTERM");
-      forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 10_000);
-    }, jobMaxMs);
+    const timeout = jobMaxMs > 0
+      ? setTimeout(() => {
+        markFailed(`Worker job exceeded the ${Math.round(jobMaxMs / 60_000)} minute limit.`);
+        child.kill("SIGTERM");
+        forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+      }, jobMaxMs)
+      : undefined;
     const child = spawn(
       process.execPath,
       [resolve("node_modules/tsx/dist/cli.mjs"), "worker-job.ts", jobId],
@@ -165,7 +171,7 @@ function runJobInIsolatedProcess(claimedJob: Awaited<ReturnType<typeof claimNext
       reject(error);
     });
     child.once("exit", (code, signal) => {
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
       if (forceKillTimer) clearTimeout(forceKillTimer);
       if (code === 0) {
         resolveProcess();

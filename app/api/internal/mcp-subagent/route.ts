@@ -131,10 +131,7 @@ export async function POST(req: Request) {
     subagentRequired: wait,
     subagentDepth: depth,
     ...(wait === false ? { subagentAutoReview: true } : {}),
-    maxRuntimeMs: Math.min(
-      parentJob.maxRuntimeMs || MAX_WAIT_MS,
-      timeoutMs,
-    ),
+    ...(parentJob.maxRuntimeMs ? { maxRuntimeMs: parentJob.maxRuntimeMs } : {}),
   });
 
   if (!wait) {

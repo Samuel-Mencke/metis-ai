@@ -579,23 +579,24 @@
   }
 }
 
-/* Browser agent pointer: restrained dark glass arrow inspired by the reference image. */
+/* Browser agent pointer: compact OS-style arrow, hotspot at the tip. */
 @keyframes metis-cursor-in {
-  from { opacity: 0; transform: translate(-95%, -29%) scale(.86); }
-  to { opacity: 1; transform: translate(-95%, -29%) scale(1); }
+  from { opacity: 0; transform: translate(-12%, -10%) scale(.88); }
+  to { opacity: 1; transform: translate(-12%, -10%) scale(1); }
 }
 
 .metis-browser-agent-cursor {
   animation: metis-cursor-in 140ms ease-out;
   position: absolute;
   z-index: 30;
-  width: 46px;
-  height: 43px;
+  width: 18px;
+  height: 24px;
   pointer-events: none;
-  transform: translate(-95%, -29%);
+  transform: translate(-12%, -10%);
+  transform-origin: 12% 10%;
   transition: left 120ms cubic-bezier(.22,.75,.26,1), top 120ms cubic-bezier(.22,.75,.26,1);
   will-change: left, top;
-  filter: drop-shadow(0 8px 12px rgb(0 0 0 / .42));
+  filter: drop-shadow(0 1px 1px rgb(0 0 0 / .55)) drop-shadow(0 6px 10px rgb(0 0 0 / .28));
 }
 
 .metis-browser-agent-cursor-shape {
@@ -605,37 +606,40 @@
   height: 100%;
 }
 
+.metis-browser-agent-cursor-shape[data-kind="drag"] {
+  transform: rotate(-12deg);
+  transform-origin: 12% 10%;
+}
+
 .metis-browser-agent-cursor-shape > svg {
   display: block;
   width: 100%;
   height: 100%;
   overflow: visible;
-  filter: drop-shadow(0 0 1px rgb(219 247 255 / .38));
 }
 
 .metis-browser-agent-cursor-click {
   position: absolute;
-  left: 95%;
-  top: 29%;
-  width: 13px;
-  height: 13px;
-  border: 1px solid rgb(220 248 255 / .72);
+  left: 12%;
+  top: 10%;
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid rgb(186 236 248 / .85);
   border-radius: 999px;
-  box-shadow: 0 0 0 1px rgb(0 0 0 / .16), 0 0 10px rgb(175 232 244 / .22);
-  animation: metis-browser-cursor-click 360ms cubic-bezier(.2,.8,.2,1) both;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / .2), 0 0 12px rgb(140 220 238 / .28);
+  animation: metis-browser-cursor-click 320ms cubic-bezier(.2,.8,.2,1) both;
 }
 
 .metis-browser-agent-cursor-scroll {
   position: absolute;
-  left: 57%;
-  top: 45%;
-  width: 8px;
+  left: 118%;
+  top: 28%;
+  width: 9px;
   height: 15px;
-  border: 1px solid rgb(255 255 255 / .38);
+  border: 1px solid rgb(255 255 255 / .45);
   border-radius: 999px;
-  background: rgb(8 14 18 / .46);
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / .16), 0 0 7px rgb(177 232 244 / .12);
-  backdrop-filter: blur(4px);
+  background: rgb(10 14 18 / .62);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .2);
 }
 
 .metis-browser-agent-cursor-scroll > span {
@@ -645,14 +649,26 @@
   width: 2px;
   height: 4px;
   border-radius: 999px;
-  background: rgb(255 255 255 / .74);
+  background: rgb(255 255 255 / .8);
   transform: translateX(-50%);
   animation: metis-browser-cursor-scroll 780ms ease-in-out infinite;
 }
 
+.metis-browser-agent-cursor-caret {
+  position: absolute;
+  left: 108%;
+  top: 18%;
+  width: 1.5px;
+  height: 14px;
+  border-radius: 1px;
+  background: rgb(210 244 252 / .92);
+  box-shadow: 0 0 6px rgb(150 228 244 / .45);
+  animation: metis-browser-cursor-caret 900ms steps(1) infinite;
+}
+
 @keyframes metis-browser-cursor-click {
-  from { opacity: .8; transform: translate(-50%, -50%) scale(.35); }
-  to { opacity: 0; transform: translate(-50%, -50%) scale(1.55); }
+  from { opacity: .85; transform: translate(-50%, -50%) scale(.28); }
+  to { opacity: 0; transform: translate(-50%, -50%) scale(1.7); }
 }
 
 @keyframes metis-browser-cursor-scroll {
@@ -660,16 +676,26 @@
   50% { opacity: 1; transform: translate(-50%, 5px); }
 }
 
+@keyframes metis-browser-cursor-caret {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .metis-browser-agent-cursor {
+    animation: none;
+    transition: none;
+  }
+  .metis-browser-agent-cursor-click,
+  .metis-browser-agent-cursor-scroll > span,
+  .metis-browser-agent-cursor-caret {
+    animation: none;
+  }
+}
+
 /* The embedded browser is a touch surface, not an image viewer. */
 .metis-browser-page-surface {
   touch-action: none;
   -webkit-user-drag: none;
   user-select: none;
-}
-
-@media (max-width: 1279px) {
-  .metis-browser-agent-cursor {
-    width: 41px;
-    height: 38px;
-  }
 }
