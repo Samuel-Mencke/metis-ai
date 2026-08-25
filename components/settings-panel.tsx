@@ -1875,7 +1875,7 @@ export function SettingsPanel({
                             ? "Google Vertex / ADC"
                             : authType === "account"
                               ? "Official account credentials"
-                              : "Local endpoint",
+                              : authType === "local" ? "CLI on this machine" : "Local endpoint",
                     }))}
                   />
                   <Input
@@ -1908,7 +1908,11 @@ export function SettingsPanel({
                       aria-label="GCP location"
                     />
                   </div>
-                ) : providerDraft.providerKey !== "cursor" && providerDraft.authType !== "oauth" ? (
+                ) : providerDraft.providerKey !== "cursor" &&
+        providerDraft.providerKey !== "grok-build" &&
+        providerDraft.providerKey !== "opencode" &&
+        providerDraft.authType !== "oauth" &&
+        providerDraft.authType !== "local" ? (
                   <Input
                     value={providerDraft.baseUrl}
                     onChange={(event) => setProviderDraft((current) => ({ ...current, baseUrl: event.target.value }))}

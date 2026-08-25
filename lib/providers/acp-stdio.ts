@@ -16,7 +16,7 @@ export type AcpRunInput = {
   onTool: (tool: ToolPart) => void;
 };
 
-function mcpServersForAcp(servers: McpServerMap) {
+export function mcpServersForAcp(servers: McpServerMap) {
   return Object.entries(servers).map(([name, server]) => {
     if (server.type === "http") {
       const headers = Object.entries(server.headers || {}).map(([headerName, value]) => ({
@@ -35,12 +35,19 @@ function mcpServersForAcp(servers: McpServerMap) {
   });
 }
 
-function writeRpc(child: ChildProcess, id: number, method: string, params: unknown) {
-  const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params });
-  child.stdin!.write(payload + String.fromCharCode(10));
+function writeLine(child: ChildProcess, payload: unknown) {
+  child.stdin!.write(JSON.stringify(payload) + String.fromCharCode(10));
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
+function writeRpc(child: ChildProcess, id: number, method: string, params: unknown) {
+  writeLine(child, { jsonrpc: "2.0", id, method, params });
+}
+
+function writeResult(child: ChildProcess, id: number, result: unknown) {
+  writeLine(child, { jsonrpc: "2.0", id, result });
+}
+
+export function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
@@ -48,6 +55,36 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function asString(value: unknown) {
   return typeof value === "string" ? value : "";
+}
+
+export function applyAcpSessionUpdate(
+  update: Record<string, unknown>,
+  handlers: { onText: (text: string) => void; onTool: (tool: ToolPart) => void },
+) {
+  const kind = asString(update.sessionUpdate);
+  if (kind === "agent_message_chunk" || kind === "agent_thought_chunk") {
+    const content = asRecord(update.content);
+    const text = asString(content.text);
+    if (text) handlers.onText(text);
+  }
+  if (kind === "tool_call" || kind === "tool_call_update") {
+    const title = asString(update.title) || asString(update.toolCallId) || "tool";
+    const statusRaw = asString(update.status).toLowerCase();
+    const status = statusRaw === "completed" || statusRaw === "failed" || statusRaw === "error"
+      ? (statusRaw === "completed" ? "completed" : "error")
+      : "running";
+    handlers.onTool(canonicalizeToolPart({
+      id: asString(update.toolCallId) || crypto.randomUUID(),
+      name: title,
+      status,
+      input: update.rawInput ? JSON.stringify(update.rawInput) : undefined,
+      result: update.content ? JSON.stringify(update.content) : undefined,
+    }));
+  }
+}
+
+function permissionResult() {
+  return { outcome: { outcome: "selected", optionId: "allow-once" } };
 }
 
 export async function runAcpStdioAgent(input: AcpRunInput): Promise<{ sessionId?: string }> {
@@ -76,34 +113,25 @@ export async function runAcpStdioAgent(input: AcpRunInput): Promise<{ sessionId?
     let parsed: unknown;
     try { parsed = JSON.parse(line); } catch { return; }
     const record = asRecord(parsed);
-    if (typeof record.id === "number" && pending.has(record.id)) {
-      pending.get(record.id)!(asRecord(record.result) || record);
-      pending.delete(record.id);
+    const rpcId = record.id;
+    if (typeof record.method === "string" && (typeof rpcId === "number" || typeof rpcId === "string")) {
+      const method = record.method;
+      if (method === "session/request_permission" || method.endsWith("/request_permission")) {
+        writeResult(child, rpcId as number, permissionResult());
+        return;
+      }
+      writeResult(child, rpcId as number, {});
+      return;
+    }
+    if ((typeof rpcId === "number" || typeof rpcId === "string") && pending.has(Number(rpcId))) {
+      const result = record.error ? { error: record.error } : asRecord(record.result);
+      pending.get(Number(rpcId))!(result);
+      pending.delete(Number(rpcId));
       return;
     }
     if (record.method === "session/update") {
       const params = asRecord(record.params);
-      const update = asRecord(params.update);
-      const kind = asString(update.sessionUpdate);
-      if (kind === "agent_message_chunk" || kind === "agent_thought_chunk") {
-        const content = asRecord(update.content);
-        const text = asString(content.text);
-        if (text) input.onText(text);
-      }
-      if (kind === "tool_call" || kind === "tool_call_update") {
-        const title = asString(update.title) || asString(update.toolCallId) || "tool";
-        const statusRaw = asString(update.status).toLowerCase();
-        const status = statusRaw === "completed" || statusRaw === "failed" || statusRaw === "error"
-          ? (statusRaw === "completed" ? "completed" : "error")
-          : "running";
-        input.onTool(canonicalizeToolPart({
-          id: asString(update.toolCallId) || crypto.randomUUID(),
-          name: title,
-          status,
-          input: update.rawInput ? JSON.stringify(update.rawInput) : undefined,
-          result: update.content ? JSON.stringify(update.content) : undefined,
-        }));
-      }
+      applyAcpSessionUpdate(asRecord(params.update), input);
     }
   };
 
@@ -155,4 +183,3 @@ export async function runAcpStdioAgent(input: AcpRunInput): Promise<{ sessionId?
     throw error;
   }
 }
-

@@ -52,6 +52,7 @@ export type ToolCallData = {
   status: string;
   detail?: string;
   kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "automation" | "compaction" | "other";
+  source?: "mcp" | "native" | "browser";
   path?: string;
   diff?: { before?: string; after?: string; additions?: number; deletions?: number };
   input?: string;
@@ -368,6 +369,7 @@ export const ToolCallChip = memo(function ToolCallChip({
   nested = false,
   todos,
   hostnames,
+  source,
 }: ToolCallProps) {
   const [userOpen, setUserOpen] = useState(false);
   const running = isToolRunning(status);
@@ -378,6 +380,7 @@ export const ToolCallChip = memo(function ToolCallChip({
   const resolvedName = display.name || name;
   const deleteTool = /(^|[._:/-])(delete|remove|unlink)(?=[._:/-]|$)/i.test(resolvedName);
   const headline = toolCallHeadline({ name: resolvedName, kind: resolvedKind, input, detail, path, hostnames });
+ const sourceLabel = source === "mcp" && resolvedKind !== "mcp" ? "Metis" : source === "native" ? "CLI" : null;
   const Icon = deleteTool && (resolvedKind === "edit" || headline.icon === "edit")
     ? Trash2
     : ACTION_ICONS[headline.icon];
@@ -551,7 +554,7 @@ export const ToolCallChip = memo(function ToolCallChip({
             <ChevronRight className={cn("size-3 shrink-0 transition-transform", expanded && "rotate-90")} />
           )}
           <Icon className="size-3 shrink-0 opacity-70" />
-          <span className={cn("truncate", deleteTool && "text-rose-400/80")}>{headline.title}</span>
+          <span className={cn("truncate", deleteTool && "text-rose-400/80")}>{headline.title}{sourceLabel ? <span className="ml-1 text-[10px] uppercase tracking-wide opacity-50">{sourceLabel}</span> : null}</span>
           {previewText ? (
             <span className="hidden truncate text-muted-foreground/45 sm:inline">· {previewText}</span>
           ) : null}

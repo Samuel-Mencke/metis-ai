@@ -15,6 +15,7 @@ import { skillsCatalogPrompt } from "@/lib/skills";
 import { getUserAgentCwd, getMcpServers } from "@/lib/mcp";
 import { resolveAgentPath } from "@/lib/revert";
 import { appendRunEvent, enqueueJob, getJob, touchJob, updateJob } from "@/lib/db-jobs";
+import { canonicalizeToolPart } from "@/lib/providers/tool-events";
 import { logError } from "@/lib/error-logs";
 import { isModelAllowed } from "@/lib/model-access";
 import { buildAttachmentPrompt } from "@/lib/uploads";
@@ -1090,7 +1091,7 @@ export async function runQueuedJob(job: AgentJob) {
       const todos = todosFromToolPayload(inputText, resultText);
       const kind = classifyToolKind(displayName || resolvedName, editArgs, toolResult);
       const stableId = kind === "todo" ? `todo-${job.id}` : toolId;
-      const nextTool: ToolPart = {
+      const nextTool: ToolPart = canonicalizeToolPart({
         id: stableId,
         name: displayName || resolvedName,
         status: toolStatus,
@@ -1102,7 +1103,7 @@ export async function runQueuedJob(job: AgentJob) {
         ...(resultText ? { result: resultText } : {}),
         ...(todos?.length ? { todos } : {}),
         ...(subagent ? { subagent } : {}),
-      };
+      });
       const existingToolIndex = tools.findIndex((tool) => tool.id === stableId);
       if (existingToolIndex >= 0) {
         tools[existingToolIndex] = { ...tools[existingToolIndex], ...nextTool };
