@@ -1081,7 +1081,7 @@ function stdioGatewayConfig(gateway: { type: "stdio"; command: string; args: str
   return { command: gateway.command, args: gateway.args, env: gateway.env };
 }
 
-function modeMcpEnv(context: ProviderContext): Record<string, string> {
+ function modeMcpEnv(context: ProviderContext): Record<string, string> {
   const gateway = getMcpServers(providerMcpContext(context)).gateway;
   return gateway.type === "http" ? {} : gateway.env;
 }
