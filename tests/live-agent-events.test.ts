@@ -30,7 +30,7 @@ test("cursor tool updates accept flat and nested SDK payload shapes", () => {
 
 test("xAI provider path exposes live web search tools", () => {
   const source = readFileSync(path.join(root, "lib", "providers", "runner.ts"), "utf8");
-  assert.match(source, /tools\.web_search/);
+  assert.match(source, /tools\.webSearch|tools\.web_search/);
   assert.match(source, /\.responses\(modelId\)/);
   assert.match(source, /onThinking/);
   assert.match(source, /part\.type === "reasoning-delta"/);
