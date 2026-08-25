@@ -18,6 +18,12 @@
       "sourceType": "github",
       "skillPath": "toolchains/javascript/testing/playwright/SKILL.md",
       "computedHash": "003fc7f5ee2ba795786f4f5689900be32fcdf53a834777512091ac1192274c07"
+    },
+    "build-discipline": {
+      "source": "manual",
+      "sourceType": "local",
+      "skillPath": "skills/manual/build-discipline/SKILL.md",
+      "computedHash": "03b7a3053fcfeedf1e81e0ac3587ceed82709dd4425790f70ae1212704c32edd"
     }
   }
 }
