@@ -33,10 +33,10 @@ export type UsageSelection = {
 export function usageKeyForProvider(providerId?: string | null): string | null {
   const key = (providerId || "").trim().toLowerCase();
   if (!key) return null;
-  if (key === "cursor" || key === "cursor-agent") return "cursor";
-  if (key === "codex") return "codex";
-  if (key === "antigravity") return "antigravity";
-  if (key === "zai" || key === "z.ai" || key === "z-ai" || key === "glm") return "zai";
+  if (key === "cursor" || key === "cursor-agent" || key === "cursor-sdk") return "cursor";
+  if (key === "codex" || key === "chatgpt" || key === "openai-codex") return "codex";
+  if (key === "antigravity" || key === "agy") return "antigravity";
+  if (key === "zai" || key === "z.ai" || key === "z-ai" || key === "glm" || key === "zhipu") return "zai";
   return null;
 }
 
@@ -54,11 +54,12 @@ export function usageKeyForSelection(selection: UsageSelection): string | null {
   // quota owner so the footer follows the backend that is actually billed.
   const localGateway = /samuel ai gateway/i.test(selection.connectionLabel || "");
   const model = (selection.modelId || "").toLowerCase();
-  if (localGateway && /^agy[-_.]/i.test(model)) return "antigravity";
+  if (localGateway && /(?:^|[-_.])(agy|gemini)(?:[-_.]|$)/i.test(model)) return "antigravity";
+  if (localGateway && /(?:^|[-_.])(glm|zai|z-ai)(?:[-_.]|$)/i.test(model)) return "zai";
   if (localGateway && /^gpt[-_.]?5(?:[.\-_]|$)/i.test(model)) return "codex";
   if (/\bz\.?ai\b|\bz-ai\b|\bglm(?:[-_. ]?\d)?/i.test(haystack)) return "zai";
-  if (/\bantigravity\b/i.test(haystack)) return "antigravity";
-  if (/\bcodex\b/i.test(haystack)) return "codex";
+  if (/\bantigravity\b|\bagy\b/i.test(haystack)) return "antigravity";
+  if (/\bcodex\b|\bchatgpt\b/i.test(haystack)) return "codex";
   if (/\bcursor\b/i.test(haystack)) return "cursor";
   return null;
 }
@@ -91,6 +92,45 @@ export function selectPrimaryUsageWindow(windows: UsageWindow[]): (UsageWindow &
 
 export function percentLeft(usedPercent: number): number {
   return Math.min(100, Math.max(0, 100 - usedPercent));
+}
+
+export const QUOTA_WARN_REMAINING_PCT = 10;
+
+export type QuotaAlert = {
+  providerKey: string;
+  providerName: string;
+  windowLabel: string;
+  remainingPct: number;
+  resetsAt: string | null;
+};
+
+/** Official dashboard quotas that have fallen to the remaining-percent threshold.
+ * Local gateway telemetry is ignored so we never warn on made-up activity data. */
+export function lowQuotaAlerts(
+  snapshot: UsageSnapshot | null,
+  remainingPct = QUOTA_WARN_REMAINING_PCT,
+): QuotaAlert[] {
+  if (!snapshot) return [];
+  const alerts: QuotaAlert[] = [];
+  for (const provider of snapshot.providers) {
+    if (provider.source === "local") continue;
+    const official = ["cursor", "codex", "zai", "antigravity"].includes(provider.key)
+      || provider.source === "dashboard";
+    if (!official) continue;
+    if (provider.status !== "live" && provider.status !== "stale") continue;
+    const primary = selectPrimaryUsageWindow(provider.windows);
+    if (!primary) continue;
+    const left = percentLeft(primary.usedPercent);
+    if (left > remainingPct) continue;
+    alerts.push({
+      providerKey: provider.key,
+      providerName: provider.name,
+      windowLabel: primary.label,
+      remainingPct: left,
+      resetsAt: primary.resetsAt,
+    });
+  }
+  return alerts;
 }
 
 export function formatResetAt(resetsAt: string | null | undefined): string | null {

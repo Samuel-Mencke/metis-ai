@@ -2,10 +2,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   formatResetAt,
+  lowQuotaAlerts,
   matchUsageProvider,
   percentLeft,
   selectPrimaryUsageWindow,
@@ -257,13 +259,25 @@ export function PlanUsagePanel({
           Refresh
         </button>
       </div>
+      {lowQuotaAlerts(snapshot).length ? (
+        <div className="rounded-lg border border-amber-400/40 bg-amber-400/10 p-3 text-xs text-amber-200">
+          {lowQuotaAlerts(snapshot).map((alert) => (
+            <p key={`${alert.providerKey}:${alert.windowLabel}`}>
+              {alert.providerName}: {alert.remainingPct.toFixed(0)}% left on {alert.windowLabel}
+              {alert.resetsAt ? ` · resets in ${formatResetAt(alert.resetsAt) || "pending"}` : ""}.
+            </p>
+          ))}
+        </div>
+      ) : null}
       {!snapshot ? (
         <div className="rounded-lg border border-border/60 p-4 text-xs text-muted-foreground">
           Usage has not been loaded yet.
         </div>
       ) : (
         <div className="grid min-w-0 grid-cols-1 gap-3">
-          {snapshot.providers.map((provider) => (
+          {snapshot.providers
+              .filter((provider) => provider.source === "dashboard" || ["cursor", "codex", "zai", "antigravity"].includes(provider.key))
+              .map((provider) => (
             <div key={provider.key} className="min-w-0 overflow-hidden rounded-lg border border-border/60 p-4">
               <UsageDetails provider={provider} />
             </div>
@@ -321,6 +335,24 @@ export function usePlanUsageSnapshot(enabled = true) {
       }
     };
   }, [enabled]);
+
+  useEffect(() => {
+    if (!enabled || !snapshot) return;
+    const day = new Date().toISOString().slice(0, 10);
+    for (const alert of lowQuotaAlerts(snapshot)) {
+      const id = `metis-quota-alert:${alert.providerKey}:${alert.windowLabel}:${day}`;
+      try {
+        if (typeof sessionStorage !== "undefined" && sessionStorage.getItem(id)) continue;
+        sessionStorage?.setItem(id, "1");
+      } catch {
+        /* private mode / SSR */
+      }
+      const reset = formatResetAt(alert.resetsAt);
+      toast.warning(`${alert.providerName} quota is low`, {
+        description: `${alert.remainingPct.toFixed(0)}% left on ${alert.windowLabel}${reset ? ` · resets in ${reset}` : ""}`,
+      });
+    }
+  }, [enabled, snapshot]);
 
   const refresh = useCallback(async (force = false) => {
     await loadSharedPlanUsage(force);

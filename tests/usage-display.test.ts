@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-  matchUsageProvider,
+  lowQuotaAlerts,
+ matchUsageProvider,
   parseCursorUsageBody,
  usageKeyForProvider,
   selectPrimaryUsageWindow,
@@ -61,9 +62,20 @@ test("usage selection maps Samuel gateway plan aliases to their real quota owner
   const providers = [
     { key: "codex", name: "Codex", status: "live" as const, windows: [{ label: "weekly", usedPercent: 42, resetsAt: null }] },
     { key: "antigravity", name: "Antigravity", status: "live" as const, windows: [{ label: "quota", usedPercent: 12, resetsAt: null }] },
+    { key: "zai", name: "z.ai", status: "live" as const, windows: [{ label: "5h", usedPercent: 9, resetsAt: null }] },
+    { key: "cursor", name: "Cursor", status: "live" as const, windows: [{ label: "included", usedPercent: 20, resetsAt: null }] },
   ];
   assert.equal(matchUsageProvider(providers, { providerId: "compatible", connectionLabel: "Samuel AI Gateway", modelId: "gpt-5.6-luna" })?.key, "codex");
   assert.equal(matchUsageProvider(providers, { providerId: "compatible", connectionLabel: "Samuel AI Gateway", modelId: "agy-gemini-3.6-flash-high" })?.key, "antigravity");
+  assert.equal(matchUsageProvider(providers, { providerId: "compatible", connectionLabel: "Samuel AI Gateway", modelId: "gemini-3-flash" })?.key, "antigravity");
+  assert.equal(matchUsageProvider(providers, { providerId: "compatible", connectionLabel: "Samuel AI Gateway", modelId: "glm-5" })?.key, "zai");
+});
+
+test("usage keys resolve Cursor, Codex, z.ai, and Antigravity aliases", () => {
+  assert.equal(usageKeyForProvider("cursor-agent"), "cursor");
+  assert.equal(usageKeyForProvider("chatgpt"), "codex");
+  assert.equal(usageKeyForProvider("agy"), "antigravity");
+  assert.equal(usageKeyForProvider("zhipu"), "zai");
 });
 
 test("usage selection falls back to exact gateway telemetry without inventing a quota", () => {
@@ -113,4 +125,20 @@ test("usage response normalization accepts wrapped, string-valued, and fallback 
 test("usage response normalization rejects malformed payloads without inventing a percentage", () => {
   assert.equal(parseCursorUsageBody({ data: { individualUsage: { plan: { used: "nope", limit: 0 } } } }), null);
   assert.equal(parseCursorUsageBody(null), null);
+});
+
+test("lowQuotaAlerts warns only on official dashboard windows at or below 10% remaining", () => {
+  const snapshot = {
+    fetchedAt: new Date().toISOString(),
+    providers: [
+      { key: "cursor", name: "Cursor", status: "live" as const, source: "dashboard" as const, windows: [{ label: "included", usedPercent: 92, resetsAt: null }] },
+      { key: "codex", name: "Codex", status: "live" as const, source: "dashboard" as const, windows: [{ label: "weekly", usedPercent: 10, resetsAt: null }] },
+      { key: "gateway:glm:glm-5", name: "Gateway", status: "live" as const, source: "local" as const, windows: [{ label: "5h", usedPercent: 99, resetsAt: null }] },
+    ],
+  };
+  const alerts = lowQuotaAlerts(snapshot);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0]?.providerKey, "cursor");
+  assert.equal(alerts[0]?.remainingPct, 8);
+  assert.equal(lowQuotaAlerts(snapshot, 5).length, 0);
 });

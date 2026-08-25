@@ -1017,9 +1017,10 @@ function runMatchesModel(
 ) {
   if (typeof run.modelId !== "string" || !run.modelId) return false;
   if (run.providerId && run.providerId !== selection.providerKey) return false;
-  if (run.connectionId && run.connectionId !== selection.connectionId) return false;
+  if (run.connectionId && selection.connectionId && run.connectionId !== selection.connectionId) return false;
   const runModelId = parseModelKey(run.modelId).modelId;
-  return runModelId === selection.modelId || run.modelId === selection.modelId;
+  const selectedModelId = parseModelKey(selection.modelId).modelId;
+  return runModelId === selectedModelId || run.modelId === selection.modelId;
 }
 
 type ChatSnapshot = {
@@ -7087,14 +7088,14 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         contextWindow: contextWindowForModel({ id: selectedKey.modelId || modelId, displayName }),
       } satisfies ModelInfo;
     })();
-  const latestUsage = [...messages]
+  const measuredRuns = [...messages]
     .reverse()
-    .find((message) =>
-      message.role === "assistant" &&
-      typeof message.runMetadata?.inputTokens === "number" &&
-      runMatchesModel(message.runMetadata, selectedKey),
-    )
-    ?.runMetadata;
+    .filter((message) => message.role === "assistant" && typeof message.runMetadata?.inputTokens === "number")
+    .map((message) => message.runMetadata!);
+  const selectedRunUsage = measuredRuns.find((run) => runMatchesModel(run, selectedKey));
+  // A measurement from another model still describes this transcript, so it
+  // beats the raw estimate. Switching providers must not reset the reading.
+  const latestUsage = selectedRunUsage || measuredRuns[0];
   // Keep the fallback's serialization/token ratio aligned with the runner.
   // The UI cannot reproduce provider instructions or runner compaction exactly,
   // but it can use the same shared estimator for the visible transcript shape.
@@ -7112,7 +7113,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     contextWindowForSelection(selectedModel, modelParams),
     contextUsed,
   );
-  const contextEstimated = latestUsage?.inputTokensEstimated ?? !latestUsage?.inputTokens;
+  const contextEstimated = !selectedRunUsage || (selectedRunUsage.inputTokensEstimated ?? false);
   const contextModelMaximum = contextWindowForModel(selectedModel);
   const contextSelection = contextSelectionLabel(selectedModel, modelParams);
   const contextCompacting = busy && contextTotal > 0 && contextPressure(contextUsed, contextTotal).compactRecommended;
@@ -7121,8 +7122,14 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     providerId: selectedModel.providerId,
     providerName: selectedModel.providerName,
     connectionLabel: selectedModel.connectionLabel,
+    connectionId: selectedKey.connectionId || selectedModel.connectionId,
     modelId: selectedKey.modelId || selectedModel.id,
   });
+  const usageSelectionKey = `${selectedModel.providerId || ""}|${selectedKey.connectionId || ""}|${selectedKey.modelId || ""}`;
+  useEffect(() => {
+    if (!authed) return;
+    void refreshPlanUsage(true);
+  }, [authed, usageSelectionKey, busy, refreshPlanUsage]);
   const selectedUsageProviderName =
     selectedModel.connectionLabel ||
     selectedModel.providerName ||
@@ -8147,7 +8154,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                 modelMaximum={contextModelMaximum}
                 estimated={contextEstimated}
                 measuredAt={latestUsage?.completedAt}
-                source={contextEstimated ? "current chat estimate" : "last model run"}
+                source={selectedRunUsage ? "last model run" : latestUsage ? "last model run on another model" : "current chat estimate"}
                 selectionLabel={contextSelection}
                 compacting={contextCompacting}
               />
