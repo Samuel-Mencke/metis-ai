@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { config } from "@/lib/config";
+import { RUNTIME_MODES } from "@/lib/runtime-mode";
 
 export type ToolPart = {
   id: string;
@@ -401,6 +402,8 @@ export type Chat = {
   agentId?: string;
   /** Selected provider/model key for this chat. */
   modelId?: string;
+  /** Runtime execution mode; see lib/runtime-mode.ts. */
+  runtimeMode?: string;
   /** Cursor model params, e.g. [{ id: "fast", value: "true" }] */
   modelParams?: Array<{ id: string; value: string }>;
   messages: ChatMessage[];
@@ -422,6 +425,14 @@ export type Chat = {
   runUpdatedAt?: string;
   queueMessage?: string;
   pendingQuestion?: PendingChatQuestion;
+  pendingApproval?: {
+    id: string;
+    title: string;
+    command?: string;
+    files?: Array<{ path: string; status: string }>;
+    createdAt: string;
+  };
+  approvedPatterns?: string[];
   badge?: ChatBadge;
   share?: ChatShare;
   pinned?: boolean;
@@ -445,6 +456,14 @@ export type ChatIndexEntry = {
   runUpdatedAt?: string;
   queueMessage?: string;
   pendingQuestion?: PendingChatQuestion;
+  pendingApproval?: {
+    id: string;
+    title: string;
+    command?: string;
+    files?: Array<{ path: string; status: string }>;
+    createdAt: string;
+  };
+  approvedPatterns?: string[];
   badge?: ChatBadge;
   pinned?: boolean;
   archived?: boolean;
@@ -674,6 +693,9 @@ export function updateChat(
     runStatus?: ChatRunStatus;
     runUpdatedAt?: string | null;
     pendingQuestion?: PendingChatQuestion | null;
+    runtimeMode?: string | null;
+    pendingApproval?: Chat["pendingApproval"] | null;
+    approvedPatterns?: string[] | null;
   },
   ownerId?: string,
 ): Chat | null {
@@ -782,6 +804,51 @@ export function updateChat(
     chat.runUpdatedAt = patch.runUpdatedAt || nowIso();
   } else if (patch.runUpdatedAt === null) {
     delete chat.runUpdatedAt;
+  }
+  if (patch.runtimeMode === null) {
+    delete chat.runtimeMode;
+  } else if (typeof patch.runtimeMode === "string") {
+    const runtimeMode = patch.runtimeMode.trim();
+    if (runtimeMode && (RUNTIME_MODES as readonly string[]).includes(runtimeMode)) {
+      chat.runtimeMode = runtimeMode;
+    }
+  }
+  if (patch.pendingApproval === null) {
+    delete chat.pendingApproval;
+  } else if (patch.pendingApproval) {
+    const pendingApproval = patch.pendingApproval;
+    if (pendingApproval.id.trim() && pendingApproval.title.trim()) {
+      chat.pendingApproval = {
+        id: pendingApproval.id.slice(0, 200),
+        title: pendingApproval.title.slice(0, 500),
+        ...(typeof pendingApproval.command === "string" && pendingApproval.command.trim()
+          ? { command: pendingApproval.command.slice(0, 20_000) }
+          : {}),
+        ...(Array.isArray(pendingApproval.files)
+          ? {
+              files: pendingApproval.files
+                .filter((file) => file && typeof file.path === "string" && file.path.trim())
+                .slice(0, 100)
+                .map((file) => ({
+                  path: file.path.slice(0, 2_000),
+                  status: String(file.status || "").slice(0, 100),
+                })),
+            }
+          : {}),
+        createdAt: pendingApproval.createdAt || nowIso(),
+      };
+    }
+  }
+  if (patch.approvedPatterns === null) {
+    delete chat.approvedPatterns;
+  } else if (Array.isArray(patch.approvedPatterns)) {
+    const approvedPatterns = [...new Set(
+      patch.approvedPatterns
+        .map((pattern) => String(pattern || "").trim())
+        .filter(Boolean),
+    )].slice(0, 100);
+    if (approvedPatterns.length) chat.approvedPatterns = approvedPatterns;
+    else delete chat.approvedPatterns;
   }
   if (patch.pendingQuestion === null) {
     delete chat.pendingQuestion;

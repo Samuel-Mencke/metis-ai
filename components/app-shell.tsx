@@ -30,6 +30,9 @@ import {
   Copy,
   ChevronDown,
   ChevronRight,
+  ShieldAlert,
+  FilePen,
+  Unlock,
   CircleAlert,
   Brain,
   Bot,
@@ -97,6 +100,7 @@ import { BrowserSettingsControls } from "@/components/browser-settings-controls"
 import { CommandPalette } from "@/components/command-palette";
 import type { MemoryItem } from "@/components/memories-panel";
 import type { ChatLogEntry, ChatLogCategory } from "@/lib/chat-logs";
+import { ApprovalPanel, type ApprovalDecisionValue, type PendingApprovalView } from "@/components/approval-panel";
 import { ProviderLogo } from "@/components/provider-logo";
 import { ModelOptionsMenu } from "@/components/model-options-menu";
 import {
@@ -178,6 +182,12 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { cn } from "@/lib/utils";
 import { modelAttrSummary } from "@/lib/model-label";
 import { clientConfig } from "@/lib/client-config";
+import {
+  DEFAULT_RUNTIME_MODE,
+  RUNTIME_MODES,
+  normalizeRuntimeMode,
+  type RuntimeMode,
+} from "@/lib/runtime-mode";
 import { modelKey, parseModelKey } from "@/lib/providers/types";
 import type { AgentMode } from "@/lib/store";
 import {
@@ -565,6 +575,7 @@ type ChatIndexEntry = {
   runUpdatedAt?: string;
   queueMessage?: string;
   pendingQuestion?: PendingQuestion;
+  pendingApproval?: PendingApprovalView;
   badge?: "blue" | "red";
   pinned?: boolean;
   archived?: boolean;
@@ -608,6 +619,8 @@ type Chat = ChatIndexEntry & {
   workspaces?: WorkspaceItem[];
   browserContext?: BrowserContext;
   sessionState?: ChatSessionState;
+  runtimeMode?: RuntimeMode;
+  pendingApproval?: PendingApprovalView;
 };
 
 type ChatPage = {
@@ -744,6 +757,17 @@ const CHAT_MESSAGE_PRELOAD_MAX = CHAT_MESSAGE_LOAD_LIMIT;
 const MODEL_STORAGE_KEY = `${clientConfig.storagePrefix}_model`;
 const PARAMS_STORAGE_KEY = `${clientConfig.storagePrefix}_model_params`;
 const MODE_STORAGE_KEY = `${clientConfig.storagePrefix}_mode`;
+const RUNTIME_MODE_STORAGE_KEY = "metis.runtimeMode";
+const RUNTIME_MODE_OPTIONS: Array<{ value: RuntimeMode; label: string }> = [
+  { value: "approval-required", label: "Approval required" },
+  { value: "auto-accept-edits", label: "Auto-accept edits" },
+  { value: "auto", label: "Auto" },
+  { value: "full-access", label: "Full access" },
+];
+function RuntimeModeIcon({ mode, className }: { mode: RuntimeMode; className?: string }) {
+  const Icon = mode === "approval-required" ? ShieldAlert : mode === "auto-accept-edits" ? FilePen : mode === "auto" ? Bot : Unlock;
+  return <Icon className={className} />;
+}
 const SIDEBAR_WIDTH_STORAGE_KEY = `${clientConfig.storagePrefix}_sidebar_width`;
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 420;
@@ -1038,9 +1062,11 @@ type ChatSnapshot = {
   workspaces: WorkspaceItem[];
   browserContext: BrowserContext;
   sessionState: ChatSessionState;
+  runtimeMode?: RuntimeMode;
   runStatus?: "idle" | "running" | "paused" | "waiting_for_user" | "waiting_input" | "completed" | "cancelled" | "failed" | "interrupted" | "error";
   queueMessage?: string;
   pendingQuestion?: PendingQuestion;
+  pendingApproval?: PendingApprovalView;
   messageOffset: number;
   hasEarlierMessages: boolean;
 };
@@ -1798,6 +1824,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [modelId, setModelId] = useState("");
   const [modes, setModes] = useState<AgentMode[]>([]);
   const [modeId, setModeId] = useState("agent");
+  const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>(DEFAULT_RUNTIME_MODE);
   const [defaultModelId, setDefaultModelId] = useState("");
   const [defaultModelParams, setDefaultModelParams] = useState<ModelParamSelection[]>([]);
   const [modelParamsByModel, setModelParamsByModel] = useState<Record<string, ModelParamSelection[]>>({});
@@ -1970,6 +1997,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
   const [showScrollDown, setShowScrollDown] = useState(false);
   const [liveStatus, setLiveStatus] = useState("");
   const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<PendingApprovalView | null>(null);
+  const [resolvingApproval, setResolvingApproval] = useState(false);
   const [recoveryStatus, setRecoveryStatus] = useState<"restored" | "needs_attention" | "not_available" | null>(null);
   const [recoveryJobId, setRecoveryJobId] = useState<string | null>(null);
   const [recoveryCanResume, setRecoveryCanResume] = useState(false);
@@ -3359,12 +3388,12 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         seenChatUpdatedAtRef.current.set(chat.id, chat.updatedAt);
       }
       chatListInitializedRef.current = true;
-      const attentionChats = data.chats.filter((chat) => chat.pendingQuestion);
+      const attentionChats = data.chats.filter((chat) => chat.pendingQuestion || chat.pendingApproval);
       setAttentionChatIds((current) => [
         ...new Set([
           ...current.filter((id) => data.chats.some((chat) => chat.id === id)),
           ...attentionChats.map((chat) => chat.id),
-          ...data.chats.filter((chat) => chat.badge === "red").map((chat) => chat.id),
+          ...data.chats.filter((chat) => chat.badge === "red" || chat.pendingApproval).map((chat) => chat.id),
         ]),
       ]);
       for (const chat of attentionChats) {
@@ -3427,6 +3456,43 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         sessionState: { ...(cached.sessionState || {}), modeId: nextModeId },
       });
     }
+  }
+
+  async function selectRuntimeMode(nextRuntimeMode: RuntimeMode) {
+    if (!RUNTIME_MODES.includes(nextRuntimeMode)) return;
+    setRuntimeMode(nextRuntimeMode);
+    localStorage.setItem(RUNTIME_MODE_STORAGE_KEY, nextRuntimeMode);
+    if (!activeChatId) return;
+    const cached = chatCacheRef.current.get(activeChatId);
+    const response = await fetch(`/api/chats/${activeChatId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runtimeMode: nextRuntimeMode,
+        sessionState: { ...(cached?.sessionState || {}) },
+      }),
+    });
+    if (!response.ok) {
+      toast.error("Could not save runtime mode");
+      return;
+    }
+    chatCacheRef.current.set(activeChatId, {
+      ...(cached || {
+        id: activeChatId,
+        messages: [],
+        chatTitle,
+        modelId,
+        modelParams: [],
+        queuedMessages: [],
+        workspaces: [],
+        browserContext: normalizeBrowserContext(undefined, activeChatId),
+        sessionState: {},
+        messageOffset: 0,
+        hasEarlierMessages: false,
+      }),
+      runtimeMode: nextRuntimeMode,
+    });
+    await loadChats();
   }
 
   const loadModels = useCallback(async () => {
@@ -3784,6 +3850,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     const savedModeId = session.modeId || "agent";
     setModeId(savedModeId);
     if (typeof window !== "undefined") localStorage.setItem(MODE_STORAGE_KEY, savedModeId);
+    const savedRuntimeMode = normalizeRuntimeMode(snap.runtimeMode);
+    setRuntimeMode(savedRuntimeMode);
+    if (typeof window !== "undefined") localStorage.setItem(RUNTIME_MODE_STORAGE_KEY, savedRuntimeMode);
+    setPendingApproval(snap.pendingApproval ?? null);
     setModelParams(
       Object.prototype.hasOwnProperty.call(modelParamsByModel, snap.modelId)
         ? modelParamsByModel[snap.modelId] || []
@@ -3960,6 +4030,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         runStatus: data.chat.runStatus,
         queueMessage: data.chat.queueMessage,
         pendingQuestion: data.chat.pendingQuestion,
+        runtimeMode: normalizeRuntimeMode(data.chat.runtimeMode),
+        pendingApproval: data.chat.pendingApproval,
         messageOffset: data.messageOffset ?? 0,
         hasEarlierMessages: Boolean(data.hasEarlierMessages),
       };
@@ -4040,6 +4112,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       setLoadingEarlierMessages(false);
       pendingQuestionIdRef.current = null;
       setPendingQuestion(null);
+      setPendingApproval(null);
       setLiveStatus("");
       setActiveWorkspaceId(null);
       setWorkspaces([]);
@@ -4104,6 +4177,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               runStatus: data.chat.runStatus,
               queueMessage: data.chat.queueMessage,
               pendingQuestion: data.chat.pendingQuestion,
+        runtimeMode: normalizeRuntimeMode(data.chat.runtimeMode),
+        pendingApproval: data.chat.pendingApproval,
               messageOffset: cached.messageOffset,
               hasEarlierMessages: Boolean(data.hasEarlierMessages),
             };
@@ -4138,6 +4213,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
             setBrowserInput(activeTab?.url || "");
             const session = next.sessionState || {};
             setModeId(session.modeId || "agent");
+            const serverRuntimeMode = normalizeRuntimeMode(next.runtimeMode);
+            setRuntimeMode(serverRuntimeMode);
+            localStorage.setItem(RUNTIME_MODE_STORAGE_KEY, serverRuntimeMode);
+            setPendingApproval(next.pendingApproval ?? null);
             setActiveWorkspaceId(
               session.activeWorkspaceId && next.workspaces.some((item) => item.id === session.activeWorkspaceId)
                 ? session.activeWorkspaceId
@@ -4172,7 +4251,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
               next.runStatus === "running" ||
                 next.runStatus === "waiting_input" ||
                 next.runStatus === "waiting_for_user" ||
-                Boolean(next.pendingQuestion),
+                Boolean(next.pendingQuestion || next.pendingApproval),
             );
           } catch {
             /* ignore */
@@ -4218,6 +4297,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         runStatus: data.chat.runStatus,
         queueMessage: data.chat.queueMessage,
         pendingQuestion: data.chat.pendingQuestion,
+        runtimeMode: normalizeRuntimeMode(data.chat.runtimeMode),
+        pendingApproval: data.chat.pendingApproval,
         messageOffset: data.messageOffset ?? 0,
         hasEarlierMessages: Boolean(data.hasEarlierMessages),
       };
@@ -4523,6 +4604,9 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         const serverModeId = data.chat.sessionState?.modeId || "agent";
         setModeId(serverModeId);
         if (typeof window !== "undefined") localStorage.setItem(MODE_STORAGE_KEY, serverModeId);
+        const serverRuntimeMode = normalizeRuntimeMode(data.chat.runtimeMode);
+        setRuntimeMode(serverRuntimeMode);
+        localStorage.setItem(RUNTIME_MODE_STORAGE_KEY, serverRuntimeMode);
         setModelParams(
           data.chat.modelId && Object.prototype.hasOwnProperty.call(modelParamsByModel, data.chat.modelId)
             ? modelParamsByModel[data.chat.modelId] || []
@@ -4538,9 +4622,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         const waitingForInput =
           data.chat.runStatus === "waiting_input" ||
           data.chat.runStatus === "waiting_for_user" ||
-          Boolean(data.chat.pendingQuestion);
+          Boolean(data.chat.pendingQuestion || data.chat.pendingApproval);
         pendingQuestionIdRef.current = data.chat.pendingQuestion?.questionId ?? null;
         setPendingQuestion(data.chat.pendingQuestion ?? null);
+        setPendingApproval(data.chat.pendingApproval ?? null);
         if (
           data.chat.pendingQuestion &&
           data.chat.pendingQuestion.questionId !== pendingQuestion?.questionId
@@ -4872,6 +4957,8 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
         },
         activeChatId,
       ),
+      runtimeMode,
+      pendingApproval: pendingApproval ?? undefined,
       sessionState: {
         terminalCwd: remoteTerminalCwd,
         fileCwd: remoteFileCwd,
@@ -4913,8 +5000,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
     workspaceOpen,
     workspaceWidth,
     modeId,
+    runtimeMode,
     busy,
     pendingQuestion,
+    pendingApproval,
     messageOffset,
     hasEarlierMessages,
   ]);
@@ -5753,6 +5842,27 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
       toast.error(error instanceof Error ? error.message : "Answer failed");
     } finally {
       setAnsweringQuestion(false);
+    }
+  }
+
+  async function submitApprovalDecision(decision: ApprovalDecisionValue) {
+    if (!pendingApproval || resolvingApproval) return;
+    setResolvingApproval(true);
+    try {
+      const response = await fetch("/api/chat/approval", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approvalId: pendingApproval.id, decision }),
+      });
+      const body = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      setPendingApproval(null);
+      if (activeChatIdRef.current) await loadChat(activeChatIdRef.current, { forceReload: true });
+      await loadChats();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Approval failed");
+    } finally {
+      setResolvingApproval(false);
     }
   }
 
@@ -7997,6 +8107,37 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                 </DropdownMenuContent>
               </DropdownMenu>
             ) : null}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 max-w-32 gap-1.5 rounded-full px-2 text-xs font-normal hover:text-foreground"
+                  title="Runtime permissions"
+                >
+                  <RuntimeModeIcon mode={runtimeMode} className="size-3.5 shrink-0" />
+                  <span className="truncate">
+                    {RUNTIME_MODE_OPTIONS.find((option) => option.value === runtimeMode)?.label || "Full access"}
+                  </span>
+                  <ChevronDown className="size-3 shrink-0 opacity-60" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-64">
+                <div className="px-2 py-1.5 text-[11px] text-muted-foreground">Runtime permissions</div>
+                {RUNTIME_MODE_OPTIONS.map((option) => (
+                  <DropdownMenuItem
+                    key={option.value}
+                    title={option.value === "auto" ? "Automatic provider behavior" : undefined}
+                    onClick={() => void selectRuntimeMode(option.value)}
+                  >
+                    <RuntimeModeIcon mode={option.value} className="size-4" />
+                    <span className="min-w-0 flex-1">{option.label}</span>
+                    {option.value === runtimeMode ? <Check className="size-3.5" /> : null}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
             <DropdownMenu open={modelMenuOpen} onOpenChange={setModelMenuOpen}>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -8351,7 +8492,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                       aria-label="Generating response"
                     />
                   ) : null}
-                  {activeChatId !== c.id && (c.badge === "red" || c.pendingQuestion || attentionChatIds.includes(c.id)) ? (
+                  {activeChatId !== c.id && (c.badge === "red" || c.pendingQuestion || c.pendingApproval || attentionChatIds.includes(c.id)) ? (
                     <span
                       className="size-2 shrink-0 rounded-full bg-red-500"
                       aria-label="Needs your attention"
@@ -9420,6 +9561,15 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                   </article>
                   );
                 })}
+                {pendingApproval ? (
+                  <div className="mb-4">
+                    <ApprovalPanel
+                      approval={pendingApproval}
+                      disabled={resolvingApproval}
+                      onDecision={(decision) => void submitApprovalDecision(decision)}
+                    />
+                  </div>
+                ) : null}
                 {pendingQuestion ? (
                   <section className="space-y-4 rounded-2xl border border-primary/30 bg-primary/[0.06] p-4 shadow-sm">
                     <div>

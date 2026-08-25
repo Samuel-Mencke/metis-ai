@@ -23,7 +23,7 @@ test("runner dispatches Codex and Claude Code to their MCP agent SDKs", () => {
   assert.match(source, /authType === "oauth"/);
   assert.doesNotMatch(source, /runOAuthAiSdk\(context, "codex"\)/);
   assert.doesNotMatch(source, /claudeSecretIsJsonOAuth/);
-  assert.match(source, /claudeMcpServers\(getMcpServers/);
+  assert.match(source, /claudeMcpServers\(\s*getMcpServers/);
   assert.match(source, /strictMcpConfig: true/);
   assert.match(source, /execution === "grok-cli"\) return runGrok/);
   assert.match(source, /execution === "opencode-cli"\) return runOpenCode/);
