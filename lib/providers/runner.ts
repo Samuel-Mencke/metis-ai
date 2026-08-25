@@ -1,7 +1,15 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { jsonSchema, stepCountIs, streamText, tool, type LanguageModel, type ModelMessage, type ToolSet } from "ai";
+import {
+  jsonSchema,
+  stepCountIs,
+  streamText,
+  tool,
+  type LanguageModel,
+  type ModelMessage,
+  type ToolSet,
+} from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogle } from "@ai-sdk/google";
 import { createGoogleVertex } from "@ai-sdk/google-vertex";
@@ -24,6 +32,20 @@ import { skillsCatalogPrompt } from "@/lib/skills";
 import { getJob, appendRunEvent, updateJob } from "@/lib/db-jobs";
 import { buildAttachmentPrompt } from "@/lib/uploads";
 import { config } from "@/lib/config";
+import {
+  approvalLimits,
+  createApproval,
+  getApproval,
+  heartbeatApproval,
+  resolveApproval,
+} from "@/lib/db-approvals";
+import {
+  approvalPatternFor,
+  RUNTIME_MODE_TO_CLAUDE_PERMISSION,
+  RUNTIME_MODE_TO_CODEX,
+  runtimeModeForChat,
+  shouldAutoApprove,
+} from "@/lib/runtime-mode";
 import { mcpBridgeTools } from "@/lib/mcp-bridge";
 import { getUserAgentCwd, getMcpServers, buildMcpContext } from "@/lib/mcp";
 import {
@@ -47,14 +69,22 @@ import { canonicalizeToolPart } from "@/lib/providers/tool-events";
 import { runAcpStdioAgent } from "@/lib/providers/acp-stdio";
 import type { AgentJob } from "@/lib/jobs";
 import { allModes, modeById } from "@/lib/modes";
-import { classifyToolKind, innerToolName, todosFromToolPayload } from "@/lib/tool-call-display";
-import { classifyTool, resolveMcpToolName, toolDetailFromArgs } from "@/lib/tool-kind";
+import {
+  classifyToolKind,
+  innerToolName,
+  todosFromToolPayload,
+} from "@/lib/tool-call-display";
+import {
+  classifyTool,
+  resolveMcpToolName,
+  toolDetailFromArgs,
+} from "@/lib/tool-kind";
 import { metisAgentIdentity } from "@/lib/agent-identity";
 import { compress } from "@/lib/compression";
 import {
   contextModeOf,
   CONTEXT_COMPACT_RATIO,
- effectiveContextBudget,
+  effectiveContextBudget,
   estimateContextTokens,
   type ContextMode,
   contextWindowForSelection,
@@ -62,9 +92,15 @@ import {
 import { logError } from "@/lib/error-logs";
 import { persistToolsForMessage } from "@/lib/tool-persistence";
 import { stripRawToolMarkup } from "@/lib/providers/tool-schema";
-import { executeEmbeddedToolFallbacks, type EmbeddedToolExecution } from "@/lib/providers/embedded-tool-fallback";
+import {
+  executeEmbeddedToolFallbacks,
+  type EmbeddedToolExecution,
+} from "@/lib/providers/embedded-tool-fallback";
 import { subagentMetadataFromTool } from "@/lib/subagent-tool";
-import { METIS_SHARED_AGENT_CONTROL, toolContractPrompt } from "@/lib/agent-control";
+import {
+  METIS_SHARED_AGENT_CONTROL,
+  toolContractPrompt,
+} from "@/lib/agent-control";
 import { recordSignal, type TaskCategory } from "@/lib/model-telemetry";
 import { LoopGuard, routeTask } from "@/lib/agent-efficiency";
 
@@ -88,16 +124,28 @@ type ProviderContext = {
   signal: AbortSignal;
   onText: (value: string) => void;
   onTool: (tool: ToolPart) => void;
-  onThinking: (data: { text?: string; replace?: boolean; done?: boolean; durationMs?: number }) => void;
+  onThinking: (data: {
+    text?: string;
+    replace?: boolean;
+    done?: boolean;
+    durationMs?: number;
+  }) => void;
   onStream: (data: Record<string, unknown>) => void;
- onCompaction: (event: CompactionEvent) => void;
+  onCompaction: (event: CompactionEvent) => void;
 };
 
 function telemetryCategory(message: string): TaskCategory {
   const text = String(message || "");
-  if (/\b(debug|bug|error|crash|fehler|kaputt)\b/i.test(text)) return "debugging";
-  if (/\b(implement|build|edit|fix|refactor|code|änder|baue|umsetzen)\b/i.test(text)) return "coding";
-  if (/\b(research|analyse|analyze|recherch|dokumentation|prüf)\b/i.test(text)) return "research";
+  if (/\b(debug|bug|error|crash|fehler|kaputt)\b/i.test(text))
+    return "debugging";
+  if (
+    /\b(implement|build|edit|fix|refactor|code|änder|baue|umsetzen)\b/i.test(
+      text,
+    )
+  )
+    return "coding";
+  if (/\b(research|analyse|analyze|recherch|dokumentation|prüf)\b/i.test(text))
+    return "research";
   if (text.length > 2_500) return "long-context";
   return "chat";
 }
@@ -112,10 +160,10 @@ function finalizeAlternativeTools(tools: ToolPart[]) {
 
 export type CompactionEvent = {
   type: "compaction";
- id: string;
- name: "context_compaction";
- kind: "compaction";
- systemTriggered: true;
+  id: string;
+  name: "context_compaction";
+  kind: "compaction";
+  systemTriggered: true;
   status: "started" | "completed" | "error";
   beforeTokens?: number;
   targetTokens?: number;
@@ -127,7 +175,10 @@ export type CompactionEvent = {
 const remoteToolSchema = jsonSchema<Record<string, unknown>>({
   type: "object",
   properties: {
-    target: { type: "string", description: "server or client:<remote-client-id>" },
+    target: {
+      type: "string",
+      description: "server or client:<remote-client-id>",
+    },
     path: { type: "string" },
     content: { type: "string" },
     oldText: { type: "string" },
@@ -141,26 +192,39 @@ const remoteToolSchema = jsonSchema<Record<string, unknown>>({
 });
 
 function providerRemoteTools(context: ProviderContext): ToolSet {
-  const mode = modeById(context.job.modeId || context.chat.sessionState?.modeId);
+  const mode = modeById(
+    context.job.modeId || context.chat.sessionState?.modeId,
+  );
   const canWrite = mode.allowedCategories.includes("write");
   const canRemote = mode.allowedCategories.includes("remote");
   if (!canRemote) return {};
   const call = async (action: string, args: Record<string, unknown> = {}) => {
-    const clientId = typeof args.target === "string" && args.target.startsWith("client:")
-      ? args.target.slice("client:".length).trim()
-      : typeof args.client_id === "string" ? args.client_id : "";
+    const clientId =
+      typeof args.target === "string" && args.target.startsWith("client:")
+        ? args.target.slice("client:".length).trim()
+        : typeof args.client_id === "string"
+          ? args.client_id
+          : "";
     if (action === "list_remote_clients") {
       const response = await fetch(
-        process.env.AI_CHAT_INTERNAL_REMOTE_CLIENT_URL || `http://127.0.0.1:${process.env.PORT || "3100"}/api/internal/remote-client`,
-        { headers: { Authorization: `Bearer ${String(process.env.MCP_BEARER_TOKEN || "")}`, "X-AI-Chat-User-Id": String(context.job.userId || "") } },
+        process.env.AI_CHAT_INTERNAL_REMOTE_CLIENT_URL ||
+          `http://127.0.0.1:${process.env.PORT || "3100"}/api/internal/remote-client`,
+        {
+          headers: {
+            Authorization: `Bearer ${String(process.env.MCP_BEARER_TOKEN || "")}`,
+            "X-AI-Chat-User-Id": String(context.job.userId || ""),
+          },
+        },
       );
       const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.error || "Failed to list remote clients");
+      if (!response.ok)
+        throw new Error(body.error || "Failed to list remote clients");
       return body.clients || [];
     }
     if (!clientId) throw new Error("target must be client:<remote-client-id>");
     const response = await fetch(
-      process.env.AI_CHAT_INTERNAL_REMOTE_CLIENT_URL || `http://127.0.0.1:${process.env.PORT || "3100"}/api/internal/remote-client`,
+      process.env.AI_CHAT_INTERNAL_REMOTE_CLIENT_URL ||
+        `http://127.0.0.1:${process.env.PORT || "3100"}/api/internal/remote-client`,
       {
         method: "POST",
         headers: {
@@ -168,7 +232,12 @@ function providerRemoteTools(context: ProviderContext): ToolSet {
           Authorization: `Bearer ${String(process.env.MCP_BEARER_TOKEN || "")}`,
           "X-AI-Chat-User-Id": String(context.job.userId || ""),
         },
-        body: JSON.stringify({ clientId, action, params: args, source: "agent" }),
+        body: JSON.stringify({
+          clientId,
+          action,
+          params: args,
+          source: "agent",
+        }),
       },
     );
     const body = await response.json().catch(() => ({}));
@@ -178,21 +247,40 @@ function providerRemoteTools(context: ProviderContext): ToolSet {
   const remoteTool = (
     description: string,
     execute: (args: Record<string, unknown>) => Promise<unknown>,
-  ) => tool({
-    description,
-    inputSchema: remoteToolSchema,
-    execute,
-  } as never) as ToolSet[string];
+  ) =>
+    tool({
+      description,
+      inputSchema: remoteToolSchema,
+      execute,
+    } as never) as ToolSet[string];
   const tools: ToolSet = {
-    list_remote_clients: remoteTool("List all connected remote clients and their status.", () => call("list_remote_clients")),
-    read_file: remoteTool("Read a UTF-8 file from a remote client.", (args) => call("read_file", args)),
-    list_directory: remoteTool("List a directory on a remote client.", (args) => call("list_directory", args)),
-    execute_command: remoteTool("Run a command on a remote client.", (args) => call("execute_command", args)),
+    list_remote_clients: remoteTool(
+      "List all connected remote clients and their status.",
+      () => call("list_remote_clients"),
+    ),
+    read_file: remoteTool("Read a UTF-8 file from a remote client.", (args) =>
+      call("read_file", args),
+    ),
+    list_directory: remoteTool("List a directory on a remote client.", (args) =>
+      call("list_directory", args),
+    ),
+    execute_command: remoteTool("Run a command on a remote client.", (args) =>
+      call("execute_command", args),
+    ),
   };
   if (canWrite) {
-    tools.write_file = remoteTool("Create or overwrite a UTF-8 file on a remote client.", (args) => call("write_file", args));
-    tools.edit_file = remoteTool("Replace oldText with newText in a remote client file.", (args) => call("edit_file", args));
-    tools.delete_file = remoteTool("Delete a file on a remote client.", (args) => call("delete_file", args));
+    tools.write_file = remoteTool(
+      "Create or overwrite a UTF-8 file on a remote client.",
+      (args) => call("write_file", args),
+    );
+    tools.edit_file = remoteTool(
+      "Replace oldText with newText in a remote client file.",
+      (args) => call("edit_file", args),
+    );
+    tools.delete_file = remoteTool(
+      "Delete a file on a remote client.",
+      (args) => call("delete_file", args),
+    );
   }
   return tools;
 }
@@ -207,7 +295,9 @@ function providerNativeSearchTools(context: ProviderContext): ToolSet {
   if (context.connection.providerKey !== "xai") return {};
   const client = createXai({
     apiKey: context.connection.secret,
-    ...(context.connection.baseUrl ? { baseURL: context.connection.baseUrl } : {}),
+    ...(context.connection.baseUrl
+      ? { baseURL: context.connection.baseUrl }
+      : {}),
   });
   return {
     web_search: client.tools.webSearch() as never,
@@ -217,7 +307,7 @@ function providerNativeSearchTools(context: ProviderContext): ToolSet {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : {};
 }
 
@@ -227,13 +317,18 @@ function asString(value: unknown) {
 
 function inheritedEnv(extra: Record<string, string | undefined> = {}) {
   return Object.fromEntries(
-    Object.entries({ ...process.env, ...extra })
-      .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    Object.entries({ ...process.env, ...extra }).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string",
+    ),
   );
 }
 
 function providerTaskMessage(job: AgentJob) {
-  return job.resumePrompt?.trim() || job.message || "Continue the current task without repeating completed work.";
+  return (
+    job.resumePrompt?.trim() ||
+    job.message ||
+    "Continue the current task without repeating completed work."
+  );
 }
 
 function providerPrompt(
@@ -243,15 +338,23 @@ function providerPrompt(
   modelParams?: ReadonlyArray<{ id: string; value: string }> | null,
 ) {
   const references = job.references?.length
-    ? job.references.map((reference) => [
-        `- [${reference.kind}] ${reference.label}`,
-        reference.detail ? `  Detail: ${reference.detail}` : "",
-        reference.path ? `  Path/URL: ${reference.path}` : "",
-        reference.content ? `  Context:\n${reference.content}` : "",
-      ].filter(Boolean).join("\n")).join("\n")
+    ? job.references
+        .map((reference) =>
+          [
+            `- [${reference.kind}] ${reference.label}`,
+            reference.detail ? `  Detail: ${reference.detail}` : "",
+            reference.path ? `  Path/URL: ${reference.path}` : "",
+            reference.content ? `  Context:\n${reference.content}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        )
+        .join("\n")
     : "";
   const chat = getChat(job.chatId, job.userId);
-  const project = chat?.projectId ? getProject(chat.projectId, job.userId) : null;
+  const project = chat?.projectId
+    ? getProject(chat.projectId, job.userId)
+    : null;
   const prompt = [
     metisAgentIdentity(),
     project ? projectContextBlock(project, job.userId) : "",
@@ -271,11 +374,13 @@ function providerPrompt(
     "Remote-client tools are available in this run when supported by the provider. Use list_remote_clients first, then target remote operations with target=client:<remote-client-id>; do not use server paths for client files.",
     "Browser: for login, forms, captchas, checkouts, and long page tasks ALWAYS use the persistent Metis in-app browser (browser_navigate, browser_form_state, browser_batch, browser_wait_for, browser_fill_form, browser_snapshot). Inspect the current state first; navigate only when the URL actually needs to change, and never reload or re-login merely to inspect progress. browser_form_state and browser_extract_text include embedded frames and return frame hints/selectors. Batch repetitive actions and wait on DOM conditions instead of sleeps. Do not use shell, curl, Playwright, or web_fetch as a substitute when a real page is needed. web_search/web_fetch are only for simple lookup.",
     "When you use browser results, selected references, or other verifiable web sources, cite the exact URL immediately after the sentence it supports using the format [Source: Website title](URL). At the end, put every source used in exactly one fenced block starting with ```sources, with one Markdown link per line. Never invent URLs; if no verifiable source is available, do not create a sources block.",
-"Personal context: the context_search / context_profile / context_remember tools, when available in this run, access the owner's shared context hub (devices, services, projects, preferences). When a task touches the owner's infrastructure, projects, or devices, consult them FIRST instead of asking the user. Do not dump contents unprompted; cite only what the query returned. Store newly learned durable preferences (how the owner wants things) via context_remember.",
+    "Personal context: the context_search / context_profile / context_remember tools, when available in this run, access the owner's shared context hub (devices, services, projects, preferences). When a task touches the owner's infrastructure, projects, or devices, consult them FIRST instead of asking the user. Do not dump contents unprompted; cite only what the query returned. Store newly learned durable preferences (how the owner wants things) via context_remember.",
     references ? `Selected references:\n${references}` : "",
     job.referenceText ? `Referenced context:\n${job.referenceText}` : "",
     buildAttachmentPrompt(job.chatId, job.attachments),
-  ].filter(Boolean).join("\n\n");
+  ]
+    .filter(Boolean)
+    .join("\n\n");
   return prompt;
 }
 
@@ -291,19 +396,22 @@ function parseToolInput(value?: string) {
 function modelMessageText(message: ModelMessage): string {
   if (typeof message.content === "string") return message.content;
   if (!Array.isArray(message.content)) return "";
-  return message.content.map((part) => {
-    if (!part || typeof part !== "object") return String(part ?? "");
-    try {
-      return JSON.stringify(part);
-    } catch {
-      return String(part);
-    }
-  }).join("\n");
+  return message.content
+    .map((part) => {
+      if (!part || typeof part !== "object") return String(part ?? "");
+      try {
+        return JSON.stringify(part);
+      } catch {
+        return String(part);
+      }
+    })
+    .join("\n");
 }
 
 function stripProviderReasoning(messages: ModelMessage[]): ModelMessage[] {
   return messages.map((message) => {
-    if (message.role !== "assistant" || typeof message.content === "string") return message;
+    if (message.role !== "assistant" || typeof message.content === "string")
+      return message;
     return {
       ...message,
       content: message.content.filter((part) => part.type !== "reasoning"),
@@ -311,7 +419,10 @@ function stripProviderReasoning(messages: ModelMessage[]): ModelMessage[] {
   });
 }
 
-function chatToModelMessages(chat: Chat, excludeMessageId?: string): ModelMessage[] {
+function chatToModelMessages(
+  chat: Chat,
+  excludeMessageId?: string,
+): ModelMessage[] {
   const messages: ModelMessage[] = [];
   for (const message of chat.messages) {
     if (excludeMessageId && message.id === excludeMessageId) continue;
@@ -345,9 +456,10 @@ function chatToModelMessages(chat: Chat, excludeMessageId?: string): ModelMessag
         type: "tool-result" as const,
         toolCallId: item.id,
         toolName: item.name,
-        output: item.status === "error"
-          ? { type: "error-text" as const, value: item.result || item.status }
-          : { type: "text" as const, value: item.result || item.status },
+        output:
+          item.status === "error"
+            ? { type: "error-text" as const, value: item.result || item.status }
+            : { type: "text" as const, value: item.result || item.status },
       })),
     });
   }
@@ -359,7 +471,12 @@ function serializeModelMessagesForPrompt(messages: ModelMessage[]): string {
   for (const message of messages) {
     const text = modelMessageText(message).trim();
     if (!text) continue;
-    const speaker = message.role === "user" ? "User" : message.role === "assistant" ? "Assistant" : "Tool";
+    const speaker =
+      message.role === "user"
+        ? "User"
+        : message.role === "assistant"
+          ? "Assistant"
+          : "Tool";
     blocks.push(`${speaker}:\n${text}`);
   }
   return blocks.join("\n\n");
@@ -413,7 +530,11 @@ function effectiveModelParams(chat: Chat, job: AgentJob) {
   return job.modelParams?.length ? job.modelParams : chat.modelParams;
 }
 
-function estimateProviderInputTokens(chat: Chat, job: AgentJob, modelId: string) {
+function estimateProviderInputTokens(
+  chat: Chat,
+  job: AgentJob,
+  modelId: string,
+) {
   const contextWindow = contextWindowForSelection(
     { id: modelId, providerId: parseModelKey(job.modelId).providerKey },
     effectiveModelParams(chat, job),
@@ -427,10 +548,13 @@ function estimateProviderInputTokens(chat: Chat, job: AgentJob, modelId: string)
   // Includes the provider/system instructions plus the exact compacted chat
   // payload. Historical tool inputs/results are represented in modelMessages
   // as native tool-call/tool-result parts (text recap only after compaction).
-  return Math.max(1, estimateContextTokens({
-    instructions: providerPrompt(job),
-    messages,
-  }));
+  return Math.max(
+    1,
+    estimateContextTokens({
+      instructions: providerPrompt(job),
+      messages,
+    }),
+  );
 }
 
 /**
@@ -468,7 +592,9 @@ function providerConversationPrompt(context: ProviderContext): string {
     providerTaskMessage(context.job),
     "Compacted conversation context (follow the latest task and preserve state from files, todos, errors, and tool results):",
     history,
-  ].filter(Boolean).join("\n\n");
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function compactMessageRecap(message: ModelMessage): string {
@@ -478,26 +604,40 @@ function compactMessageRecap(message: ModelMessage): string {
   }
   const tools: ToolPart[] = [];
   for (const part of message.content) {
-    if (!part || typeof part !== "object" || !("type" in part) || part.type !== "tool-call") continue;
+    if (
+      !part ||
+      typeof part !== "object" ||
+      !("type" in part) ||
+      part.type !== "tool-call"
+    )
+      continue;
     tools.push({
       id: String("toolCallId" in part ? part.toolCallId : ""),
       name: String("toolName" in part ? part.toolName : "tool"),
       status: "completed",
-      input: typeof ("input" in part ? part.input : undefined) === "string"
-        ? String(part.input)
-        : JSON.stringify("input" in part ? part.input ?? {} : {}),
+      input:
+        typeof ("input" in part ? part.input : undefined) === "string"
+          ? String(part.input)
+          : JSON.stringify("input" in part ? (part.input ?? {}) : {}),
     });
   }
-  const recap = tools.length ? `\nTools already executed:\n${toolRecap(tools)}` : "";
+  const recap = tools.length
+    ? `\nTools already executed:\n${toolRecap(tools)}`
+    : "";
   return `${message.role}: ${text}${recap}`;
 }
 
 function toolRecap(tools: ToolPart[]) {
-  return tools.map((item) => {
-    const input = item.input ? ` input=${item.input.slice(0, 400)}` : "";
-    const result = item.result && item.kind !== "read" ? ` result=${item.result.slice(0, 800)}` : "";
-    return `- ${item.name} (${item.status})${item.path ? ` path=${item.path}` : ""}${input}${result}`;
-  }).join("\n");
+  return tools
+    .map((item) => {
+      const input = item.input ? ` input=${item.input.slice(0, 400)}` : "";
+      const result =
+        item.result && item.kind !== "read"
+          ? ` result=${item.result.slice(0, 800)}`
+          : "";
+      return `- ${item.name} (${item.status})${item.path ? ` path=${item.path}` : ""}${input}${result}`;
+    })
+    .join("\n");
 }
 
 const COMPACTION_MARKER = "[metis-context-recap:v1]";
@@ -515,20 +655,33 @@ function compactIfNeeded(
   contextMode: ContextMode = "normal",
   onCompaction?: (event: CompactionEvent) => void,
 ): ModelMessage[] {
-  if (!contextWindow || contextWindow <= 0 || messages.length < 2) return messages;
-  const total = messages.reduce((sum, message) => sum + estimateContextTokens(message), 0);
+  if (!contextWindow || contextWindow <= 0 || messages.length < 2)
+    return messages;
+  const total = messages.reduce(
+    (sum, message) => sum + estimateContextTokens(message),
+    0,
+  );
   const budget = effectiveContextBudget(contextWindow, contextMode);
- if (total / contextWindow < CONTEXT_COMPACT_RATIO) return messages;
- // One compact per pressure wave. A recap is already canonical; compacting it
- // again would drop the tail and break idempotency on the next runner step.
- if (messages.some((message) => modelMessageText(message).includes(COMPACTION_MARKER))) {
-   return messages;
- }
+  if (total / contextWindow < CONTEXT_COMPACT_RATIO) return messages;
+  // One compact per pressure wave. A recap is already canonical; compacting it
+  // again would drop the tail and break idempotency on the next runner step.
+  if (
+    messages.some((message) =>
+      modelMessageText(message).includes(COMPACTION_MARKER),
+    )
+  ) {
+    return messages;
+  }
 
   // A prior recap is already canonical. Re-summarizing it would make repeated
   // compaction non-idempotent and can slowly erase the original task.
-  const head = messages.filter((message) => !modelMessageText(message).includes(COMPACTION_MARKER));
-  const source = head.length === messages.length ? messages : messages.slice(-Math.max(2, Math.floor(messages.length * 0.45)));
+  const head = messages.filter(
+    (message) => !modelMessageText(message).includes(COMPACTION_MARKER),
+  );
+  const source =
+    head.length === messages.length
+      ? messages
+      : messages.slice(-Math.max(2, Math.floor(messages.length * 0.45)));
   const protectedTail: ModelMessage[] = [];
   let tailTokens = 0;
   let index = source.length;
@@ -540,13 +693,13 @@ function compactIfNeeded(
     tailTokens += estimateContextTokens(message);
   }
   const oldMessages = source.slice(0, index);
- const compactionId = `context-compaction-${Date.now()}`;
+  const compactionId = `context-compaction-${Date.now()}`;
   onCompaction?.({
     type: "compaction",
- id: compactionId,
- name: "context_compaction",
- kind: "compaction",
- systemTriggered: true,
+    id: compactionId,
+    name: "context_compaction",
+    kind: "compaction",
+    systemTriggered: true,
     status: "started",
     beforeTokens: total,
     targetTokens: budget,
@@ -559,15 +712,24 @@ function compactIfNeeded(
   const recapPrefix = `Compressed conversation history ${COMPACTION_MARKER} (older messages were auto-compacted; preserve task state, files, todos, errors, and the latest tail):\n`;
   const recapBudget = Math.max(64, (budget - tailTokens - 8) * 4);
   let result: ModelMessage[] = [
-    { role: "user", content: `${recapPrefix}${boundedText(recap, recapBudget)}` },
+    {
+      role: "user",
+      content: `${recapPrefix}${boundedText(recap, recapBudget)}`,
+    },
     ...protectedTail,
   ];
   // A single giant tool result can fill the protected tail by itself. Bound
   // every message until the measured payload is within the effective budget.
   let trimPasses = 0;
   const maxTrimPasses = Math.max(8, result.length * 4);
-  while (result.reduce((sum, message) => sum + estimateContextTokens(message), 0) > budget && result.length > 1) {
-    const excess = result.reduce((sum, message) => sum + estimateContextTokens(message), 0) - budget;
+  while (
+    result.reduce((sum, message) => sum + estimateContextTokens(message), 0) >
+      budget &&
+    result.length > 1
+  ) {
+    const excess =
+      result.reduce((sum, message) => sum + estimateContextTokens(message), 0) -
+      budget;
     let candidateIndex = -1;
     let candidateChars = 0;
     for (let index = 1; index < result.length; index += 1) {
@@ -588,23 +750,42 @@ function compactIfNeeded(
     trimPasses += 1;
     if (trimPasses >= maxTrimPasses) break;
   }
-  if (result.reduce((sum, message) => sum + estimateContextTokens(message), 0) > budget) {
+  if (
+    result.reduce((sum, message) => sum + estimateContextTokens(message), 0) >
+    budget
+  ) {
     const last = result.at(-1);
-    result = [{
-      role: "user",
-      content: `${recapPrefix}${boundedText(recap, Math.max(32, (budget - estimateContextTokens(last || "") - 2) * 4))}`,
-    }, ...(last ? [{ role: last.role, content: boundedText(modelMessageText(last), Math.max(32, (budget - 2) * 4)) } as ModelMessage] : [])];
+    result = [
+      {
+        role: "user",
+        content: `${recapPrefix}${boundedText(recap, Math.max(32, (budget - estimateContextTokens(last || "") - 2) * 4))}`,
+      },
+      ...(last
+        ? [
+            {
+              role: last.role,
+              content: boundedText(
+                modelMessageText(last),
+                Math.max(32, (budget - 2) * 4),
+              ),
+            } as ModelMessage,
+          ]
+        : []),
+    ];
   }
   onCompaction?.({
     type: "compaction",
- id: compactionId,
- name: "context_compaction",
- kind: "compaction",
- systemTriggered: true,
+    id: compactionId,
+    name: "context_compaction",
+    kind: "compaction",
+    systemTriggered: true,
     status: "completed",
     beforeTokens: total,
     targetTokens: budget,
-    afterTokens: result.reduce((sum, message) => sum + estimateContextTokens(message), 0),
+    afterTokens: result.reduce(
+      (sum, message) => sum + estimateContextTokens(message),
+      0,
+    ),
     removedMessages: oldMessages.length,
   });
   return result;
@@ -624,9 +805,11 @@ export function codexReasoningEffortForSelection(
   params?: ReadonlyArray<{ id: string; value: string }> | null,
 ): "minimal" | "low" | "medium" | "high" | "xhigh" | undefined {
   if (!/^(?:gpt[-_.]?5|codex)/i.test(modelId.trim())) return undefined;
-  const value = params?.find((param) => param.id === "effort" || param.id === "reasoning")?.value;
+  const value = params?.find(
+    (param) => param.id === "effort" || param.id === "reasoning",
+  )?.value;
   return value && ["minimal", "low", "medium", "high", "xhigh"].includes(value)
-    ? value as "minimal" | "low" | "medium" | "high" | "xhigh"
+    ? (value as "minimal" | "low" | "medium" | "high" | "xhigh")
     : undefined;
 }
 
@@ -634,13 +817,16 @@ export function aiReasoningForSelection(
   providerKey: string,
   params?: ReadonlyArray<{ id: string; value: string }> | null,
 ): "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | undefined {
-  const value = params?.find((param) => param.id === "effort" || param.id === "reasoning")?.value;
+  const value = params?.find(
+    (param) => param.id === "effort" || param.id === "reasoning",
+  )?.value;
   if (!value) return providerKey === "codex" ? "none" : undefined;
-  const allowed = providerKey === "anthropic" || providerKey === "google"
-    ? ["none", "low", "medium", "high"]
-    : ["none", "minimal", "low", "medium", "high", "xhigh"];
+  const allowed =
+    providerKey === "anthropic" || providerKey === "google"
+      ? ["none", "low", "medium", "high"]
+      : ["none", "minimal", "low", "medium", "high", "xhigh"];
   return allowed.includes(value)
-    ? value as "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+    ? (value as "none" | "minimal" | "low" | "medium" | "high" | "xhigh")
     : undefined;
 }
 
@@ -651,27 +837,44 @@ function aiModel(
 ): LanguageModel {
   const secret = connection.secret;
   const baseURL = connection.baseUrl;
-  if (providerKey === "openai" || (providerKey === "codex" && connection.authType === "api_key")) {
-    return createOpenAI({ apiKey: secret, ...(baseURL ? { baseURL } : {}) }).chat(modelId);
+  if (
+    providerKey === "openai" ||
+    (providerKey === "codex" && connection.authType === "api_key")
+  ) {
+    return createOpenAI({
+      apiKey: secret,
+      ...(baseURL ? { baseURL } : {}),
+    }).chat(modelId);
   }
   if (providerKey === "anthropic") {
-    return createAnthropic({ apiKey: secret, ...(baseURL ? { baseURL } : {}) }).messages(modelId);
+    return createAnthropic({
+      apiKey: secret,
+      ...(baseURL ? { baseURL } : {}),
+    }).messages(modelId);
   }
   if (providerKey === "google") {
     if (connection.authType === "vertex_adc") {
       return createGoogleVertex({
-        project: typeof connection.config.project === "string"
-          ? connection.config.project
-          : undefined,
-        location: typeof connection.config.location === "string"
-          ? connection.config.location
-          : undefined,
+        project:
+          typeof connection.config.project === "string"
+            ? connection.config.project
+            : undefined,
+        location:
+          typeof connection.config.location === "string"
+            ? connection.config.location
+            : undefined,
       }).languageModel(modelId);
     }
-    return createGoogle({ apiKey: secret, ...(baseURL ? { baseURL } : {}) }).chat(modelId);
+    return createGoogle({
+      apiKey: secret,
+      ...(baseURL ? { baseURL } : {}),
+    }).chat(modelId);
   }
   if (providerKey === "xai") {
-    return createXai({ apiKey: secret, ...(baseURL ? { baseURL } : {}) }).responses(modelId);
+    return createXai({
+      apiKey: secret,
+      ...(baseURL ? { baseURL } : {}),
+    }).responses(modelId);
   }
   if (providerKey === "openrouter") {
     return createOpenRouter({
@@ -680,7 +883,8 @@ function aiModel(
     }).chat(modelId);
   }
   if (providerKey === "ollama" || providerKey === "compatible") {
-    if (!baseURL) throw new Error("An OpenAI-compatible connection requires a base URL.");
+    if (!baseURL)
+      throw new Error("An OpenAI-compatible connection requires a base URL.");
     return createOpenAICompatible({
       name: `${providerKey}-${connection.id}`,
       baseURL,
@@ -694,9 +898,13 @@ export function anthropicProviderOptionsForSelection(
   modelId: string,
   params?: ReadonlyArray<{ id: string; value: string }> | null,
 ) {
-  const selectedWindow = contextWindowForSelection({ id: modelId, providerId: "anthropic" }, params);
+  const selectedWindow = contextWindowForSelection(
+    { id: modelId, providerId: "anthropic" },
+    params,
+  );
   if (selectedWindow !== 1_000_000) return undefined;
-  if (!/claude-(?:sonnet|opus)-(?:4(?:-|$)|4\.5(?:[-.]|$))/i.test(modelId)) return undefined;
+  if (!/claude-(?:sonnet|opus)-(?:4(?:-|$)|4\.5(?:[-.]|$))/i.test(modelId))
+    return undefined;
   return {
     anthropic: {
       anthropicBeta: ["context-1m-2025-08-07"],
@@ -706,7 +914,10 @@ export function anthropicProviderOptionsForSelection(
 
 function providerOptionsFor(context: ProviderContext) {
   if (context.connection.providerKey !== "anthropic") return undefined;
-  return anthropicProviderOptionsForSelection(context.modelId, effectiveModelParams(context.chat, context.job));
+  return anthropicProviderOptionsForSelection(
+    context.modelId,
+    effectiveModelParams(context.chat, context.job),
+  );
 }
 
 function streamErrorText(value: unknown) {
@@ -726,7 +937,10 @@ async function consumeAiStream(
   context: ProviderContext,
   fallbackTools: ToolSet,
   initiatingMessages: ModelMessage[],
-  resumeEmbedded?: (messages: ModelMessage[], remainingSteps: number) => ReturnType<typeof streamText>,
+  resumeEmbedded?: (
+    messages: ModelMessage[],
+    remainingSteps: number,
+  ) => ReturnType<typeof streamText>,
   initialSteps = DEFAULT_PROVIDER_STEPS,
 ) {
   let textProduced = false;
@@ -734,12 +948,19 @@ async function consumeAiStream(
   let finishReason = "";
   let conversation = initiatingMessages;
   let current = result;
-  let remainingSteps = Math.max(1, Math.min(DEFAULT_PROVIDER_STEPS * 2, Math.floor(initialSteps)));
+  let remainingSteps = Math.max(
+    1,
+    Math.min(DEFAULT_PROVIDER_STEPS * 2, Math.floor(initialSteps)),
+  );
   const loopGuard = new LoopGuard();
   let fallbackIndex = 0;
   const usage: Usage = {};
 
-  const addUsage = (part: { inputTokens?: number; outputTokens?: number; totalTokens?: number }) => {
+  const addUsage = (part: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+  }) => {
     usage.inputTokens = (usage.inputTokens || 0) + (part.inputTokens || 0);
     usage.outputTokens = (usage.outputTokens || 0) + (part.outputTokens || 0);
     usage.totalTokens = (usage.totalTokens || 0) + (part.totalTokens || 0);
@@ -853,23 +1074,40 @@ async function consumeAiStream(
           providerError = streamErrorText(part.error);
         } else if (part.type === "finish") {
           finishReason = part.finishReason;
-        } else if (part.type === "tool-call" || part.type === "tool-input-start") {
+        } else if (
+          part.type === "tool-call" ||
+          part.type === "tool-input-start"
+        ) {
           nativeTools = true;
           toolsProduced = true;
-          const name = "toolName" in part ? String(part.toolName || "") : "tool";
-          const input = "input" in part && part.input !== undefined ? JSON.stringify(part.input) : undefined;
+          const name =
+            "toolName" in part ? String(part.toolName || "") : "tool";
+          const input =
+            "input" in part && part.input !== undefined
+              ? JSON.stringify(part.input)
+              : undefined;
           roundSignatures.push(`${name}:${input || ""}`.slice(0, 800));
           const parsedInput = input ? parseToolInput(input) : {};
           const displayName = innerToolName(name, parsedInput);
           const todos = todosFromToolPayload(input);
           const kind = classifyToolKind(displayName || name, parsedInput);
-          const subagent = subagentMetadataFromTool(displayName || name, parsedInput, undefined, kind);
+          const subagent = subagentMetadataFromTool(
+            displayName || name,
+            parsedInput,
+            undefined,
+            kind,
+          );
           context.onTool({
-            id: "toolCallId" in part ? String(part.toolCallId) : crypto.randomUUID(),
+            id:
+              "toolCallId" in part
+                ? String(part.toolCallId)
+                : crypto.randomUUID(),
             name: displayName || name,
             status: "running",
             kind,
-            ...(typeof parsedInput.path === "string" ? { path: parsedInput.path } : {}),
+            ...(typeof parsedInput.path === "string"
+              ? { path: parsedInput.path }
+              : {}),
             ...(input ? { input } : {}),
             ...(todos?.length ? { todos } : {}),
             ...(subagent ? { subagent } : {}),
@@ -877,16 +1115,32 @@ async function consumeAiStream(
         } else if (part.type === "tool-result") {
           nativeTools = true;
           toolsProduced = true;
-          const resultText = "output" in part && part.output !== undefined
-            ? JSON.stringify(part.output)
-            : "result" in part && part.result !== undefined
-              ? JSON.stringify(part.result)
-              : undefined;
-          roundSignatures.push(`${String(part.toolName)}:${resultText || ""}`.slice(0, 800));
-          const displayName = innerToolName(part.toolName, undefined, resultText);
+          const resultText =
+            "output" in part && part.output !== undefined
+              ? JSON.stringify(part.output)
+              : "result" in part && part.result !== undefined
+                ? JSON.stringify(part.result)
+                : undefined;
+          roundSignatures.push(
+            `${String(part.toolName)}:${resultText || ""}`.slice(0, 800),
+          );
+          const displayName = innerToolName(
+            part.toolName,
+            undefined,
+            resultText,
+          );
           const todos = todosFromToolPayload(undefined, resultText);
-          const kind = classifyToolKind(displayName || part.toolName, undefined, resultText);
-          const subagent = subagentMetadataFromTool(displayName || part.toolName, undefined, resultText, kind);
+          const kind = classifyToolKind(
+            displayName || part.toolName,
+            undefined,
+            resultText,
+          );
+          const subagent = subagentMetadataFromTool(
+            displayName || part.toolName,
+            undefined,
+            resultText,
+            kind,
+          );
           context.onTool({
             id: part.toolCallId,
             name: displayName || part.toolName,
@@ -912,10 +1166,18 @@ async function consumeAiStream(
       executions = await executeEmbeddedToolFallbacks(
         rawToolMarkup.join("\n"),
         async (call, index) => {
-          const candidate = fallbackTools[call.name] as unknown as {
-            execute?: (args: Record<string, unknown>, options: Record<string, unknown>) => Promise<unknown> | unknown;
-          } | undefined;
-          if (!candidate?.execute) throw new Error(`Embedded tool ${call.name} is not available in this mode.`);
+          const candidate = fallbackTools[call.name] as unknown as
+            | {
+                execute?: (
+                  args: Record<string, unknown>,
+                  options: Record<string, unknown>,
+                ) => Promise<unknown> | unknown;
+              }
+            | undefined;
+          if (!candidate?.execute)
+            throw new Error(
+              `Embedded tool ${call.name} is not available in this mode.`,
+            );
           const callId = `fallback-${context.job.id}-${fallbackIndex + index}`;
           const input = JSON.stringify(call.args);
           const displayName = innerToolName(call.name, call.args);
@@ -926,7 +1188,9 @@ async function consumeAiStream(
             name: displayName || call.name,
             status: "running",
             kind,
-            ...(typeof call.args.path === "string" ? { path: call.args.path } : {}),
+            ...(typeof call.args.path === "string"
+              ? { path: call.args.path }
+              : {}),
             input,
             ...(inputTodos?.length ? { todos: inputTodos } : {}),
           });
@@ -937,7 +1201,8 @@ async function consumeAiStream(
               abortSignal: context.signal,
               context: undefined,
             });
-            const resultText = typeof output === "string" ? output : JSON.stringify(output);
+            const resultText =
+              typeof output === "string" ? output : JSON.stringify(output);
             const resultTodos = todosFromToolPayload(input, resultText);
             context.onTool({
               id: callId,
@@ -965,7 +1230,8 @@ async function consumeAiStream(
       );
       if (executions.length) toolsProduced = true;
       const failed = executions.find((execution) => !execution.ok);
-      if (failed) throw new Error(failed.error || `Embedded tool ${failed.name} failed.`);
+      if (failed)
+        throw new Error(failed.error || `Embedded tool ${failed.name} failed.`);
       fallbackIndex += executions.length;
     }
 
@@ -980,7 +1246,9 @@ async function consumeAiStream(
     if (providerError) throw new Error(providerError);
     addUsage(roundUsage);
     void rawText;
-    const steps = await Promise.resolve(streamResult.steps).then((value) => value).catch(() => []);
+    const steps = await Promise.resolve(streamResult.steps)
+      .then((value) => value)
+      .catch(() => []);
     return {
       executions,
       nativeTools,
@@ -999,15 +1267,20 @@ async function consumeAiStream(
       failed: false,
     });
     if (loop.shouldStop) {
-      throw new Error(`Provider agent loop stopped: ${loop.reason || "no progress"}.`);
+      throw new Error(
+        `Provider agent loop stopped: ${loop.reason || "no progress"}.`,
+      );
     }
-    if (!round.executions.length || !resumeEmbedded || remainingSteps <= 0) break;
+    if (!round.executions.length || !resumeEmbedded || remainingSteps <= 0)
+      break;
     conversation = [
       ...conversation,
       {
         role: "assistant",
         content: [
-          ...(round.visibleText.trim() ? [{ type: "text" as const, text: round.visibleText }] : []),
+          ...(round.visibleText.trim()
+            ? [{ type: "text" as const, text: round.visibleText }]
+            : []),
           ...round.executions.map((execution, index) => ({
             type: "tool-call" as const,
             toolCallId: `fallback-${context.job.id}-${fallbackIndex - round.executions.length + index}`,
@@ -1025,11 +1298,15 @@ async function consumeAiStream(
           output: execution.ok
             ? {
                 type: "text" as const,
-                value: typeof execution.result === "string"
-                  ? execution.result
-                  : JSON.stringify(execution.result ?? ""),
+                value:
+                  typeof execution.result === "string"
+                    ? execution.result
+                    : JSON.stringify(execution.result ?? ""),
               }
-            : { type: "error-text" as const, value: execution.error || "Tool failed." },
+            : {
+                type: "error-text" as const,
+                value: execution.error || "Tool failed.",
+              },
         })),
       },
     ];
@@ -1051,8 +1328,13 @@ async function consumeAiStream(
   return usage;
 }
 
-function providerMcpContext(context: ProviderContext) {
-  const mode = modeById(context.job.modeId || context.chat.sessionState?.modeId);
+function providerMcpContext(
+  context: ProviderContext,
+  options: { runtimeApprovalGate?: boolean } = {},
+) {
+  const mode = modeById(
+    context.job.modeId || context.chat.sessionState?.modeId,
+  );
   return buildMcpContext({
     chatId: context.job.chatId,
     userId: context.job.userId,
@@ -1060,6 +1342,10 @@ function providerMcpContext(context: ProviderContext) {
     incognito: Boolean(context.job.incognito),
     automation: Boolean(context.job.automationId),
     modeId: mode.id,
+    runtimeMode:
+      options.runtimeApprovalGate === false
+        ? "full-access"
+        : runtimeModeForChat(context.chat),
     modePolicy: {
       allowedCategories: mode.allowedCategories,
       toolOverrides: mode.toolOverrides || {},
@@ -1073,16 +1359,35 @@ function providerMcpContext(context: ProviderContext) {
   });
 }
 
-
-function stdioGatewayConfig(gateway: { type: "stdio"; command: string; args: string[]; cwd: string; env: Record<string, string> } | { type: "http"; url: string; headers?: Record<string, string> | undefined }) {
+function stdioGatewayConfig(
+  gateway:
+    | {
+        type: "stdio";
+        command: string;
+        args: string[];
+        cwd: string;
+        env: Record<string, string>;
+      }
+    | {
+        type: "http";
+        url: string;
+        headers?: Record<string, string> | undefined;
+      },
+) {
   if (gateway.type === "http") {
-    return { command: "npx", args: ["-y", "mcp-remote", gateway.url], env: {} as Record<string, string> };
+    return {
+      command: "npx",
+      args: ["-y", "mcp-remote", gateway.url],
+      env: {} as Record<string, string>,
+    };
   }
   return { command: gateway.command, args: gateway.args, env: gateway.env };
 }
 
 function modeMcpEnv(context: ProviderContext): Record<string, string> {
-  const gateway = getMcpServers(providerMcpContext(context)).gateway;
+  const gateway = getMcpServers(
+    providerMcpContext(context, { runtimeApprovalGate: false }),
+  ).gateway;
   return gateway.type === "http" ? {} : gateway.env;
 }
 
@@ -1092,11 +1397,16 @@ async function agentToolsFor(context: ProviderContext): Promise<ToolSet> {
     return await mcpBridgeTools(env);
   } catch (first) {
     try {
-      return await mcpBridgeTools({ ...env, MCP_GATEWAY_RETRY: String(Date.now()) });
+      return await mcpBridgeTools({
+        ...env,
+        MCP_GATEWAY_RETRY: String(Date.now()),
+      });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       const previous = first instanceof Error ? first.message : String(first);
-      throw new Error(`MCP gateway tools unavailable after retry (${detail}). First error: ${previous}`);
+      throw new Error(
+        `MCP gateway tools unavailable after retry (${detail}). First error: ${previous}`,
+      );
     }
   }
 }
@@ -1114,19 +1424,41 @@ async function runAiSdk(context: ProviderContext): Promise<ProviderResult> {
     context.onCompaction,
   );
   const route = routeTask(context.job.message);
-  const stream = (nextMessages: ModelMessage[], remainingSteps: number) => streamText({
-    model: aiModel(context.connection.providerKey, context.modelId, context.connection),
-    instructions: providerPrompt(context.job, Object.keys(tools), false, effectiveModelParams(context.chat, context.job)),
-    messages: nextMessages,
-    tools,
-    reasoning: aiReasoningForSelection(context.connection.providerKey, effectiveModelParams(context.chat, context.job)),
-    providerOptions: providerOptionsFor(context),
-    stopWhen: stepCountIs(remainingSteps),
-    prepareStep: ({ messages }) => ({ messages: stripProviderReasoning(messages) }),
-    abortSignal: context.signal,
-  });
+  const stream = (nextMessages: ModelMessage[], remainingSteps: number) =>
+    streamText({
+      model: aiModel(
+        context.connection.providerKey,
+        context.modelId,
+        context.connection,
+      ),
+      instructions: providerPrompt(
+        context.job,
+        Object.keys(tools),
+        false,
+        effectiveModelParams(context.chat, context.job),
+      ),
+      messages: nextMessages,
+      tools,
+      reasoning: aiReasoningForSelection(
+        context.connection.providerKey,
+        effectiveModelParams(context.chat, context.job),
+      ),
+      providerOptions: providerOptionsFor(context),
+      stopWhen: stepCountIs(remainingSteps),
+      prepareStep: ({ messages }) => ({
+        messages: stripProviderReasoning(messages),
+      }),
+      abortSignal: context.signal,
+    });
   return {
-    usage: await consumeAiStream(stream(messages, route.initialSteps), context, tools, messages, stream, route.initialSteps),
+    usage: await consumeAiStream(
+      stream(messages, route.initialSteps),
+      context,
+      tools,
+      messages,
+      stream,
+      route.initialSteps,
+    ),
   };
 }
 
@@ -1135,7 +1467,9 @@ async function runOAuthAiSdk(
   providerKey: OAuthProviderKey,
 ): Promise<ProviderResult> {
   if (!context.connection.secret) {
-    throw new Error("OAuth connection is not completed yet. Connect the provider first.");
+    throw new Error(
+      "OAuth connection is not completed yet. Connect the provider first.",
+    );
   }
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "ai-chat-oauth-run-"));
   const authFile = path.join(tempDir, "oauth.json");
@@ -1143,11 +1477,17 @@ async function runOAuthAiSdk(
   if (providerKey === "antigravity") {
     try {
       const parsed = JSON.parse(authPayload) as Record<string, unknown>;
-      const token = parsed.token && typeof parsed.token === "object"
-        ? parsed.token as Record<string, unknown>
-        : undefined;
-      if (token && typeof token.access_token === "string" && typeof token.refresh_token === "string") {
-        const expiry = typeof token.expiry === "string" ? Date.parse(token.expiry) : NaN;
+      const token =
+        parsed.token && typeof parsed.token === "object"
+          ? (parsed.token as Record<string, unknown>)
+          : undefined;
+      if (
+        token &&
+        typeof token.access_token === "string" &&
+        typeof token.refresh_token === "string"
+      ) {
+        const expiry =
+          typeof token.expiry === "string" ? Date.parse(token.expiry) : NaN;
         authPayload = JSON.stringify({
           "google-gemini-cli": {
             type: "oauth",
@@ -1188,19 +1528,39 @@ async function runOAuthAiSdk(
       context.onCompaction,
     );
     const route = routeTask(context.job.message);
-    const stream = (nextMessages: ModelMessage[], remainingSteps: number) => streamText({
-      model: provider.languageModel(oauthModelId),
-      instructions: providerPrompt(context.job, Object.keys(oauthTools), false, effectiveModelParams(context.chat, context.job)),
-      messages: nextMessages,
-      tools: oauthTools,
-      reasoning: aiReasoningForSelection(providerKey, effectiveModelParams(context.chat, context.job)),
-      providerOptions: providerOptionsFor(context),
-      stopWhen: stepCountIs(remainingSteps),
-      prepareStep: ({ messages }) => ({ messages: stripProviderReasoning(messages) }),
-      abortSignal: context.signal,
-    });
-    const usage = await consumeAiStream(stream(messages, route.initialSteps), context, oauthTools, messages, stream, route.initialSteps);
-    const refreshedAuth = await readFile(authFile, "utf8").catch(() => context.connection.secret);
+    const stream = (nextMessages: ModelMessage[], remainingSteps: number) =>
+      streamText({
+        model: provider.languageModel(oauthModelId),
+        instructions: providerPrompt(
+          context.job,
+          Object.keys(oauthTools),
+          false,
+          effectiveModelParams(context.chat, context.job),
+        ),
+        messages: nextMessages,
+        tools: oauthTools,
+        reasoning: aiReasoningForSelection(
+          providerKey,
+          effectiveModelParams(context.chat, context.job),
+        ),
+        providerOptions: providerOptionsFor(context),
+        stopWhen: stepCountIs(remainingSteps),
+        prepareStep: ({ messages }) => ({
+          messages: stripProviderReasoning(messages),
+        }),
+        abortSignal: context.signal,
+      });
+    const usage = await consumeAiStream(
+      stream(messages, route.initialSteps),
+      context,
+      oauthTools,
+      messages,
+      stream,
+      route.initialSteps,
+    );
+    const refreshedAuth = await readFile(authFile, "utf8").catch(
+      () => context.connection.secret,
+    );
     if (refreshedAuth !== authPayload && context.job.userId) {
       updateProviderConnection(context.connection.id, context.job.userId, {
         secret: refreshedAuth,
@@ -1232,38 +1592,50 @@ async function createCodexHome(
   if (!auth || typeof auth !== "object" || Array.isArray(auth)) {
     throw new Error("Codex credentials are not a valid JSON object.");
   }
-  const home = persistentHome || await mkdtemp(path.join(os.tmpdir(), "ai-chat-codex-"));
+  const home =
+    persistentHome || (await mkdtemp(path.join(os.tmpdir(), "ai-chat-codex-")));
   await mkdir(home, { recursive: true, mode: 0o700 });
   const authFile = path.join(home, "auth.json");
-  const authObject = authType === "oauth"
-    ? (() => {
-        const record = (auth as Record<string, unknown>)["openai-codex"];
-        const oauth = record && typeof record === "object"
-          ? record as Record<string, unknown>
-          : {};
-        const idToken =
-          typeof oauth.idToken === "string"
-            ? oauth.idToken
-            : typeof oauth.id_token === "string"
-              ? oauth.id_token
-              : undefined;
-        if (typeof oauth.access !== "string" || typeof oauth.refresh !== "string" || !idToken) {
-          throw new Error("Codex OAuth credentials are incomplete.");
-        }
-        return {
-          auth_mode: "chatgpt",
-          OPENAI_API_KEY: null,
-          tokens: {
-            access_token: oauth.access,
-            refresh_token: oauth.refresh,
-            id_token: idToken,
-            ...(typeof oauth.accountId === "string" ? { account_id: oauth.accountId } : {}),
-          },
-          last_refresh: new Date().toISOString(),
-        };
-      })()
-    : auth;
-  await writeFile(authFile, `${JSON.stringify(authObject)}\n`, { encoding: "utf8", mode: 0o600 });
+  const authObject =
+    authType === "oauth"
+      ? (() => {
+          const record = (auth as Record<string, unknown>)["openai-codex"];
+          const oauth =
+            record && typeof record === "object"
+              ? (record as Record<string, unknown>)
+              : {};
+          const idToken =
+            typeof oauth.idToken === "string"
+              ? oauth.idToken
+              : typeof oauth.id_token === "string"
+                ? oauth.id_token
+                : undefined;
+          if (
+            typeof oauth.access !== "string" ||
+            typeof oauth.refresh !== "string" ||
+            !idToken
+          ) {
+            throw new Error("Codex OAuth credentials are incomplete.");
+          }
+          return {
+            auth_mode: "chatgpt",
+            OPENAI_API_KEY: null,
+            tokens: {
+              access_token: oauth.access,
+              refresh_token: oauth.refresh,
+              id_token: idToken,
+              ...(typeof oauth.accountId === "string"
+                ? { account_id: oauth.accountId }
+                : {}),
+            },
+            last_refresh: new Date().toISOString(),
+          };
+        })()
+      : auth;
+  await writeFile(authFile, `${JSON.stringify(authObject)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
   return { home, authFile, temporary: !persistentHome };
 }
 
@@ -1273,25 +1645,32 @@ export function codexTool(
 ): ToolPart | null {
   const type = asString(item.type);
   if (!type || type === "agent_message" || type === "reasoning") return null;
-  const mcpName = asString(item.tool) || asString(item.tool_name) || asString(item.name);
+  const mcpName =
+    asString(item.tool) || asString(item.tool_name) || asString(item.name);
   const output = item.aggregated_output ?? item.output;
-  const mcpResult = item.result && typeof item.result === "object"
-    ? JSON.stringify(item.result)
-    : undefined;
+  const mcpResult =
+    item.result && typeof item.result === "object"
+      ? JSON.stringify(item.result)
+      : undefined;
   const name =
     type === "command_execution"
       ? "Codex command"
       : type === "file_change"
         ? "Codex file change"
         : type === "mcp_tool_call"
-          ? (mcpName || "call_mcp_tool")
+          ? mcpName || "call_mcp_tool"
           : `Codex ${type.replaceAll("_", " ")}`;
   const kind = classifyToolKind(mcpName || name, item.arguments, item.output);
   return {
     id: asString(item.id) || crypto.randomUUID(),
     name,
     status,
-    kind: type === "file_change" ? "edit" : type.includes("command") ? "shell" : kind,
+    kind:
+      type === "file_change"
+        ? "edit"
+        : type.includes("command")
+          ? "shell"
+          : kind,
     ...(item.command ? { input: JSON.stringify(item.command) } : {}),
     ...(item.arguments ? { input: JSON.stringify(item.arguments) } : {}),
     ...(output !== undefined ? { result: asString(output) } : {}),
@@ -1299,9 +1678,12 @@ export function codexTool(
   };
 }
 
-async function persistCodexOAuthHome(context: ProviderContext, home: {
-  authFile: string;
-}) {
+async function persistCodexOAuthHome(
+  context: ProviderContext,
+  home: {
+    authFile: string;
+  },
+) {
   if (context.connection.authType !== "oauth" || !context.job.userId) return;
   try {
     const official = JSON.parse(await readFile(home.authFile, "utf8")) as {
@@ -1314,10 +1696,14 @@ async function persistCodexOAuthHome(context: ProviderContext, home: {
     };
     const tokens = official.tokens;
     if (!tokens?.access_token || !tokens.refresh_token) return;
-    const existing = JSON.parse(context.connection.secret || "{}") as Record<string, unknown>;
-    const previous = existing["openai-codex"] && typeof existing["openai-codex"] === "object"
-      ? existing["openai-codex"] as Record<string, unknown>
-      : {};
+    const existing = JSON.parse(context.connection.secret || "{}") as Record<
+      string,
+      unknown
+    >;
+    const previous =
+      existing["openai-codex"] && typeof existing["openai-codex"] === "object"
+        ? (existing["openai-codex"] as Record<string, unknown>)
+        : {};
     updateProviderConnection(context.connection.id, context.job.userId, {
       secret: JSON.stringify({
         ...existing,
@@ -1326,7 +1712,9 @@ async function persistCodexOAuthHome(context: ProviderContext, home: {
           type: "oauth",
           access: tokens.access_token,
           refresh: tokens.refresh_token,
-          ...(tokens.id_token || previous.idToken ? { idToken: tokens.id_token || previous.idToken } : {}),
+          ...(tokens.id_token || previous.idToken
+            ? { idToken: tokens.id_token || previous.idToken }
+            : {}),
           ...(tokens.account_id || previous.accountId
             ? { accountId: tokens.account_id || previous.accountId }
             : {}),
@@ -1343,23 +1731,42 @@ async function persistCodexOAuthHome(context: ProviderContext, home: {
 async function runCodex(context: ProviderContext): Promise<ProviderResult> {
   const { Codex } = await import("@openai/codex-sdk");
   if (
-    (context.connection.authType === "account" || context.connection.authType === "oauth") &&
+    (context.connection.authType === "account" ||
+      context.connection.authType === "oauth") &&
     !context.connection.secret?.trim()
   ) {
     throw new Error("Codex credentials are not configured.");
   }
-  if (context.connection.authType === "api_key" && !context.connection.secret?.trim()) {
+  if (
+    context.connection.authType === "api_key" &&
+    !context.connection.secret?.trim()
+  ) {
     throw new Error("Codex API-key authentication requires a key.");
   }
-  const persistentHome = context.connection.authType === "oauth" && context.job.userId
-    ? path.join(config.dataDir, "provider-sessions", "codex", context.job.userId, context.connection.id)
-    : undefined;
-  const codexHome = context.connection.authType === "account" || context.connection.authType === "oauth"
-    ? await createCodexHome(context.connection.secret, context.connection.authType, persistentHome)
-    : undefined;
+  const persistentHome =
+    context.connection.authType === "oauth" && context.job.userId
+      ? path.join(
+          config.dataDir,
+          "provider-sessions",
+          "codex",
+          context.job.userId,
+          context.connection.id,
+        )
+      : undefined;
+  const codexHome =
+    context.connection.authType === "account" ||
+    context.connection.authType === "oauth"
+      ? await createCodexHome(
+          context.connection.secret,
+          context.connection.authType,
+          persistentHome,
+        )
+      : undefined;
   const env = inheritedEnv(codexHome ? { CODEX_HOME: codexHome.home } : {});
   const agentCwd = getUserAgentCwd(context.job.userId);
-  const mcp = getMcpServers(providerMcpContext(context)).gateway;
+  const mcp = getMcpServers(
+    providerMcpContext(context, { runtimeApprovalGate: false }),
+  ).gateway;
   const codex = new Codex({
     ...(context.connection.authType === "api_key" && context.connection.secret
       ? { apiKey: context.connection.secret }
@@ -1390,20 +1797,26 @@ async function runCodex(context: ProviderContext): Promise<ProviderResult> {
       : {}),
     workingDirectory: agentCwd,
     skipGitRepoCheck: true,
-    sandboxMode: "workspace-write" as const,
-    approvalPolicy: "never" as const,
+    ...RUNTIME_MODE_TO_CODEX[runtimeModeForChat(context.chat)],
   };
   const thread = previousId
     ? codex.resumeThread(previousId, threadOptions)
     : codex.startThread(threadOptions);
   try {
-    const prompt = [providerPrompt(context.job, ["metis_ai"], true, effectiveModelParams(context.chat, context.job)), providerConversationPrompt(context)]
+    const prompt = [
+      providerPrompt(
+        context.job,
+        ["metis_ai"],
+        true,
+        effectiveModelParams(context.chat, context.job),
+      ),
+      providerConversationPrompt(context),
+    ]
       .filter(Boolean)
       .join("\n\nUser request:\n");
-    const streamed = await thread.runStreamed(
-      prompt,
-      { signal: context.signal },
-    );
+    const streamed = await thread.runStreamed(prompt, {
+      signal: context.signal,
+    });
     let usage: Usage | undefined;
     for await (const event of streamed.events) {
       context.onStream({
@@ -1433,7 +1846,10 @@ async function runCodex(context: ProviderContext): Promise<ProviderResult> {
           const text = asString(item.text);
           if (text) context.onText(text);
         } else {
-          const tool = codexTool(item, event.type === "item.completed" ? "completed" : "running");
+          const tool = codexTool(
+            item,
+            event.type === "item.completed" ? "completed" : "running",
+          );
           if (tool) context.onTool(tool);
         }
       }
@@ -1446,7 +1862,9 @@ async function runCodex(context: ProviderContext): Promise<ProviderResult> {
     if (codexHome) {
       await persistCodexOAuthHome(context, codexHome);
       if (codexHome.temporary) {
-        await rm(codexHome.home, { recursive: true, force: true }).catch(() => undefined);
+        await rm(codexHome.home, { recursive: true, force: true }).catch(
+          () => undefined,
+        );
       } else {
         await rm(codexHome.authFile, { force: true }).catch(() => undefined);
       }
@@ -1484,16 +1902,112 @@ function claudeMcpServers(servers: ReturnType<typeof getMcpServers>) {
   return Object.fromEntries(
     Object.entries(servers).map(([name, server]) => {
       if (server.type === "http") {
-        return [name, { type: "http" as const, url: server.url, headers: server.headers }];
+        return [
+          name,
+          { type: "http" as const, url: server.url, headers: server.headers },
+        ];
       }
-      return [name, {
-        command: server.command,
-        args: server.args,
-        env: server.env,
-        alwaysLoad: true,
-      }];
+      return [
+        name,
+        {
+          command: server.command,
+          args: server.args,
+          env: server.env,
+          alwaysLoad: true,
+        },
+      ];
     }),
   );
+}
+
+type ClaudePermissionUpdate =
+  import("@anthropic-ai/claude-agent-sdk").PermissionUpdate;
+
+async function waitForClaudeApproval(
+  context: ProviderContext,
+  toolName: string,
+  input: Record<string, unknown>,
+  options: { signal?: AbortSignal; title?: string },
+): Promise<"allow" | "allow-session" | "deny"> {
+  const command =
+    typeof input.command === "string" && input.command.trim()
+      ? input.command
+      : JSON.stringify(input);
+  const { approvalId } = createApproval({
+    jobId: context.job.id,
+    chatId: context.chat.id,
+    ownerId: context.job.userId,
+    title: options.title || `Approve ${toolName}`,
+    command,
+    files:
+      typeof input.path === "string"
+        ? [{ path: input.path, status: "pending" }]
+        : undefined,
+  });
+  const createdAt = Date.now();
+  updateChat(
+    context.chat.id,
+    {
+      runStatus: "waiting_for_user",
+      pendingApproval: {
+        id: approvalId,
+        title: options.title || `Approve ${toolName}`,
+        ...(command ? { command } : {}),
+        ...(typeof input.path === "string"
+          ? { files: [{ path: input.path, status: "pending" }] }
+          : {}),
+        createdAt: new Date(createdAt).toISOString(),
+      },
+    },
+    context.job.userId,
+  );
+
+  let lastHeartbeatAt = 0;
+  try {
+    for (;;) {
+      if (context.signal.aborted || options.signal?.aborted) {
+        resolveApproval(approvalId, "deny", context.job.userId);
+        return "deny";
+      }
+      // Resolution and heartbeat are independent: a resolved row no longer
+      // accepts heartbeats, so checking the row first is authoritative.
+      const approval = getApproval(approvalId, context.job.userId);
+      if (approval?.status === "resolved" && approval.decision)
+        return approval.decision;
+      if (Date.now() - lastHeartbeatAt >= 2_000) {
+        heartbeatApproval(approvalId);
+        lastHeartbeatAt = Date.now();
+      }
+      if (Date.now() - createdAt >= approvalLimits().timeoutMs) {
+        // The waiting runner owns the timeout. Resolving durably prevents a
+        // duplicate UI request from approving an already-expired action.
+        resolveApproval(approvalId, "deny", context.job.userId);
+        return "deny";
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  } finally {
+    const latest = getChat(context.chat.id, context.job.userId);
+    if (latest?.pendingApproval?.id === approvalId) {
+      updateChat(
+        context.chat.id,
+        { pendingApproval: null },
+        context.job.userId,
+      );
+    }
+  }
+}
+
+function claudePermissionResult(
+  behavior: "allow" | "deny",
+  suggestions?: ClaudePermissionUpdate[],
+) {
+  if (behavior === "deny")
+    return { behavior: "deny" as const, message: "User denied" };
+  return {
+    behavior: "allow" as const,
+    ...(suggestions?.length ? { updatedPermissions: suggestions } : {}),
+  };
 }
 
 async function runClaude(context: ProviderContext): Promise<ProviderResult> {
@@ -1506,22 +2020,89 @@ async function runClaude(context: ProviderContext): Promise<ProviderResult> {
     ? context.chat.agentId.slice("claude:".length)
     : undefined;
   const agentCwd = getUserAgentCwd(context.job.userId);
+  const runtimeMode = runtimeModeForChat(context.chat);
+  const claudePermissions = RUNTIME_MODE_TO_CLAUDE_PERMISSION[runtimeMode];
   const options = {
     cwd: agentCwd,
     model: context.modelId,
     // Disable Claude Code builtins so Metis MCP is the sole tool surface.
     tools: [] as string[],
-    permissionMode: "acceptEdits" as const,
+    permissionMode: claudePermissions.permissionMode,
+    ...(claudePermissions.permissionMode === "bypassPermissions"
+      ? { allowDangerouslySkipPermissions: true }
+      : {}),
     includePartialMessages: true,
     strictMcpConfig: true,
+    ...(claudePermissions.canUseToolRequired
+      ? {
+          canUseTool: async (
+            toolName: string,
+            input: Record<string, unknown>,
+            permissionOptions: {
+              signal: AbortSignal;
+              suggestions?: unknown;
+              title?: string;
+            },
+          ) => {
+            if (
+              shouldAutoApprove(context.chat.approvedPatterns, toolName, input)
+            ) {
+              return claudePermissionResult("allow");
+            }
+            const decision = await waitForClaudeApproval(
+              context,
+              toolName,
+              input,
+              {
+                signal: permissionOptions.signal,
+                title:
+                  typeof permissionOptions.title === "string" &&
+                  permissionOptions.title.trim()
+                    ? permissionOptions.title
+                    : undefined,
+              },
+            );
+            if (decision === "allow-session") {
+              const latest = getChat(context.chat.id, context.job.userId);
+              updateChat(
+                context.chat.id,
+                {
+                  approvedPatterns: [
+                    ...(latest?.approvedPatterns || []),
+                    approvalPatternFor(toolName, input),
+                  ].slice(0, 100),
+                },
+                context.job.userId,
+              );
+            }
+            return claudePermissionResult(
+              decision === "deny" ? "deny" : "allow",
+              Array.isArray(permissionOptions.suggestions)
+                ? (permissionOptions.suggestions as ClaudePermissionUpdate[])
+                : undefined,
+            );
+          },
+        }
+      : {}),
     ...(previousId ? { resume: previousId } : {}),
     env: inheritedEnv({
-      ...(context.connection.secret ? { ANTHROPIC_API_KEY: context.connection.secret } : {}),
+      ...(context.connection.secret
+        ? { ANTHROPIC_API_KEY: context.connection.secret }
+        : {}),
       CLAUDE_AGENT_SDK_CLIENT_APP: "metis-ai",
     }),
     abortController,
-    mcpServers: claudeMcpServers(getMcpServers(providerMcpContext(context))),
-    systemPrompt: providerPrompt(context.job, ["mcp"], false, effectiveModelParams(context.chat, context.job)),
+    mcpServers: claudeMcpServers(
+      getMcpServers(
+        providerMcpContext(context, { runtimeApprovalGate: false }),
+      ),
+    ),
+    systemPrompt: providerPrompt(
+      context.job,
+      ["mcp"],
+      false,
+      effectiveModelParams(context.chat, context.job),
+    ),
   };
   let sessionId: string | undefined;
   let receivedText = false;
@@ -1556,8 +2137,14 @@ async function runClaude(context: ProviderContext): Promise<ProviderResult> {
         if (!receivedText && result) context.onText(result);
         const recordUsage = asRecord(record.usage);
         usage = {
-          inputTokens: typeof recordUsage.input_tokens === "number" ? recordUsage.input_tokens : undefined,
-          outputTokens: typeof recordUsage.output_tokens === "number" ? recordUsage.output_tokens : undefined,
+          inputTokens:
+            typeof recordUsage.input_tokens === "number"
+              ? recordUsage.input_tokens
+              : undefined,
+          outputTokens:
+            typeof recordUsage.output_tokens === "number"
+              ? recordUsage.output_tokens
+              : undefined,
         };
       }
     }
@@ -1571,43 +2158,69 @@ async function runClaude(context: ProviderContext): Promise<ProviderResult> {
   };
 }
 
-async function runAntigravity(context: ProviderContext): Promise<ProviderResult> {
+async function runAntigravity(
+  context: ProviderContext,
+): Promise<ProviderResult> {
   if (!context.job.userId) throw new Error("Antigravity requires a user id.");
   const effortValue = [
     ...(context.job.modelParams || []),
     ...(context.chat.modelParams || []),
   ].find((param) => param.id === "effort")?.value;
-  const legacyVariant = context.modelId.match(/^(gemini-\d+\.\d+-flash|gemini-\d+\.\d+-pro)-(low|medium|high)$/);
+  const legacyVariant = context.modelId.match(
+    /^(gemini-\d+\.\d+-flash|gemini-\d+\.\d+-pro)-(low|medium|high)$/,
+  );
   const supportsEffort = antigravitySupportsEffort(context.modelId);
-  const extraEnv = context.connection.authType === "oauth"
-    ? undefined
-    : Object.fromEntries(
-        Object.entries({
-          ...(context.connection.secret ? { GEMINI_API_KEY: context.connection.secret } : {}),
-          ...(context.connection.authType === "vertex_adc"
-            ? {
-                GOOGLE_GENAI_USE_VERTEXAI: "true",
-                ...(typeof context.connection.config.project === "string"
-                  ? { GOOGLE_CLOUD_PROJECT: context.connection.config.project }
-                  : {}),
-                ...(typeof context.connection.config.location === "string"
-                  ? { GOOGLE_CLOUD_LOCATION: context.connection.config.location }
-                  : {}),
-              }
-            : {}),
-        }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-      );
+  const extraEnv =
+    context.connection.authType === "oauth"
+      ? undefined
+      : Object.fromEntries(
+          Object.entries({
+            ...(context.connection.secret
+              ? { GEMINI_API_KEY: context.connection.secret }
+              : {}),
+            ...(context.connection.authType === "vertex_adc"
+              ? {
+                  GOOGLE_GENAI_USE_VERTEXAI: "true",
+                  ...(typeof context.connection.config.project === "string"
+                    ? {
+                        GOOGLE_CLOUD_PROJECT: context.connection.config.project,
+                      }
+                    : {}),
+                  ...(typeof context.connection.config.location === "string"
+                    ? {
+                        GOOGLE_CLOUD_LOCATION:
+                          context.connection.config.location,
+                      }
+                    : {}),
+                }
+              : {}),
+          }).filter(
+            (entry): entry is [string, string] => typeof entry[1] === "string",
+          ),
+        );
   const job = {
     userId: context.job.userId,
     connectionId: context.connection.id,
     secret: context.connection.secret || "",
     modelId: legacyVariant?.[1] || context.modelId,
-    ...(supportsEffort ? { effort: effortValue || legacyVariant?.[2] || "medium" } : {}),
-    prompt: [providerPrompt(context.job, ["antigravity", "mcp"], true, effectiveModelParams(context.chat, context.job)), providerConversationPrompt(context)]
+    ...(supportsEffort
+      ? { effort: effortValue || legacyVariant?.[2] || "medium" }
+      : {}),
+    prompt: [
+      providerPrompt(
+        context.job,
+        ["antigravity", "mcp"],
+        true,
+        effectiveModelParams(context.chat, context.job),
+      ),
+      providerConversationPrompt(context),
+    ]
       .filter(Boolean)
       .join("\n\nUser request:\n"),
     cwd: getUserAgentCwd(context.job.userId),
-    mcp: getMcpServers(providerMcpContext(context)),
+    mcp: getMcpServers(
+      providerMcpContext(context, { runtimeApprovalGate: false }),
+    ),
     extraEnv,
     signal: context.signal,
     onText: context.onText,
@@ -1675,7 +2288,9 @@ async function runOpenCode(context: ProviderContext): Promise<ProviderResult> {
 }
 
 async function runProvider(context: ProviderContext): Promise<ProviderResult> {
-  const providerKey = context.connection.providerKey || parseModelKey(context.job.modelId).providerKey;
+  const providerKey =
+    context.connection.providerKey ||
+    parseModelKey(context.job.modelId).providerKey;
   const execution = providerExecution(providerKey);
   if (execution === "antigravity-cli") return runAntigravity(context);
   if (execution === "codex-sdk") return runCodex(context);
@@ -1685,27 +2300,44 @@ async function runProvider(context: ProviderContext): Promise<ProviderResult> {
   return runAiSdk(context);
 }
 
-export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat) {
+export async function runAlternativeProviderJob(
+  job: AgentJob,
+  initialChat: Chat,
+) {
   const runStartedAt = Date.now();
   const rawParsed = parseModelKey(job.modelId || initialChat.modelId || "");
-  const normalizedModelId = normalizeLegacyProviderModelId(rawParsed.providerKey, rawParsed.modelId);
+  const normalizedModelId = normalizeLegacyProviderModelId(
+    rawParsed.providerKey,
+    rawParsed.modelId,
+  );
   const parsed = { ...rawParsed, modelId: normalizedModelId };
   if (normalizedModelId !== rawParsed.modelId) {
-    const canonicalKey = modelKey(rawParsed.providerKey, normalizedModelId, rawParsed.connectionId);
+    const canonicalKey = modelKey(
+      rawParsed.providerKey,
+      normalizedModelId,
+      rawParsed.connectionId,
+    );
     updateJob(job.id, { modelId: canonicalKey });
     updateChat(job.chatId, { modelId: canonicalKey }, job.userId);
   }
   const definition = getProviderDefinition(parsed.providerKey);
   if (!definition || parsed.providerKey === "cursor") return false;
-  if (!job.userId) throw new Error("A user account is required for provider connections.");
+  if (!job.userId)
+    throw new Error("A user account is required for provider connections.");
   const connection = parsed.connectionId
     ? getProviderConnection(parsed.connectionId, job.userId)
     : findActiveConnection(job.userId, parsed.providerKey);
-  if (!connection || !connection.enabled || connection.providerKey !== parsed.providerKey) {
+  if (
+    !connection ||
+    !connection.enabled ||
+    connection.providerKey !== parsed.providerKey
+  ) {
     throw new Error(`No enabled ${definition.name} connection is configured.`);
   }
   if (!definition.authTypes.includes(connection.authType)) {
-    throw new Error(`${definition.name} no longer supports ${connection.authType} authentication.`);
+    throw new Error(
+      `${definition.name} no longer supports ${connection.authType} authentication.`,
+    );
   }
   const credential = getProviderConnectionSecret(connection.id, job.userId);
   if (!credential) throw new Error("Provider connection not found.");
@@ -1724,26 +2356,27 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
   let chat = getChat(job.chatId, job.userId) || initialChat;
   let text = "";
   const tools: ToolPart[] = [];
- const parts: MessagePart[] = [];
+  const parts: MessagePart[] = [];
   const controller = new AbortController();
-  let modelSwitchTarget: { modelId: string; modelParams?: Array<{ id: string; value: string }> } | null = null;
+  let modelSwitchTarget: {
+    modelId: string;
+    modelParams?: Array<{ id: string; value: string }>;
+  } | null = null;
   const cancellationWatcher = setInterval(() => {
     const currentJob = getJob(job.id);
     const pendingModelId = currentJob?.pendingModelId?.trim();
     if (pendingModelId && pendingModelId !== job.modelId) {
-      modelSwitchTarget = { modelId: pendingModelId, modelParams: currentJob?.pendingModelParams };
+      modelSwitchTarget = {
+        modelId: pendingModelId,
+        modelParams: currentJob?.pendingModelParams,
+      };
       controller.abort();
       return;
     }
     if (currentJob?.status === "cancelled") controller.abort();
   }, 250);
-  const emit = (event: string, data: unknown) => appendRunEvent(
-    job.id,
-    job.chatId,
-    job.userId,
-    event,
-    data,
-  );
+  const emit = (event: string, data: unknown) =>
+    appendRunEvent(job.id, job.chatId, job.userId, event, data);
   let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
   let checkpointDirty = false;
   const checkpointNow = () => {
@@ -1751,8 +2384,16 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       id: assistantMessageId,
       role: "assistant",
       content: text,
-      ...(tools.length ? { tools: persistToolsForMessage(job.chatId, assistantMessageId, tools) } : {}),
- ...(parts.length ? { parts } : {}),
+      ...(tools.length
+        ? {
+            tools: persistToolsForMessage(
+              job.chatId,
+              assistantMessageId,
+              tools,
+            ),
+          }
+        : {}),
+      ...(parts.length ? { parts } : {}),
     });
     checkpointDirty = false;
   };
@@ -1787,15 +2428,19 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       resumePrompt: `The user switched the active model to ${target.modelId}. Continue the in-progress task from the saved chat/tool/browser state. Do not repeat completed work.`,
       resumeRequestedAt: switchedAt,
     });
-    updateChat(job.chatId, {
-      modelId: target.modelId,
-      modelParams: target.modelParams || [],
-      agentId: null,
-      runStatus: "running",
-      runUpdatedAt: switchedAt,
-      queueMessage: null,
-      badge: null,
-    }, job.userId);
+    updateChat(
+      job.chatId,
+      {
+        modelId: target.modelId,
+        modelParams: target.modelParams || [],
+        agentId: null,
+        runStatus: "running",
+        runUpdatedAt: switchedAt,
+        queueMessage: null,
+        badge: null,
+      },
+      job.userId,
+    );
     emit("status", { status: "switching_model", modelId: target.modelId });
     return true;
   };
@@ -1811,13 +2456,15 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
     // write_todos is a state surface, not an append-only tool history. Give it
     // one stable id per run so every update replaces the same Tasks card in
     // persistence and in the live SSE UI instead of creating ghost checklists.
-    const normalizedTool = tool.kind === "todo"
-      ? { ...tool, id: `todo-${job.id}` }
-      : tool;
-    let existingIndex = tools.findIndex((item) => item.id === normalizedTool.id);
+    const normalizedTool =
+      tool.kind === "todo" ? { ...tool, id: `todo-${job.id}` } : tool;
+    let existingIndex = tools.findIndex(
+      (item) => item.id === normalizedTool.id,
+    );
     if (existingIndex < 0 && normalizedTool.status !== "running") {
-      existingIndex = tools.findLastIndex((item) =>
-        item.status === "running" && item.name === normalizedTool.name,
+      existingIndex = tools.findLastIndex(
+        (item) =>
+          item.status === "running" && item.name === normalizedTool.name,
       );
       if (existingIndex >= 0) {
         normalizedTool.id = tools[existingIndex].id;
@@ -1841,26 +2488,39 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
     });
   };
   const onCompaction = (event: CompactionEvent) => {
- const part: MessagePart = { ...event };
- parts.push(part);
- checkpoint(true);
- emit("compaction", event);
- };
- const onThinking = (data: { text?: string; replace?: boolean; done?: boolean; durationMs?: number }) => {
+    const part: MessagePart = { ...event };
+    parts.push(part);
+    checkpoint(true);
+    emit("compaction", event);
+  };
+  const onThinking = (data: {
+    text?: string;
+    replace?: boolean;
+    done?: boolean;
+    durationMs?: number;
+  }) => {
     emit("thinking", data);
     if (data.done !== true) {
       emit("status", { status: "running", message: "Thinking…" });
     }
   };
 
-  appendMessage(job.chatId, { id: assistantMessageId, role: "assistant", content: "" });
+  appendMessage(job.chatId, {
+    id: assistantMessageId,
+    role: "assistant",
+    content: "",
+  });
   emit("assistantId", { messageId: assistantMessageId });
   emit("status", { status: "running", message: "Starting model…" });
-  updateChat(job.chatId, {
-    runStatus: "running",
-    runUpdatedAt: new Date().toISOString(),
-    queueMessage: null,
-  }, job.userId);
+  updateChat(
+    job.chatId,
+    {
+      runStatus: "running",
+      runUpdatedAt: new Date().toISOString(),
+      queueMessage: null,
+    },
+    job.userId,
+  );
 
   try {
     const result = await runProvider({
@@ -1871,33 +2531,49 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
       signal: controller.signal,
       onText,
       onTool,
- onCompaction,
+      onCompaction,
       onThinking: (data) => emit("thinking", data),
-      onStream: (data) => emit(data.type === "compaction" ? "compaction" : "stream", data),
+      onStream: (data) =>
+        emit(data.type === "compaction" ? "compaction" : "stream", data),
     });
     if (modelSwitchTarget && handoffModelSwitch()) return true;
     const durableStatus = getJob(job.id)?.status;
     if (durableStatus === "interrupted") {
       checkpoint();
-      emit("status", { status: "interrupted", message: "Run was interrupted before the provider finished." });
+      emit("status", {
+        status: "interrupted",
+        message: "Run was interrupted before the provider finished.",
+      });
       return true;
     }
-    const cancelled = controller.signal.aborted || durableStatus === "cancelled";
+    const cancelled =
+      controller.signal.aborted || durableStatus === "cancelled";
     if (cancelled) {
-      updateChat(job.chatId, {
-        runStatus: "cancelled",
-        runUpdatedAt: new Date().toISOString(),
-        queueMessage: null,
-      }, job.userId);
+      updateChat(
+        job.chatId,
+        {
+          runStatus: "cancelled",
+          runUpdatedAt: new Date().toISOString(),
+          queueMessage: null,
+          pendingApproval: null,
+        },
+        job.userId,
+      );
       updateJob(job.id, { status: "cancelled" });
       emit("done", { status: "cancelled", provider: definition.key });
       return true;
     }
-    if (!text.trim()) text = "The provider completed without returning a textual response.";
+    if (!text.trim())
+      text = "The provider completed without returning a textual response.";
     finalizeAlternativeTools(tools);
-    if (modeById(job.modeId || chat.sessionState?.modeId).id === "plan" && text.trim()) {
+    if (
+      modeById(job.modeId || chat.sessionState?.modeId).id === "plan" &&
+      text.trim()
+    ) {
       const current = getChat(job.chatId, job.userId);
-      const existingPlan = current?.workspaces?.find((workspace) => workspace.type === "plan");
+      const existingPlan = current?.workspaces?.find(
+        (workspace) => workspace.type === "plan",
+      );
       if (!existingPlan && current) {
         const timestamp = new Date().toISOString();
         const workspace = {
@@ -1909,11 +2585,17 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
           updatedAt: timestamp,
           version: 1,
         };
-        updateChat(job.chatId, {
-          workspaces: [...(current.workspaces || []), workspace].slice(-20),
-        }, job.userId);
+        updateChat(
+          job.chatId,
+          {
+            workspaces: [...(current.workspaces || []), workspace].slice(-20),
+          },
+          job.userId,
+        );
         text = `${text.trim()}\n\n[Plan: ${workspace.name}](workspace://plan/${workspace.id})`;
-        appendRunEvent(job.id, job.chatId, job.userId, "workspace", { workspace });
+        appendRunEvent(job.id, job.chatId, job.userId, "workspace", {
+          workspace,
+        });
       }
     }
     recordSignal({
@@ -1929,26 +2611,48 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
     });
     checkpoint();
     const measuredInputTokens = result.usage?.inputTokens;
-    const inputTokens = measuredInputTokens ?? estimateProviderInputTokens(chat, job, parsed.modelId);
-    chat = updateChat(job.chatId, {
-      ...(result.agentId ? { agentId: result.agentId } : {}),
-      runStatus: "completed",
-      runUpdatedAt: new Date().toISOString(),
-      queueMessage: null,
-    }, job.userId) || chat;
+    const inputTokens =
+      measuredInputTokens ??
+      estimateProviderInputTokens(chat, job, parsed.modelId);
+    chat =
+      updateChat(
+        job.chatId,
+        {
+          ...(result.agentId ? { agentId: result.agentId } : {}),
+          runStatus: "completed",
+          runUpdatedAt: new Date().toISOString(),
+          queueMessage: null,
+          pendingApproval: null,
+        },
+        job.userId,
+      ) || chat;
     upsertMessage(job.chatId, {
       id: assistantMessageId,
       role: "assistant",
       content: text,
-      ...(tools.length ? { tools: persistToolsForMessage(job.chatId, assistantMessageId, tools) } : {}),
- ...(parts.length ? { parts } : {}),
+      ...(tools.length
+        ? {
+            tools: persistToolsForMessage(
+              job.chatId,
+              assistantMessageId,
+              tools,
+            ),
+          }
+        : {}),
+      ...(parts.length ? { parts } : {}),
       runMetadata: {
         providerId: definition.key,
         modelId: parsed.modelId,
         inputTokens,
-        ...(measuredInputTokens === undefined ? { inputTokensEstimated: true } : {}),
-        ...(result.usage?.outputTokens !== undefined ? { outputTokens: result.usage.outputTokens } : {}),
-        ...(result.usage?.totalTokens !== undefined ? { totalTokens: result.usage.totalTokens } : {}),
+        ...(measuredInputTokens === undefined
+          ? { inputTokensEstimated: true }
+          : {}),
+        ...(result.usage?.outputTokens !== undefined
+          ? { outputTokens: result.usage.outputTokens }
+          : {}),
+        ...(result.usage?.totalTokens !== undefined
+          ? { totalTokens: result.usage.totalTokens }
+          : {}),
         completedAt: new Date().toISOString(),
       },
     });
@@ -1966,7 +2670,8 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
     if (modelSwitchTarget && handoffModelSwitch()) return true;
     const durableStatus = getJob(job.id)?.status;
     const interrupted = durableStatus === "interrupted";
-    const cancelled = controller.signal.aborted || durableStatus === "cancelled";
+    const cancelled =
+      controller.signal.aborted || durableStatus === "cancelled";
     const message = cancelled
       ? "Provider run cancelled."
       : interrupted
@@ -1992,14 +2697,22 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
         userId: job.userId || undefined,
         message: `Provider run failed (${definition.key}): ${message}`,
         stack: error instanceof Error ? error.stack : undefined,
-        context: { jobId: job.id, provider: definition.key, modelId: parsed.modelId },
+        context: {
+          jobId: job.id,
+          provider: definition.key,
+          modelId: parsed.modelId,
+        },
       });
     }
     if (interrupted) {
       checkpoint();
       emit("status", { status: "interrupted", message });
     } else if (cancelled) {
-      updateChat(job.chatId, { runStatus: "cancelled", runUpdatedAt: new Date().toISOString() }, job.userId);
+      updateChat(
+        job.chatId,
+        { runStatus: "cancelled", runUpdatedAt: new Date().toISOString() },
+        job.userId,
+      );
       updateJob(job.id, { status: "cancelled", error: message });
       emit("done", { status: "cancelled", provider: definition.key });
     } else {
@@ -2008,15 +2721,27 @@ export async function runAlternativeProviderJob(job: AgentJob, initialChat: Chat
         role: "assistant",
         content: text,
         errorMessage: message,
-        ...(tools.length ? { tools: persistToolsForMessage(job.chatId, assistantMessageId, tools) } : {}),
- ...(parts.length ? { parts } : {}),
+        ...(tools.length
+          ? {
+              tools: persistToolsForMessage(
+                job.chatId,
+                assistantMessageId,
+                tools,
+              ),
+            }
+          : {}),
+        ...(parts.length ? { parts } : {}),
       });
-      updateChat(job.chatId, {
-        runStatus: "error",
-        runUpdatedAt: new Date().toISOString(),
-        queueMessage: null,
-        badge: "red",
-      }, job.userId);
+      updateChat(
+        job.chatId,
+        {
+          runStatus: "error",
+          runUpdatedAt: new Date().toISOString(),
+          queueMessage: null,
+          badge: "red",
+        },
+        job.userId,
+      );
       updateJob(job.id, { status: "error", error: message });
       emit("error", { message });
     }

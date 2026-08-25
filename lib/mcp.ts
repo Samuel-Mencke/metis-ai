@@ -7,6 +7,7 @@ import {
   type CapabilityCategory,
 } from "@/lib/capabilities";
 import { config } from "@/lib/config";
+import { normalizeRuntimeMode } from "@/lib/runtime-mode";
 import { getUserAccess, getUserExecutionIdentity, isHostAdmin, requireUserExecutionIdentity } from "@/lib/user-access";
 export { getUserExecutionIdentity } from "@/lib/user-access";
 
@@ -33,6 +34,7 @@ export type McpContext = {
   incognito?: boolean;
   automation?: boolean;
   modeId?: string;
+  runtimeMode?: string;
   modePolicy?: string;
   compressionEnabled?: boolean;
   compressionMode?: string;
@@ -48,6 +50,7 @@ export function buildMcpContext(input: {
   incognito?: boolean;
   automation?: boolean;
   modeId?: string;
+  runtimeMode?: string;
   modePolicy?: string | { allowedCategories: unknown; toolOverrides?: unknown };
   compressionEnabled?: boolean;
   compressionMode?: string;
@@ -89,6 +92,7 @@ export function buildMcpContext(input: {
     incognito: input.incognito,
     automation: input.automation,
     modeId: input.modeId,
+    runtimeMode: normalizeRuntimeMode(input.runtimeMode),
     modePolicy,
     compressionEnabled: input.compressionEnabled,
     compressionMode: input.compressionMode,
@@ -119,6 +123,7 @@ export function getMcpServers(context: McpContext = {}): McpServerMap {
       MCP_INCOGNITO: context.incognito ? "1" : undefined,
       MCP_AUTOMATION: context.automation ? "1" : undefined,
       MCP_MODE_ID: context.modeId,
+      AI_CHAT_RUNTIME_MODE: context.runtimeMode,
       MCP_MODE_POLICY: context.modePolicy,
       MCP_COMPRESSION_ENABLED: context.compressionEnabled ? "1" : undefined,
       MCP_COMPRESSION_MODE: context.compressionMode,

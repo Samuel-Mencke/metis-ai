@@ -48,6 +48,7 @@ import { providerNativeParams, stripRemovedModelParams } from "@/lib/model-param
 import { recordSignal, type TaskCategory } from "@/lib/model-telemetry";
 import { classifyTool, resolveMcpToolName, toolDetailFromArgs } from "@/lib/tool-kind";
 import { metisAgentIdentity } from "@/lib/agent-identity";
+import { normalizeRuntimeMode } from "@/lib/runtime-mode";
 
 const AGENT_INIT_TIMEOUT_MS = 90_000;
 const AGENT_INACTIVITY_TIMEOUT_MS = 5 * 60_000;
@@ -670,6 +671,9 @@ export async function runQueuedJob(job: AgentJob) {
     incognito: Boolean(job.incognito || chat.incognito),
     automation: Boolean(job.automationId),
     modeId: activeMode.id,
+    // Runtime approvals are phase-one AI-SDK/GLM gateway behavior. Cursor has
+    // its own execution path and must not open a second interactive gate.
+    runtimeMode: "full-access",
     modePolicy: JSON.stringify({
       allowedCategories: modeCategories,
       toolOverrides: activeMode.toolOverrides || {},
