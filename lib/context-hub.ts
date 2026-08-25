@@ -31,7 +31,7 @@ export function contextHubTools(options: { allowWrite?: boolean; enabled?: boole
     context_search: tool({
       description:
         "Search the owner's personal context hub: devices, servers, services, projects, preferences, and long-term facts. Use before answering questions about the user's setup, before planning changes to their infrastructure, or when background knowledge about the owner would change the answer. Returns grounded context only, never secrets.",
-      parameters: jsonSchema({
+      inputSchema: jsonSchema({
         type: "object",
         properties: {
           query: {
@@ -59,7 +59,7 @@ export function contextHubTools(options: { allowWrite?: boolean; enabled?: boole
     context_profile: tool({
       description:
         "Read the owner's canonical profile: identity, core preferences, infrastructure overview, and active projects. Cheaper than context_search when a general overview is enough.",
-      parameters: jsonSchema({
+      inputSchema: jsonSchema({
         type: "object",
         properties: {},
         additionalProperties: false,
@@ -71,7 +71,7 @@ export function contextHubTools(options: { allowWrite?: boolean; enabled?: boole
     tools.context_remember = tool({
       description:
         "Store one durable, non-secret fact about the owner in the shared context hub (fact_id is a stable snake_case key; later writes with the same id update it). Never store passwords, API keys, cookies, tokens, or auth material. Use sparingly for stable preferences and environment facts the owner confirmed.",
-      parameters: jsonSchema({
+      inputSchema: jsonSchema({
         type: "object",
         properties: {
           fact_id: { type: "string", description: "Stable snake_case identifier, e.g. 'home-lab-server'." },
