@@ -216,6 +216,7 @@ export const aiSdkAdapter: ProviderAdapterShape = {
   stopSession: async () => {},
   readThread: () => unsupported("readThread", "ai-sdk"),
   rollbackThread: () => unsupported("rollbackThread", "ai-sdk"),
+  // eslint-disable-next-line require-yield -- ready-signal only; no turn history to replay while the facade owns the listener
   async *streamEvents(context) {
     // Runtime events are emitted by the adapter while a turn is active. The
     // facade currently owns this process-wide listener, so a cold stream has

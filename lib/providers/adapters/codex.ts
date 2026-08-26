@@ -383,6 +383,7 @@ export const codexAdapter: ProviderAdapterShape = {
   stopSession: async () => {},
   readThread: () => unsupported("readThread", "codex-sdk"),
   rollbackThread: () => unsupported("rollbackThread", "codex-sdk"),
+  // eslint-disable-next-line require-yield -- ready-signal only; no turn history to replay while the facade owns the listener
   async *streamEvents(context) {
     context.onStream({ type: "runtime.stream.ready", provider: "codex-sdk" });
   },

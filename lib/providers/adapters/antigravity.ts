@@ -182,6 +182,7 @@ export const antigravityAdapter: ProviderAdapterShape = {
   stopSession: async () => {},
   readThread: () => unsupported("readThread", "antigravity-cli"),
   rollbackThread: () => unsupported("rollbackThread", "antigravity-cli"),
+  // eslint-disable-next-line require-yield -- ready-signal only; no turn history to replay while the facade owns the listener
   async *streamEvents(context) {
     context.onStream({
       type: "runtime.stream.ready",
