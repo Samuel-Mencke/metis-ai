@@ -116,6 +116,8 @@ export interface MetisRuntimeToolStartedEvent extends MetisRuntimeEventEnvelope 
   type: "item.tool.started";
   payload: {
     name: string;
+    /** Provider-neutral presentation category from the durable tool event. */
+    kind?: string;
     /** Short input representation for the compact chip. */
     input?: unknown;
     summary?: string;
@@ -126,6 +128,7 @@ export interface MetisRuntimeToolCompletedEvent extends MetisRuntimeEventEnvelop
   type: "item.tool.completed";
   payload: {
     name?: string;
+    kind?: string;
     status: RuntimeToolStatus;
     output?: unknown;
     summary?: string;

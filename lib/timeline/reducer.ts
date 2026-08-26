@@ -18,6 +18,7 @@ export interface TimelineToolItem {
   kind: "tool";
   itemId: string;
   name: string;
+  toolKind?: string;
   status: "in_progress" | "completed" | "failed" | "declined";
   input?: unknown;
   output?: unknown;
@@ -152,6 +153,7 @@ export function reduceTimeline(state: TimelineState, event: MetisRuntimeEvent, s
       const itemId = toolEvent.itemId || toolEvent.eventId;
       const tool = getOrCreateTool(newState, itemId, toolEvent.createdAt);
       tool.name = toolEvent.payload.name;
+      tool.toolKind = toolEvent.payload.kind;
       tool.input = toolEvent.payload.input;
       tool.summary = toolEvent.payload.summary;
       newState.pendingTools.set(itemId, tool);
@@ -167,6 +169,7 @@ export function reduceTimeline(state: TimelineState, event: MetisRuntimeEvent, s
         kind: "tool",
         itemId,
         name: toolEvent.payload.name || pending?.name || "",
+        toolKind: toolEvent.payload.kind || pending?.toolKind,
         status: toolEvent.payload.status,
         input: pending?.input,
         output: toolEvent.payload.output,

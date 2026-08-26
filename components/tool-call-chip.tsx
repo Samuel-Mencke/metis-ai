@@ -389,47 +389,46 @@ export const ToolCallChip = memo(function ToolCallChip({
   const workspaceClickable = resolvedKind === "plan" || resolvedKind === "canvas" || resolvedKind === "browser";
   if (todoItems?.length) {
     const completed = todoItems.filter((todo) => /^(completed|done)$/i.test(todo.status || "")).length;
+    const percent = Math.round((completed / todoItems.length) * 100);
     return (
-      <div className="my-2 w-full px-1 py-0.5">
-        <div className="mb-1.5 flex items-center gap-2 text-xs">
-          <ListTodo className="size-3.5 text-blue-400" />
-          <span className="font-medium text-foreground/80">Tasks</span>
-          <span className="text-muted-foreground/70">{completed}/{todoItems.length}</span>
-          {onOpenRaw ? (
-            <button
-              type="button"
-              className="ml-auto flex size-5 items-center justify-center rounded text-muted-foreground/50 hover:bg-muted hover:text-foreground"
-              aria-label="Show raw tool information"
-              onClick={onOpenRaw}
-            >
-              <Code2 className="size-3" />
-            </button>
-          ) : null}
+      <section className="my-2.5 w-full overflow-hidden rounded-xl border border-border/45 bg-card/40">
+        <div className="flex items-center gap-2 px-3 py-2.5">
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-blue-400/[0.08] text-blue-300"><ListTodo className="size-3.5" /></span>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-xs font-semibold text-foreground/85">Tasks</span>
+              <span className="text-[10px] tabular-nums text-muted-foreground/60">{completed}/{todoItems.length} · {percent}%</span>
+            </div>
+            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted/70"><div className="h-full rounded-full bg-blue-400/75 transition-[width]" style={{ width: `${percent}%` }} /></div>
+          </div>
+          {onOpenRaw ? <button type="button" className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground/45 hover:bg-muted hover:text-foreground" aria-label="Show raw tool information" onClick={onOpenRaw}><Code2 className="size-3" /></button> : null}
         </div>
-        <div className="space-y-1">
-          {todoItems.map((todo, index) => {
-            const done = /^(completed|done)$/i.test(todo.status || "");
-            return (
-              <div key={todo.id ?? `${todo.content}-${index}`} className="flex min-w-0 items-center gap-2 text-xs">
-                <span className={cn("flex size-3.5 shrink-0 items-center justify-center rounded-full border text-[9px]", done ? "border-emerald-400/60 bg-emerald-400/15 text-emerald-400" : "border-border/70 text-muted-foreground/50")}>
-                  {done ? "✓" : ""}
-                </span>
-                <span className={cn("min-w-0 truncate", done ? "text-muted-foreground line-through" : "text-foreground/80")}>{todo.content}</span>
-              </div>
-            );
-          })}
+        <div className="border-t border-border/30 px-3 py-2">
+          <div className="space-y-1.5">
+            {todoItems.map((todo, index) => {
+              const done = /^(completed|done)$/i.test(todo.status || "");
+              const active = /^(in_progress|running)$/i.test(todo.status || "");
+              return (
+                <div key={todo.id ?? `${todo.content}-${index}`} className="flex min-w-0 items-start gap-2 text-xs">
+                  <span className={cn("mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border text-[9px] transition-colors", done ? "border-emerald-400/45 bg-emerald-400/10 text-emerald-300" : active ? "border-blue-400/55 bg-blue-400/10 text-blue-300" : "border-border/65 text-transparent")}>{done ? "✓" : active ? "•" : "·"}</span>
+                  <span className={cn("min-w-0 flex-1 leading-4", done ? "text-muted-foreground/60 line-through" : active ? "font-medium text-foreground/90" : "text-foreground/72")}>{todo.content}</span>
+                </div>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      </section>
     );
   }
   if (resolvedKind === "memory") {
     const memoryCard = memoryCardFromPayload(name, input || detail, result || detail);
     return (
-      <div className="my-1 flex w-full items-start gap-2 px-1 py-0.5 text-xs">
-        <Brain className="mt-0.5 size-3.5 shrink-0 text-violet-400" />
-        <div className="min-w-0">
-          <p className="font-medium text-violet-300">{memoryCard.title}</p>
-          <p className="mt-0.5 max-h-20 overflow-hidden whitespace-pre-wrap text-foreground/75">{memoryCard.body}</p>
+      <div className="my-2 flex w-full items-start gap-2.5 rounded-xl border border-violet-400/15 bg-violet-400/[0.035] px-3 py-2.5 text-xs">
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-violet-400/10 text-violet-300"><Brain className="size-3.5" /></span>
+        <div className="min-w-0 flex-1">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-violet-300/75">Memory</p>
+          <p className="mt-0.5 font-medium text-foreground/85">{memoryCard.title}</p>
+          <p className="mt-1 max-h-24 overflow-hidden whitespace-pre-wrap leading-4 text-muted-foreground/75">{memoryCard.body}</p>
         </div>
       </div>
     );

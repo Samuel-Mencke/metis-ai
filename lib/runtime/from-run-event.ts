@@ -75,6 +75,7 @@ export function runtimeEventFromRunEvent(row: DurableRunEvent): MetisRuntimeEven
         itemId: callId,
         payload: {
           name,
+          ...(text(data.kind) ? { kind: text(data.kind) } : {}),
           ...(data.input !== undefined ? { input: data.input } : {}),
           ...(text(data.detail) ? { summary: text(data.detail) } : {}),
         },
@@ -86,6 +87,7 @@ export function runtimeEventFromRunEvent(row: DurableRunEvent): MetisRuntimeEven
       itemId: callId,
       payload: {
         name,
+        ...(text(data.kind) ? { kind: text(data.kind) } : {}),
         status: toolStatus(status),
         ...(data.result !== undefined ? { output: data.result } : {}),
         ...(toolStatus(status) === "failed" && text(data.result)

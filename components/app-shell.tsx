@@ -10304,7 +10304,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                       }}
                       aria-label="Plan title"
                       placeholder="Plan title"
-                      className="h-8 flex-1 text-sm font-medium"
+                      className="h-9 flex-1 border-transparent bg-transparent px-1 text-base font-semibold tracking-tight shadow-none hover:bg-muted/25 focus-visible:border-border/40 focus-visible:bg-muted/20"
                     />
                     <Button
                       type="button"
@@ -10369,6 +10369,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                     }}
                     aria-label="Plan content"
                     placeholder="Write the plan…"
+                    className="rounded-xl border border-border/40 bg-card/35 px-4 py-4 text-sm leading-6 shadow-inner shadow-black/[0.025] focus-visible:bg-card/50"
                   />
                 </div>
               </>
@@ -10384,7 +10385,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                       }}
                       aria-label="Canvas title"
                       placeholder="Canvas title"
-                      className="h-8 flex-1 text-sm font-medium"
+                      className="h-9 flex-1 border-transparent bg-transparent px-1 text-base font-semibold tracking-tight shadow-none hover:bg-muted/25 focus-visible:border-border/40 focus-visible:bg-muted/20"
                     />
                     <Button
                       type="button"
@@ -10449,6 +10450,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                     }}
                     aria-label="Canvas content"
                     placeholder="Write notes, requirements, or a working draft…"
+                    className="rounded-xl border border-border/40 bg-card/35 px-4 py-4 text-sm leading-6 shadow-inner shadow-black/[0.025] focus-visible:bg-card/50"
                   />
                 </div>
               </>
