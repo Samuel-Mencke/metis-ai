@@ -14,14 +14,6 @@ import {
 } from "@/lib/provider-connections";
 import { getProviderDefinition } from "@/lib/providers/registry";
 import { providerExecution } from "@/lib/providers/run-kind";
-import { getUserAgentCwd } from "@/lib/mcp";
-import { getMcpServers } from "@/lib/mcp";
-import {
-  effectiveModelParams,
-  providerConversationPrompt,
-  providerMcpContext,
-  providerPrompt,
-} from "@/lib/providers/adapters/provider-support";
 import { normalizeLegacyProviderModelId } from "@/lib/providers/model-aliases";
 import { providerAdapterForExecution } from "@/lib/providers/adapters";
 import type { ProviderResult } from "@/lib/providers/adapters/contract";
@@ -39,7 +31,6 @@ import {
 } from "@/lib/providers/oauth";
 import { antigravitySupportsEffort, runAntigravitySdkJob, runOfficialAntigravityJob } from "@/lib/providers/official-antigravity";
 import { canonicalizeToolPart } from "@/lib/providers/tool-events";
-import { runAcpStdioAgent } from "@/lib/providers/acp-stdio";
 import type { AgentJob } from "@/lib/jobs";
 import { appendRunEvent, getJob, updateJob } from "@/lib/db-jobs";
 import { modeById } from "@/lib/modes";
@@ -49,57 +40,11 @@ import { persistToolsForMessage } from "@/lib/tool-persistence";
 import { recordSignal } from "@/lib/model-telemetry";
 
 
-async function runGrok(context: ProviderContext): Promise<ProviderResult> {
-  const binary = typeof context.connection.config.binaryPath === "string" && context.connection.config.binaryPath.trim()
-    ? context.connection.config.binaryPath.trim()
-    : "grok";
-  const result = await runAcpStdioAgent({
-    command: binary,
-    args: ["agent", "stdio"],
-    cwd: getUserAgentCwd(context.job.userId),
-    prompt: [providerPrompt(context.job, ["mcp"], true, effectiveModelParams(context.chat, context.job)), providerConversationPrompt(context)]
-      .filter(Boolean)
-      .join("\n\nUser request:\n"),
-    mcp: getMcpServers(providerMcpContext(context)),
-    signal: context.signal,
-    clientName: "metis-ai",
-    onText: context.onText,
-    onTool: context.onTool,
-  });
-  return result.sessionId ? { agentId: `grok:${result.sessionId}` } : {};
-}
-
-async function runOpenCode(context: ProviderContext): Promise<ProviderResult> {
-  const binary = typeof context.connection.config.binaryPath === "string" && context.connection.config.binaryPath.trim()
-    ? context.connection.config.binaryPath.trim()
-    : "opencode";
-  const result = await runAcpStdioAgent({
-    command: binary,
-    args: ["acp"],
-    cwd: getUserAgentCwd(context.job.userId),
-    prompt: [providerPrompt(context.job, ["mcp"], true, effectiveModelParams(context.chat, context.job)), providerConversationPrompt(context)]
-      .filter(Boolean)
-      .join("\n\nUser request:\n"),
-    mcp: getMcpServers(providerMcpContext(context)),
-    signal: context.signal,
-    clientName: "metis-ai",
-    onText: context.onText,
-    onTool: context.onTool,
-  });
-  return result.sessionId ? { agentId: `opencode:${result.sessionId}` } : {};
-}
-
 async function runProvider(context: ProviderContext): Promise<ProviderResult> {
   const providerKey =
     context.connection.providerKey ||
     parseModelKey(context.job.modelId).providerKey;
-  // grok/opencode stay on the proven inline ACP drivers for now; the adapter
-  // registry covers codex/claude/antigravity/ai-sdk.
-  const execution = providerExecution(providerKey);
-  if (execution === "grok-cli" || execution === "opencode-cli") {
-    return execution === "grok-cli" ? runGrok(context) : runOpenCode(context);
-  }
-  return providerAdapterForExecution(execution).runTurn(context);
+  return providerAdapterForExecution(providerExecution(providerKey)).runTurn(context);
 }
 
 export async function runAlternativeProviderJob(

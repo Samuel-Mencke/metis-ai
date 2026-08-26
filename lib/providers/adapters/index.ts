@@ -4,18 +4,17 @@ import { aiSdkAdapter } from "./ai-sdk";
 import { codexAdapter } from "./codex";
 import { claudeAdapter } from "./claude";
 import { antigravityAdapter } from "./antigravity";
-import type { ProviderAdapter } from "./contract";
+import { grokAdapter, opencodeAdapter } from "./acp-cli";
 
 const adapters: Record<ProviderExecution, ProviderAdapterShape | undefined> = {
   "ai-sdk": aiSdkAdapter,
   "codex-sdk": codexAdapter,
   "claude-agent": claudeAdapter,
   "antigravity-cli": antigravityAdapter,
-  // Cursor, grok and opencode remain on the existing worker/ACP paths until
-  // their adapter ports; declared here so the execution map stays exhaustive.
+  "grok-cli": grokAdapter,
+  "opencode-cli": opencodeAdapter,
+  // Cursor remains handled by the existing worker path until its adapter port.
   "cursor-agent": undefined,
-  "grok-cli": undefined,
-  "opencode-cli": undefined,
 };
 
 export function providerAdapterForExecution(
