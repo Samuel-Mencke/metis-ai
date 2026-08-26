@@ -176,9 +176,8 @@ test("Cursor SDK prompt compaction is a no-op below 80% of the window", () => {
   assert.match(result.text, /Short question/);
 });
 
-test("Cursor worker compacts before resume and emits a compaction chip", () => {
-  assert.match(workerSource, /compactChatHistoryForPrompt\(chat,/);
-  assert.match(workerSource, /agent = \(job\.agentId \|\| chat\.agentId\) && !historyCompacted/);
-  assert.match(workerSource, /emit\("compaction", event\)/);
-  assert.match(workerSource, /compactedHistory\.text/);
+test("Cursor native session owns context instead of replaying Metis-compacted history", () => {
+  assert.match(workerSource, /getProviderSessionBinding/);
+  assert.match(workerSource, /contextOwner:\s*\"native\"/);
+  assert.doesNotMatch(workerSource, /agent = \(job\.agentId \|\| chat\.agentId\) && !historyCompacted/);
 });

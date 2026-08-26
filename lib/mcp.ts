@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { signTrustedMcpSession } from "@/lib/mcp-core/session-token.mjs";
 import {
   capabilityManifestHash,
   createCapabilityManifest,
@@ -26,6 +27,35 @@ export type McpServerMap = Record<
       headers?: Record<string, string>;
     }
 >;
+
+export type TrustedMcpSessionClaims = {
+  v: 1;
+  exp: number;
+  chatId?: string;
+  userId: string;
+  jobId?: string;
+  workerId?: string;
+  leaseToken?: string;
+  incognito?: boolean;
+  automation?: boolean;
+  modeId?: string;
+  runtimeMode?: string;
+  modePolicy?: string;
+  compressionEnabled?: boolean;
+  compressionMode?: string;
+  compressionToolResults?: boolean;
+  capabilityManifest?: string;
+  capabilityHash?: string;
+  osUsername: string;
+  uid: number;
+  gid: number;
+  workspaceRoot: string;
+  home: string;
+  allowRoot: boolean;
+  isHostAdmin: boolean;
+  trustedInternal: true;
+};
+
 
 export type McpContext = {
   chatId?: string;
@@ -106,14 +136,13 @@ export function buildMcpContext(input: {
   };
 }
 
-export function getMcpServers(context: McpContext = {}): McpServerMap {
-  const appRoot = config.root;
+export function getMcpBridgeEnv(context: McpContext = {}): Record<string, string> {
   if (!context.userId?.trim()) {
     throw new Error("Agent tools require an authenticated account with an OS user mapping.");
   }
   const identity = requireUserExecutionIdentity(context.userId);
   const agentCwd = getUserAgentCwd(context.userId);
-  const env = Object.fromEntries(
+  return Object.fromEntries(
     Object.entries({
       ...process.env,
       HOME: identity.home || process.env.HOME,
@@ -143,13 +172,72 @@ export function getMcpServers(context: McpContext = {}): McpServerMap {
       AI_CHAT_SUBAGENT_URL: config.subagentUrl,
       AI_CHAT_AUTOMATION_URL: config.automationUrl,
       AI_CHAT_FILE_URL: config.fileUrl,
-      MCP_OS_USERNAME: identity?.username,
-      MCP_OS_UID: identity ? String(identity.uid) : undefined,
-      MCP_OS_GID: identity ? String(identity.gid) : undefined,
+      MCP_OS_USERNAME: identity.username,
+      MCP_OS_UID: String(identity.uid),
+      MCP_OS_GID: String(identity.gid),
       MCP_ALLOW_ROOT_AGENTS: config.allowRootAgents ? "1" : "0",
       MCP_IS_HOST_ADMIN: isHostAdmin(context.userId) ? "1" : "0",
     }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
   );
+}
+
+export function getMcpServers(context: McpContext = {}): McpServerMap {
+  const appRoot = config.root;
+  if (!context.userId?.trim()) {
+    throw new Error("Agent tools require an authenticated account with an OS user mapping.");
+  }
+  const identity = requireUserExecutionIdentity(context.userId);
+  const agentCwd = getUserAgentCwd(context.userId);
+  const env = getMcpBridgeEnv(context);
+
+  // Internal native agent runtimes use the already-running Streamable HTTP MCP
+  // gateway. A signed token carries the exact per-run context instead of
+  // trusting caller headers or spawning a fresh stdio gateway every turn.
+  if (
+    config.mcpBearerToken &&
+    config.mcpPublicUrl &&
+    typeof identity.uid === "number" &&
+    typeof identity.gid === "number"
+  ) {
+    const token = signTrustedMcpSession({
+      v: 1,
+      exp: Date.now() + 12 * 60 * 60 * 1000,
+      ...(context.chatId ? { chatId: context.chatId } : {}),
+      userId: context.userId,
+      ...(context.jobId ? { jobId: context.jobId } : {}),
+      ...(process.env.AI_CHAT_WORKER_ID?.trim() ? { workerId: process.env.AI_CHAT_WORKER_ID.trim() } : {}),
+      ...(process.env.AI_CHAT_JOB_LEASE_TOKEN?.trim() ? { leaseToken: process.env.AI_CHAT_JOB_LEASE_TOKEN.trim() } : {}),
+      ...(context.incognito ? { incognito: true } : {}),
+      ...(context.automation ? { automation: true } : {}),
+      ...(context.modeId ? { modeId: context.modeId } : {}),
+      ...(context.runtimeMode ? { runtimeMode: context.runtimeMode } : {}),
+      ...(context.modePolicy ? { modePolicy: context.modePolicy } : {}),
+      ...(context.compressionEnabled ? { compressionEnabled: true } : {}),
+      ...(context.compressionMode ? { compressionMode: context.compressionMode } : {}),
+      ...(context.compressionToolResults !== undefined
+        ? { compressionToolResults: context.compressionToolResults }
+        : {}),
+      ...(context.capabilityManifest ? { capabilityManifest: context.capabilityManifest } : {}),
+      ...(context.capabilityHash ? { capabilityHash: context.capabilityHash } : {}),
+      osUsername: identity.username,
+      uid: identity.uid,
+      gid: identity.gid,
+      workspaceRoot: agentCwd,
+      home: identity.home || process.env.HOME || agentCwd,
+      allowRoot: config.allowRootAgents,
+      isHostAdmin: isHostAdmin(context.userId),
+      trustedInternal: true,
+    }, config.mcpBearerToken);
+    return {
+      gateway: {
+        type: "http",
+        url: `${config.mcpPublicUrl.replace(/\/+$/, "")}/mcp`,
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    };
+  }
+
+  // Safe fallback for development installs without a configured MCP bearer.
   return {
     gateway: {
       type: "stdio",
