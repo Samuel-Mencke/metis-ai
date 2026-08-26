@@ -59,7 +59,9 @@ export type ProviderExecutionKey =
   | "ai-sdk"
   | "codex-sdk"
   | "claude-agent"
-  | "antigravity-cli";
+  | "antigravity-cli"
+  | "grok-cli"
+  | "opencode-cli";
 
 export type ProviderAdapterCapabilities = {
   readonly contextOwner: "native" | "metis";

@@ -347,7 +347,7 @@ export type ChatInputState = {
 };
 
 export type ProviderSessionBinding = {
-  execution: "cursor-agent" | "codex-sdk" | "claude-agent" | "antigravity-cli" | "ai-sdk";
+  execution: "cursor-agent" | "codex-sdk" | "claude-agent" | "antigravity-cli" | "grok-cli" | "opencode-cli" | "ai-sdk";
   connectionId: string;
   contextOwner: "native" | "metis";
   /** Cursor/session that completed at least one persisted turn. */

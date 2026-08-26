@@ -4,12 +4,15 @@ import { aiSdkAdapter } from "./ai-sdk";
 import { codexAdapter } from "./codex";
 import { claudeAdapter } from "./claude";
 import { antigravityAdapter } from "./antigravity";
+import { grokAdapter, opencodeAdapter } from "./acp-cli";
 
 const adapters: Record<ProviderExecution, ProviderAdapterShape | undefined> = {
   "ai-sdk": aiSdkAdapter,
   "codex-sdk": codexAdapter,
   "claude-agent": claudeAdapter,
   "antigravity-cli": antigravityAdapter,
+  "grok-cli": grokAdapter,
+  "opencode-cli": opencodeAdapter,
   // Cursor remains handled by the existing worker path until its adapter port.
   "cursor-agent": undefined,
 };
