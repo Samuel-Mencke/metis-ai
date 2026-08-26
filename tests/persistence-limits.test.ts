@@ -50,6 +50,7 @@ test("message parts keep ordering without duplicating full tool payloads", () =>
     name: "edit",
     status: "completed",
     kind: "edit",
+    source: "native",
     path: "/tmp/example.ts",
     result: "r".repeat(100_000),
     diff: { before: "before", after: "after", additions: 1, deletions: 1 },
@@ -73,5 +74,6 @@ test("message parts keep ordering without duplicating full tool payloads", () =>
     assert.equal(toolPart.id, "edit-1");
     assert.equal(toolPart.result, undefined);
     assert.equal(toolPart.diff, undefined);
+    assert.equal(toolPart.source, "native");
   }
 });

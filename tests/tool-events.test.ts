@@ -8,6 +8,8 @@ test("canonicalizeToolPart marks gateway tools as mcp source", () => {
   const tool = canonicalizeToolPart({ id: "1", name: "list_directory", status: "running" });
   assert.equal(tool.kind, "read");
   assert.equal(tool.source, "mcp");
+  assert.equal(canonicalizeToolPart({ id: "t", name: "write_todos", status: "running" }).source, "mcp");
+  assert.equal(canonicalizeToolPart({ id: "e", name: "execute_command", status: "running" }).source, "mcp");
 });
 
 test("canonicalizeToolPart keeps native provider tools native", () => {

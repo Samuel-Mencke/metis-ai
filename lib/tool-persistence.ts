@@ -89,6 +89,7 @@ export function compactMessagePartsForPersistence(parts: MessagePart[]): Message
       name: part.name,
       status: part.status,
       ...(part.kind ? { kind: part.kind } : {}),
+      ...(part.source ? { source: part.source } : {}),
       ...(part.path ? { path: part.path } : {}),
       ...(part.detail ? { detail: part.detail } : {}),
     };

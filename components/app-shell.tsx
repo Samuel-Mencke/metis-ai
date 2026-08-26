@@ -274,6 +274,7 @@ type ToolPart = {
   status: string;
   detail?: string;
   kind?: "plan" | "edit" | "read" | "shell" | "subagent" | "mcp" | "canvas" | "note" | "todo" | "browser" | "memory" | "automation" | "compaction" | "other";
+  source?: "mcp" | "native" | "browser";
   path?: string;
   diff?: { before?: string; after?: string; additions?: number; deletions?: number };
   todos?: Array<{ id?: string; content: string; status?: string }>;
@@ -486,6 +487,7 @@ function partsFromFlat(m: {
       status: t.status,
       detail: t.detail,
       kind: t.kind,
+      source: t.source,
       path: t.path,
       diff: t.diff,
       input: t.input,
@@ -524,6 +526,7 @@ function flatFromParts(parts: MsgPart[]): {
         status: p.status,
         detail: p.detail,
         kind: p.kind,
+          source: p.source,
         path: p.path,
         diff: p.diff,
         input: p.input,
@@ -6605,6 +6608,10 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                 ? payload.kind as ToolPart["kind"]
                 : undefined)
               ?? classifyToolKind(name, input, result);
+        const source =
+          payload.source === "mcp" || payload.source === "native" || payload.source === "browser"
+            ? payload.source
+            : undefined;
             const attachmentPayload =
               payload.attachment && typeof payload.attachment === "object"
                 ? payload.attachment as Partial<MsgAttachment>
@@ -6667,6 +6674,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                   result: result ?? prevTool?.result,
                   subagent: subagent ?? prevTool?.subagent,
                   todos: todos ?? prevTool?.todos,
+          source: source ?? prevTool?.source,
                 };
                 if (idx >= 0) {
                   parts[idx] = prevTool ? { ...prevTool, ...next } : next;
