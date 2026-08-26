@@ -14,6 +14,14 @@ import {
 } from "@/lib/provider-connections";
 import { getProviderDefinition } from "@/lib/providers/registry";
 import { providerExecution } from "@/lib/providers/run-kind";
+import { getUserAgentCwd } from "@/lib/mcp";
+import { getMcpServers } from "@/lib/mcp";
+import {
+  effectiveModelParams,
+  providerConversationPrompt,
+  providerMcpContext,
+  providerPrompt,
+} from "@/lib/providers/adapters/provider-support";
 import { normalizeLegacyProviderModelId } from "@/lib/providers/model-aliases";
 import { providerAdapterForExecution } from "@/lib/providers/adapters";
 import type { ProviderResult } from "@/lib/providers/adapters/contract";
