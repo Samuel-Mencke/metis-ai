@@ -25,11 +25,12 @@ import {
   getProviderConnectionSecret,
 } from "@/lib/provider-connections";
 import { parseModelKey } from "@/lib/providers/types";
+import { clearProviderSessionBinding, getProviderSessionBinding, updateProviderSessionBinding } from "@/lib/providers/session-bindings";
 import { providerModelsForConnection } from "@/lib/providers/discovery";
 import { routeModel, type RoutingModel } from "@/lib/model-routing";
 import { routeTask } from "@/lib/agent-efficiency";
 import type { Chat } from "@/lib/store";
-import { compactChatHistoryForPrompt, runAlternativeProviderJob } from "@/lib/providers/runner";
+import { compactChatHistoryForPrompt, runAlternativeProviderJob, COMPACTION_MARKER } from "@/lib/providers/runner";
 import { contextModeOf, contextWindowForSelection } from "@/lib/context-window";
 import { appendAgentTrace } from "@/lib/agent-trace";
 import { parseAgentTranscript, stripTranscriptDump } from "@/lib/agent-transcript";
@@ -813,34 +814,80 @@ export async function runQueuedJob(job: AgentJob) {
         ? { params: providerNativeParams(modelParams) }
         : {}),
     };
-    let historyCompacted = false;
-    const compactedHistory = (job.incognito || chat.incognito)
-      ? { text: "", compacted: false }
-      : compactChatHistoryForPrompt(chat, {
-          excludeMessageId: job.messageId,
-          contextWindow: contextWindowForSelection(
-            { id: requestedModelId, providerId: "cursor" },
-            modelParams,
-          ),
-          contextMode: contextModeOf(modelParams),
-          onCompaction: (event) => {
-            historyCompacted = historyCompacted || event.status === "completed";
-            const part: MessagePart = { ...event };
-            const index = parts.findIndex((item) => item.type === "compaction");
-            if (index >= 0) parts[index] = part;
-            else parts.push(part);
-            emit("compaction", event);
-            checkpoint(true);
-          },
-        });
-    historyCompacted = historyCompacted || compactedHistory.compacted;
-    if (historyCompacted) {
-      updateChat(job.chatId, { agentId: null }, job.userId);
-    }
-    agent = (job.agentId || chat.agentId) && !historyCompacted
-      ? await (async () => {
+
+    const contextWindow = contextWindowForSelection(
+      { id: requestedModelId, providerId: "cursor" },
+      modelParams,
+    );
+    const contextMode = contextModeOf(modelParams);
+
+    // Native Cursor owns its conversation. Metis stores a provider-specific
+    // last-known-good binding so switching providers does not destroy it.
+    const cursorBinding = getProviderSessionBinding(chat, "cursor-agent", cursorConnection.id);
+    const legacyCursorAgentId = job.agentId || chat.agentId || undefined;
+    const nativeAgentId = cursorBinding?.lastKnownGoodCursor || legacyCursorAgentId;
+    let nativeResumed = false;
+    let recoveryBootstrapRecap: string | null = null;
+    const buildRecoveryBootstrapRecap = () => {
+      if (recoveryBootstrapRecap || job.incognito || chat.incognito) return recoveryBootstrapRecap;
+      const compacted = compactChatHistoryForPrompt(chat, {
+        excludeMessageId: job.messageId,
+        contextWindow,
+        contextMode,
+        maxChars: 120_000,
+      });
+      if (!compacted.text.trim()) return null;
+      const recap = compress(compacted.text, "stacked").text;
+      const boundedRecap = recap.length > 120_000
+        ? `[Earlier persisted messages truncated to fit the model context]\n${recap.slice(-120_000)}`
+        : recap;
+      recoveryBootstrapRecap = `Recovery bootstrap context ${COMPACTION_MARKER} (one-time recap from durable history; preserve task state, TODOs, errors, decisions, and changed files — do not repeat):\n${boundedRecap}`;
+      return recoveryBootstrapRecap;
+    };
+    const hasPriorNativeAgentId = Boolean(nativeAgentId);
+
+    // Try to resume native Cursor session first (without Metis transcript replay).
+    if (hasPriorNativeAgentId) {
+      try {
+        agent = await withTimeout(Agent.resume(nativeAgentId!, {
+          apiKey,
+          model,
+          local: { cwd: agentCwd, settingSources: ["project"] },
+          ...(nativeTools ? { tools: nativeTools } : {}),
+          mcpServers: getMcpServers(mcpContext),
+          ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
+        }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be resumed within 90 seconds.");
+        nativeResumed = true;
+      } catch (resumeError) {
+        const sessionFailure = cursorSessionFailureKind(resumeError);
+        if (sessionFailure === "missing") {
+          // Stale agent id (server restart, expired session): fall back to a
+          // fresh agent with a ONE-TIME recovery bootstrap recap from durable history.
+          appendRunEvent(job.id, job.chatId, job.userId, "info", {
+            message: "Previous agent session was not found; started a new session with recovery context.",
+          });
+          updateChat(job.chatId, { agentId: null }, job.userId);
+          clearProviderSessionBinding(job.chatId, job.userId, "cursor-agent", cursorConnection.id);
+          buildRecoveryBootstrapRecap();
+
+          agent = await withTimeout(Agent.create({
+            apiKey,
+            model,
+            local: { cwd: agentCwd, settingSources: ["project"] },
+            ...(nativeTools ? { tools: nativeTools } : {}),
+            mcpServers: getMcpServers(mcpContext),
+            ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
+          }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be created within 90 seconds.");
+        } else if (sessionFailure === "active_run") {
+          // The persisted agent still has a live/locked run (crashed worker,
+          // concurrent send). Retry resume once after a short grace period,
+          // then start a fresh session instead of failing the job.
+          appendRunEvent(job.id, job.chatId, job.userId, "info", {
+            message: "Agent session still had an active run; retrying once before starting a new session.",
+          });
+          await new Promise((resolve) => setTimeout(resolve, 3_000));
           try {
-            return await withTimeout(Agent.resume(job.agentId || chat.agentId!, {
+            agent = await withTimeout(Agent.resume(nativeAgentId!, {
               apiKey,
               model,
               local: { cwd: agentCwd, settingSources: ["project"] },
@@ -848,72 +895,88 @@ export async function runQueuedJob(job: AgentJob) {
               mcpServers: getMcpServers(mcpContext),
               ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
             }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be resumed within 90 seconds.");
-          } catch (resumeError) {
-            const sessionFailure = cursorSessionFailureKind(resumeError);
-            if (sessionFailure === "missing") {
-              // Stale agent id (server restart, expired session): fall back to a
-              // fresh agent instead of failing the whole job.
-              appendRunEvent(job.id, job.chatId, job.userId, "info", {
-                message: "Previous agent session was not found; started a new session.",
-              });
-              updateChat(job.chatId, { agentId: null }, job.userId);
-              return await withTimeout(Agent.create({
-                apiKey,
-                model,
-                local: { cwd: agentCwd, settingSources: ["project"] },
-                ...(nativeTools ? { tools: nativeTools } : {}),
-                mcpServers: getMcpServers(mcpContext),
-                ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
-              }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be created within 90 seconds.");
-            }
-            if (sessionFailure === "active_run") {
-              // The persisted agent still has a live/locked run (crashed worker,
-              // concurrent send). Retry resume once after a short grace period,
-              // then start a fresh session instead of failing the job.
-              appendRunEvent(job.id, job.chatId, job.userId, "info", {
-                message: "Agent session still had an active run; retrying once before starting a new session.",
-              });
-              await new Promise((resolve) => setTimeout(resolve, 3_000));
-              try {
-                return await withTimeout(Agent.resume(job.agentId || chat.agentId!, {
-                  apiKey,
-                  model,
-                  local: { cwd: agentCwd, settingSources: ["project"] },
-                  ...(nativeTools ? { tools: nativeTools } : {}),
-                  mcpServers: getMcpServers(mcpContext),
-                  ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
-                }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be resumed within 90 seconds.");
-              } catch (retryError) {
-                appendRunEvent(job.id, job.chatId, job.userId, "info", {
-                  message: "Active run did not clear; starting a new agent session.",
-                });
-                updateChat(job.chatId, { agentId: null }, job.userId);
-                return await withTimeout(Agent.create({
-                  apiKey,
-                  model,
-                  local: { cwd: agentCwd, settingSources: ["project"] },
-                  ...(nativeTools ? { tools: nativeTools } : {}),
-                  mcpServers: getMcpServers(mcpContext),
-                  ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
-                }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be created within 90 seconds.");
-              }
-            }
-            throw resumeError;
+            nativeResumed = true;
+          } catch (retryError) {
+            appendRunEvent(job.id, job.chatId, job.userId, "info", {
+              message: "Active run did not clear; starting a new agent session.",
+            });
+            updateChat(job.chatId, { agentId: null }, job.userId);
+            clearProviderSessionBinding(job.chatId, job.userId, "cursor-agent", cursorConnection.id);
+            buildRecoveryBootstrapRecap();
+            agent = await withTimeout(Agent.create({
+              apiKey,
+              model,
+              local: { cwd: agentCwd, settingSources: ["project"] },
+              ...(nativeTools ? { tools: nativeTools } : {}),
+              mcpServers: getMcpServers(mcpContext),
+              ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
+            }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be created within 90 seconds.");
           }
-        })()
-      : await withTimeout(Agent.create({
-          apiKey,
-          model,
-          local: { cwd: agentCwd, settingSources: ["project"] },
-          ...(nativeTools ? { tools: nativeTools } : {}),
-          mcpServers: getMcpServers(mcpContext),
-          ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
-        }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be created within 90 seconds.");
+        } else {
+          throw resumeError;
+        }
+      }
+    } else {
+      // No prior native session: fresh agent with normal compaction
+      let historyCompacted = false;
+      const compactedHistory = (job.incognito || chat.incognito)
+        ? { text: "", compacted: false }
+        : compactChatHistoryForPrompt(chat, {
+            excludeMessageId: job.messageId,
+            contextWindow,
+            contextMode,
+            onCompaction: (event) => {
+              historyCompacted = historyCompacted || event.status === "completed";
+              const part: MessagePart = { ...event };
+              const index = parts.findIndex((item) => item.type === "compaction");
+              if (index >= 0) parts[index] = part;
+              else parts.push(part);
+              emit("compaction", event);
+              checkpoint(true);
+            },
+          });
+      // NOTE: Do NOT clear agentId on compaction for native sessions.
+      // Native Cursor owns its context; compaction is a Metis concern only.
+      agent = await withTimeout(Agent.create({
+        apiKey,
+        model,
+        local: { cwd: agentCwd, settingSources: ["project"] },
+        ...(nativeTools ? { tools: nativeTools } : {}),
+        mcpServers: getMcpServers(mcpContext),
+        ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
+      }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be created within 90 seconds.");
+
+      // Store compacted history for prompt building (fresh session only)
+      if (!job.incognito && !chat.incognito && compactedHistory.text) {
+        recoveryBootstrapRecap = compressContext(
+          compactedHistory.text,
+          Boolean(compressionSettings?.compressChatHistory ?? true),
+        )
+          ? `Recovery bootstrap context ${COMPACTION_MARKER} (one-time durable bootstrap for a fresh native Cursor session; preserve task state and do not repeat it):\n` +
+            compressContext(
+              compactedHistory.text,
+              Boolean(compressionSettings?.compressChatHistory ?? true),
+            )
+          : null;
+      }
+    }
+
     emit("status", { status: "running", message: "Waiting for the model…" });
+    updateProviderSessionBinding({
+      chatId: job.chatId,
+      ownerId: job.userId,
+      execution: "cursor-agent",
+      connectionId: cursorConnection.id,
+      contextOwner: "native",
+      candidateCursor: agent.agentId,
+      modelId: requestedModelId,
+    });
     updateJob(job.id, { agentId: agent.agentId, runId: job.id });
     updateChat(job.chatId, { agentId: agent.agentId }, job.userId);
     const project = !job.incognito && !chat.incognito && chat.projectId ? getProject(chat.projectId, job.userId) : null;
-  const prompt = [
+
+    // Build prompt: native resume gets ONLY current turn + context; fresh/recovery gets bootstrap recap once
+    let prompt = [
     metisAgentIdentity(),
     project ? projectContextBlock(project, job.userId) : "",
     skillsCatalogPrompt(getGlobalModelSettings(job.userId)),
@@ -965,18 +1028,11 @@ export async function runQueuedJob(job: AgentJob) {
       ...(job.incognito || chat.incognito
         ? []
         : (() => {
-            const persistedContext = compressContext(
-              compactedHistory.text,
-              Boolean(compressionSettings?.compressChatHistory ?? true),
-            );
-            return persistedContext
-              ? [
-                  "Persisted conversation context:\n" +
-                    "This transcript comes from durable chat storage and must remain available after service or agent restarts. " +
-                    "Use it as the authoritative prior conversation. Do not ask the user to repeat information that is already present here.\n\n" +
-                    persistedContext,
-                ]
-              : [];
+            // Native resume: NO persisted context replay (Cursor SDK owns its context)
+            if (nativeResumed) return [];
+            // Fresh session or recovery bootstrap: include the one-time recap if available
+            if (recoveryBootstrapRecap) return [recoveryBootstrapRecap];
+            return [];
           })()),
       job.resumePrompt
         ? `Resume the paused agent run. Do not repeat earlier tool calls or user-facing work. Continue only from the saved pause point using this answer/context:\n${compressContext(job.resumePrompt, Boolean(compressionSettings?.compressToolResults ?? true))}`
@@ -1340,6 +1396,12 @@ export async function runQueuedJob(job: AgentJob) {
         // recovery, the retry cannot duplicate visible agent work.
         await agent?.[Symbol.asyncDispose]().catch(() => undefined);
         updateChat(job.chatId, { agentId: null }, job.userId);
+        clearProviderSessionBinding(job.chatId, job.userId, "cursor-agent", cursorConnection.id);
+        nativeResumed = false;
+        const recovery = buildRecoveryBootstrapRecap();
+        if (recovery && !prompt.includes(COMPACTION_MARKER)) {
+          prompt = `${prompt}\n\n${recovery}`;
+        }
         agent = await withTimeout(Agent.create({
           apiKey,
           model,
@@ -1348,6 +1410,11 @@ export async function runQueuedJob(job: AgentJob) {
           mcpServers: getMcpServers(mcpContext),
           ...(customSubagentDefinitions ? { agents: customSubagentDefinitions } : {}),
         }), AGENT_INIT_TIMEOUT_MS, "The agent session could not be recreated within 90 seconds.");
+        updateProviderSessionBinding({
+          chatId: job.chatId, ownerId: job.userId, execution: "cursor-agent",
+          connectionId: cursorConnection.id, contextOwner: "native",
+          candidateCursor: agent.agentId, modelId: requestedModelId, bumpRecoveryGeneration: true,
+        });
         updateJob(job.id, { agentId: agent.agentId, runId: job.id });
         updateChat(job.chatId, { agentId: agent.agentId }, job.userId);
         run = await startAgentRun();
@@ -1653,6 +1720,18 @@ export async function runQueuedJob(job: AgentJob) {
         : {}),
     });
     if (!receivedTextDelta && text) emit("text", { text });
+    updateProviderSessionBinding({
+      chatId: job.chatId,
+      ownerId: job.userId,
+      execution: "cursor-agent",
+      connectionId: cursorConnection.id,
+      contextOwner: "native",
+      candidateCursor: agent.agentId,
+      promoteCursor: true,
+      modelId: requestedModelId,
+      ...(typeof usage?.inputTokens === "number" ? { lastContextTokens: usage.inputTokens } : {}),
+      ...(contextWindow ? { lastContextWindow: contextWindow } : {}),
+    });
     updateChat(job.chatId, {
       agentId: agent.agentId,
       runStatus: resultError ? "error" : "completed",

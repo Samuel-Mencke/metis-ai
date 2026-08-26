@@ -125,7 +125,7 @@ export type NoteSize = {
   height: number;
 };
 
-export type NoteKind = "note" | "project";
+export type NoteKind = "note" | "project" | "learned_fact";
 
 export type NoteTodo = {
   id: string;
@@ -337,6 +337,22 @@ export type ChatInputState = {
   updatedAt: string;
 };
 
+export type ProviderSessionBinding = {
+  execution: "cursor-agent" | "codex-sdk" | "claude-agent" | "antigravity-cli" | "ai-sdk";
+  connectionId: string;
+  contextOwner: "native" | "metis";
+  /** Cursor/session that completed at least one persisted turn. */
+  lastKnownGoodCursor?: string;
+  /** Newly observed cursor; promoted only after the turn is durably completed. */
+  candidateCursor?: string;
+  modelId?: string;
+  lastContextTokens?: number;
+  lastContextWindow?: number;
+  lastCompactionAt?: string;
+  recoveryGeneration?: number;
+  updatedAt: string;
+};
+
 export type ChatSessionState = {
   input?: string;
   /** ISO timestamp for last-write-wins merge of composer text across devices. */
@@ -360,6 +376,7 @@ export type ChatSessionState = {
   unpinnedGlobalNoteIds?: string[];
   filters?: Record<string, string | boolean | number | null>;
   modeId?: string;
+  providerSessions?: Record<string, ProviderSessionBinding>;
 };
 
 export type ToolPermissionCategory =
