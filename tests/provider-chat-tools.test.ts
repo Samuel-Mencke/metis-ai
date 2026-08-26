@@ -35,8 +35,8 @@ test("runner dispatches native providers through dedicated MCP-aware adapters", 
 });
 
 test("runner keeps ACP stdio drivers for grok and opencode", () => {
-  const runner = readFileSync(new URL("../lib/providers/runner.ts", import.meta.url), "utf8");
-  assert.match(runner, /runAcpStdioAgent/);
-  assert.match(runner, /execution === "grok-cli"/);
-  assert.match(runner, /execution === "opencode-cli"/);
+  const source = readFileSync(new URL("../lib/providers/runner.ts", import.meta.url), "utf8");
+  assert.match(source, /runAcpStdioAgent/);
+  assert.match(source, /execution === "grok-cli"/);
+  assert.match(source, /execution === "opencode-cli"/);
 });
