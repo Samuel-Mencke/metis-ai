@@ -154,18 +154,6 @@ export async function runAlternativeProviderJob(
     checkpoint(true);
     const target = modelSwitchTarget;
     const switchedAt = new Date().toISOString();
-    updateJob(job.id, {
-      status: "switching",
-      error: undefined,
-      agentId: undefined,
-      modelId: target.modelId,
-      modelParams: target.modelParams,
-      pendingModelId: undefined,
-      pendingModelParams: undefined,
-      modelSwitchRequestedAt: undefined,
-      resumePrompt: `The user switched the active model to ${target.modelId}. Continue the in-progress task from the saved chat/tool/browser state. Do not repeat completed work.`,
-      resumeRequestedAt: switchedAt,
-    });
     updateChat(
       job.chatId,
       {
@@ -180,6 +168,18 @@ export async function runAlternativeProviderJob(
       job.userId,
     );
     emit("status", { status: "switching_model", modelId: target.modelId });
+    updateJob(job.id, {
+      status: "switching",
+      error: undefined,
+      agentId: undefined,
+      modelId: target.modelId,
+      modelParams: target.modelParams,
+      pendingModelId: undefined,
+      pendingModelParams: undefined,
+      modelSwitchRequestedAt: undefined,
+      resumePrompt: `The user switched the active model to ${target.modelId}. Continue the in-progress task from the saved chat/tool/browser state. Do not repeat completed work.`,
+      resumeRequestedAt: switchedAt,
+    });
     return true;
   };
 
@@ -296,8 +296,8 @@ export async function runAlternativeProviderJob(
         },
         job.userId,
       );
-      updateJob(job.id, { status: "cancelled" });
       emit("done", { status: "cancelled", provider: definition.key });
+      updateJob(job.id, { status: "cancelled" });
       return true;
     }
     if (!text.trim())
@@ -384,29 +384,34 @@ export async function runAlternativeProviderJob(
         completedAt: new Date().toISOString(),
       },
     });
-    updateJob(job.id, {
-      status: "completed",
-      ...(result.agentId ? { agentId: result.agentId } : {}),
-    });
-    chat =
-      updateChat(
-        job.chatId,
-        {
-          ...(result.agentId ? { agentId: result.agentId } : {}),
-          runStatus: "completed",
-          runUpdatedAt: new Date().toISOString(),
-          queueMessage: null,
-          pendingApproval: null,
-        },
-        job.userId,
-      ) || chat;
-    completionCommitted = true;
+    const completedChat = updateChat(
+      job.chatId,
+      {
+        ...(result.agentId ? { agentId: result.agentId } : {}),
+        runStatus: "completed",
+        runUpdatedAt: new Date().toISOString(),
+        queueMessage: null,
+        pendingApproval: null,
+      },
+      job.userId,
+    );
+    if (!completedChat) {
+      throw new Error("Run completion lost its active worker lease before the chat projection was committed.");
+    }
+    chat = completedChat;
+    // Publish the terminal timeline event while the worker still owns the
+    // lease. updateJob(completed) releases that lease and must be last.
     emit("done", {
       status: "finished",
       provider: definition.key,
       modelId: parsed.modelId,
       ...(result.agentId ? { agentId: result.agentId } : {}),
     });
+    updateJob(job.id, {
+      status: "completed",
+      ...(result.agentId ? { agentId: result.agentId } : {}),
+    });
+    completionCommitted = true;
   } catch (error) {
     if (modelSwitchTarget && handoffModelSwitch()) return true;
     if (completionCommitted) {
@@ -467,8 +472,8 @@ export async function runAlternativeProviderJob(
         { runStatus: "cancelled", runUpdatedAt: new Date().toISOString() },
         job.userId,
       );
-      updateJob(job.id, { status: "cancelled", error: message });
       emit("done", { status: "cancelled", provider: definition.key });
+      updateJob(job.id, { status: "cancelled", error: message });
     } else {
       upsertMessage(job.chatId, {
         id: assistantMessageId,
@@ -496,8 +501,8 @@ export async function runAlternativeProviderJob(
         },
         job.userId,
       );
-      updateJob(job.id, { status: "error", error: message });
       emit("error", { message });
+      updateJob(job.id, { status: "error", error: message });
     }
   } finally {
     if (checkpointTimer) clearTimeout(checkpointTimer);

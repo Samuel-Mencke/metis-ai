@@ -1500,6 +1500,16 @@ export async function runQueuedJob(job: AgentJob) {
       const switchedAt = new Date().toISOString();
       const keepCursorSession = parseModelKey(target.modelId).providerKey === "cursor";
       const nextAgentId = keepCursorSession ? agent.agentId : undefined;
+      updateChat(job.chatId, {
+        modelId: target.modelId,
+        modelParams: target.modelParams || [],
+        agentId: nextAgentId || null,
+        runStatus: "running",
+        runUpdatedAt: switchedAt,
+        queueMessage: null,
+        badge: null,
+      }, job.userId);
+      emit("status", { status: "switching_model", modelId: target.modelId });
       updateJob(job.id, {
         status: "switching",
         error: undefined,
@@ -1512,16 +1522,6 @@ export async function runQueuedJob(job: AgentJob) {
         resumePrompt: `The user switched the active model to ${target.modelId}. Continue the in-progress task from the saved agent/chat/tool/browser state. Do not repeat completed tool calls or user-facing work.`,
         resumeRequestedAt: switchedAt,
       });
-      updateChat(job.chatId, {
-        modelId: target.modelId,
-        modelParams: target.modelParams || [],
-        agentId: nextAgentId || null,
-        runStatus: "running",
-        runUpdatedAt: switchedAt,
-        queueMessage: null,
-        badge: null,
-      }, job.userId);
-      emit("status", { status: "switching_model", modelId: target.modelId });
       return;
     }
 
@@ -1559,8 +1559,8 @@ export async function runQueuedJob(job: AgentJob) {
         runUpdatedAt: new Date().toISOString(),
         queueMessage: null,
       }, job.userId);
-      updateJob(job.id, { status: "cancelled" });
       emit("done", { status: "cancelled", agentId: agent.agentId });
+      updateJob(job.id, { status: "cancelled" });
       return;
     }
     // The Cursor SDK can leave the outer MCP tool event in "running" even
@@ -1740,6 +1740,8 @@ export async function runQueuedJob(job: AgentJob) {
       pendingQuestion: null,
       ...(resultError ? { badge: "red" as const } : {}),
     }, job.userId);
+    if (resultError) emit("error", { message: resultError });
+    else emit("done", { status: result.status, agentId: agent.agentId });
     updateJob(job.id, {
       status: resultError ? "error" : "completed",
       agentId: agent.agentId,
@@ -1753,8 +1755,6 @@ export async function runQueuedJob(job: AgentJob) {
       resumeMarker: { jobId: job.id, runId: job.runId || job.id, safe: true },
       availability: "available",
   });
-    if (resultError) emit("error", { message: resultError });
-    else emit("done", { status: result.status, agentId: agent.agentId });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Agent run failed.";
     recordSignal({
@@ -1791,6 +1791,7 @@ export async function runQueuedJob(job: AgentJob) {
         queueMessage: null,
         badge: "red",
       }, job.userId);
+      emit("error", { message });
       updateJob(job.id, { status: "error", error: message });
       createSnapshot({
         chatId: job.chatId,
@@ -1800,7 +1801,6 @@ export async function runQueuedJob(job: AgentJob) {
         resumeMarker: { jobId: job.id, runId: job.runId || job.id, safe: true, reason: message },
         availability: "needs_attention",
       });
-      emit("error", { message });
     } else if (finalJob?.status === "interrupted") {
       snapshotInterruptedJob(finalJob);
       emit("status", { status: "interrupted", message });
