@@ -8413,7 +8413,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                     variant="ghost"
                     size="sm"
                     aria-label={`Agent mode: ${selectedMode.name}`}
-                    className="hidden h-7 min-w-0 max-w-32 shrink-0 items-center gap-1.5 rounded-md border-0 bg-transparent px-1.5 text-xs font-medium text-muted-foreground/75 hover:bg-muted/35 hover:text-foreground md:flex"
+                    className="hidden h-11 min-w-0 max-w-[11rem] shrink-0 items-center gap-1.5 rounded-md border-0 bg-transparent px-1.5 text-xs font-medium text-muted-foreground/75 hover:bg-muted/35 hover:text-foreground md:flex"
                     title={`${selectedMode.name} — ${selectedMode.description}`}
                   >
                     <ModeIcon mode={selectedMode} className="size-3.5 shrink-0" />
@@ -9165,7 +9165,7 @@ export default function AppShell({ defaultCwd }: { defaultCwd: string }) {
                         type="button"
                         variant="ghost"
                         size="sm"
-                        className="mx-auto flex h-11 min-w-0 max-w-full items-center justify-center gap-1.5 rounded-xl px-2 text-[14px] font-semibold tracking-[-0.015em] text-foreground/95 hover:bg-muted/30"
+                        className="mx-auto flex h-11 w-[min(38vw,18rem)] min-w-0 max-w-full items-center justify-center gap-1.5 rounded-xl px-2 text-[14px] font-semibold tracking-[-0.015em] text-foreground/95 hover:bg-muted/30"
                         title={`Model: ${modelDisplayName(selectedModel)}`}
                         aria-label={`Model: ${modelDisplayName(selectedModel)}`}
                       >
