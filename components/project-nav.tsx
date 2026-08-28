@@ -43,6 +43,7 @@ export function ProjectNav({
  onOpenProject,
  onClearProject,
  onMoveChat,
+ onOverlayOpen,
 }: {
  chats: SidebarChat[];
  activeChatId?: string | null;
@@ -53,6 +54,7 @@ export function ProjectNav({
  onOpenProject: (projectId: string) => void;
  onClearProject: () => void;
  onMoveChat: (chatId: string, projectId: string | null) => void;
+ onOverlayOpen?: () => void;
 }) {
  const [projects, setProjects] = useState<SidebarProject[]>([]);
  const [createOpen, setCreateOpen] = useState(false);
@@ -124,7 +126,17 @@ export function ProjectNav({
   <div className="space-y-3">
    <div className="flex items-center justify-between px-2.5">
     <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">Projects</p>
-    <Button type="button" variant="ghost" size="icon-sm" className="size-6" aria-label="New project" onClick={() => setCreateOpen(true)}>
+    <Button
+     type="button"
+     variant="ghost"
+     size="icon-sm"
+     className="size-6"
+     aria-label="New project"
+     onClick={() => {
+      onOverlayOpen?.();
+      setCreateOpen(true);
+     }}
+    >
      <FolderPlus className="size-3.5" />
     </Button>
    </div>
@@ -136,12 +148,13 @@ export function ProjectNav({
       className={cn(
        "rounded-full px-2.5 py-1 text-[12px] transition-colors",
        allSelected
-        ? "bg-foreground text-background"
+        ? "bg-white/[0.10] text-foreground ring-1 ring-foreground/20"
         : "bg-white/[0.04] text-muted-foreground hover:bg-white/[0.07] hover:text-foreground",
       )}
+      aria-pressed={allSelected}
       onClick={onClearProject}
      >
-      None
+      All
      </button>,
     )}
     {projects.map((project) => {
@@ -158,6 +171,7 @@ export function ProjectNav({
          ? "bg-white/[0.10] text-foreground ring-1 ring-foreground/20"
          : "bg-white/[0.04] text-muted-foreground hover:bg-white/[0.07] hover:text-foreground",
        )}
+       aria-pressed={selected}
        onClick={() => onOpenProject(project.id)}
        title={project.name}
       >

@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { config } from "@/lib/config";
+import { createCodexHome } from "@/lib/providers/codex-home";
 import { getMcpServers } from "@/lib/mcp";
 import { updateProviderConnection } from "@/lib/provider-connections";
 import { getProviderSessionBinding, updateProviderSessionBinding } from "@/lib/providers/session-bindings";
@@ -33,74 +33,48 @@ import {
   type ProviderResult,
 } from "./contract";
 
-async function createCodexHome(
-  secret: string | undefined,
-  authType: "account" | "oauth",
-  persistentHome?: string,
-) {
-  if (!secret?.trim()) return undefined;
-  let auth: unknown;
-  try {
-    auth = JSON.parse(secret);
-  } catch {
-    throw new Error("Codex credentials are not valid JSON.");
-  }
-  if (!auth || typeof auth !== "object" || Array.isArray(auth)) {
-    throw new Error("Codex credentials are not a valid JSON object.");
-  }
-  const home =
-    persistentHome || (await mkdtemp(path.join(os.tmpdir(), "ai-chat-codex-")));
-  await mkdir(home, { recursive: true, mode: 0o700 });
-  const authFile = path.join(home, "auth.json");
-  const authObject =
-    authType === "oauth"
-      ? (() => {
-          const record = (auth as Record<string, unknown>)["openai-codex"];
-          const oauth =
-            record && typeof record === "object"
-              ? (record as Record<string, unknown>)
-              : {};
-          const idToken =
-            typeof oauth.idToken === "string"
-              ? oauth.idToken
-              : typeof oauth.id_token === "string"
-                ? oauth.id_token
-                : undefined;
-          if (
-            typeof oauth.access !== "string" ||
-            typeof oauth.refresh !== "string" ||
-            !idToken
-          ) {
-            throw new Error("Codex OAuth credentials are incomplete.");
-          }
-          return {
-            auth_mode: "chatgpt",
-            OPENAI_API_KEY: null,
-            tokens: {
-              access_token: oauth.access,
-              refresh_token: oauth.refresh,
-              id_token: idToken,
-              ...(typeof oauth.accountId === "string"
-                ? { account_id: oauth.accountId }
-                : {}),
-            },
-            last_refresh: new Date().toISOString(),
-          };
-        })()
-      : auth;
-  await writeFile(authFile, `${JSON.stringify(authObject)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  return { home, authFile, temporary: !persistentHome };
-}
-
 export function codexTool(
   item: Record<string, unknown>,
   status: ToolPart["status"] = "completed",
 ): ToolPart | null {
   const type = asString(item.type);
-  if (!type || type === "agent_message" || type === "reasoning") return null;
+  // SDK diagnostic/error items are not executable tools. Actual provider
+  // failures arrive as turn.failed/error events and are handled by runCodex.
+  // Rendering these items as tools produced misleading "Codex error" rows for
+  // harmless config diagnostics while the run continued normally.
+  if (!type || type === "agent_message" || type === "reasoning" || type === "error") return null;
+
+  if (type === "todo_list") {
+    const items = Array.isArray(item.items) ? item.items : [];
+    const todos = items.flatMap((value, index) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+      const entry = value as Record<string, unknown>;
+      const content = asString(entry.text) || asString(entry.content) || asString(entry.title);
+      if (!content.trim()) return [];
+      const completed = entry.completed === true;
+      const rawStatus = asString(entry.status).trim().toLowerCase();
+      const todoStatus = completed || /^(completed|complete|done)$/.test(rawStatus)
+        ? "completed"
+        : /^(in[_ -]?progress|running|active)$/.test(rawStatus)
+          ? "in_progress"
+          : "pending";
+      return [{
+        id: asString(entry.id) || `codex-todo-${index}`,
+        content: content.trim(),
+        status: todoStatus,
+      }];
+    });
+    return {
+      id: asString(item.id) || crypto.randomUUID(),
+      name: "Tasks",
+      // A todo_list event is a state snapshot, not a long-running tool call.
+      // Individual task status carries progress; the card itself should not spin.
+      status: "completed",
+      kind: "todo",
+      ...(todos.length ? { todos } : {}),
+    };
+  }
+
   const mcpName =
     asString(item.tool) || asString(item.tool_name) || asString(item.name);
   const output = item.aggregated_output ?? item.output;
@@ -294,6 +268,7 @@ async function runCodex(context: ProviderContext): Promise<ProviderResult> {
       signal: context.signal,
     });
     let usage: ProviderResult["usage"] | undefined;
+    let emittedAgentMessage = false;
     for await (const event of streamed.events) {
       context.onStream({
         type: event.type,
@@ -306,6 +281,12 @@ async function runCodex(context: ProviderContext): Promise<ProviderResult> {
         usage = {
           inputTokens: event.usage.input_tokens,
           outputTokens: event.usage.output_tokens,
+          cachedInputTokens: event.usage.cached_input_tokens,
+          cacheWriteInputTokens: event.usage.cache_write_input_tokens,
+          // Codex SDK 0.147 exposes per-turn usage but not the app-server's
+          // context-window maximum. The shared model metadata resolver supplies
+          // that exact provider/registry window; do not manufacture one here.
+          usedTokens: event.usage.input_tokens,
           totalTokens: event.usage.input_tokens + event.usage.output_tokens,
         };
       } else if (event.type === "turn.failed") {
@@ -319,8 +300,14 @@ async function runCodex(context: ProviderContext): Promise<ProviderResult> {
       ) {
         const item = asRecord(event.item);
         if (asString(item.type) === "agent_message") {
-          const text = asString(item.text);
-          if (text) context.onText(text);
+          const text = asString(item.text).trim();
+          if (text) {
+            // Codex emits complete assistant-message items rather than token
+            // deltas. Keep separate progress messages as separate paragraphs so
+            // they never glue together as "...Zugänge.Danach..." in the UI.
+            context.onText(`${emittedAgentMessage ? "\n\n" : ""}${text}`);
+            emittedAgentMessage = true;
+          }
         } else {
           const tool = codexTool(
             item,
@@ -383,6 +370,8 @@ export const codexAdapter: ProviderAdapterShape = {
   stopSession: async () => {},
   readThread: () => unsupported("readThread", "codex-sdk"),
   rollbackThread: () => unsupported("rollbackThread", "codex-sdk"),
+  // Adapter shape requires an async iterable even though Codex streams inside runTurn.
+  // eslint-disable-next-line require-yield
   async *streamEvents(context) {
     context.onStream({ type: "runtime.stream.ready", provider: "codex-sdk" });
   },

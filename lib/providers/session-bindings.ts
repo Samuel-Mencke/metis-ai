@@ -90,3 +90,19 @@ export function clearProviderSessionBinding(
   updateChat(chatId, { sessionState: { ...chat.sessionState, providerSessions } }, ownerId);
   return true;
 }
+
+/**
+ * Revert changes the canonical conversation boundary. A provider-native cursor
+ * may still contain turns that Metis just removed, so keeping any continuation
+ * binding would silently re-introduce reverted context on the next send.
+ * Preserve UI/session state but invalidate every provider continuation.
+ */
+export function withoutProviderSessionBindings(
+  sessionState: Chat["sessionState"] | undefined,
+): Chat["sessionState"] | undefined {
+  if (!sessionState) return undefined;
+  if (!sessionState.providerSessions) return sessionState;
+  const next = { ...sessionState };
+  delete next.providerSessions;
+  return next;
+}

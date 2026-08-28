@@ -5,7 +5,15 @@ import type { ProviderContext } from "./provider-support";
 export type ProviderUsage = {
   inputTokens?: number;
   outputTokens?: number;
+  cachedInputTokens?: number;
+  cacheWriteInputTokens?: number;
   totalTokens?: number;
+  totalProcessedTokens?: number;
+  usedTokens?: number;
+  maxTokens?: number;
+  maxOutputTokens?: number;
+  compactsAutomatically?: boolean;
+  autoCompactThreshold?: number;
   costUsd?: number;
 };
 

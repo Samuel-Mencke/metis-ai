@@ -27,6 +27,7 @@ import type { MessagePart } from "@/lib/store";
 import { skillsCatalogPrompt } from "@/lib/skills";
 import { getJob, appendRunEvent, updateJob } from "@/lib/db-jobs";
 import { buildAttachmentPrompt } from "@/lib/uploads";
+import { providerModelsForConnection } from "@/lib/providers/discovery";
 import {
   findActiveConnection,
   getProviderConnection,
@@ -73,7 +74,15 @@ import type { TaskCategory } from "@/lib/model-telemetry";
 export type Usage = {
   inputTokens?: number;
   outputTokens?: number;
+  cachedInputTokens?: number;
+  cacheWriteInputTokens?: number;
   totalTokens?: number;
+  totalProcessedTokens?: number;
+  usedTokens?: number;
+  maxTokens?: number;
+  maxOutputTokens?: number;
+  compactsAutomatically?: boolean;
+  autoCompactThreshold?: number;
   costUsd?: number;
 };
 
@@ -486,8 +495,10 @@ export function estimateProviderInputTokens(
  *  compaction is then skipped rather than guessing. */
 export function resolvedContextWindow(context: ProviderContext): number | undefined {
   try {
+    const discovered = providerModelsForConnection(context.connection)
+      .find((model) => model.id === context.modelId);
     return contextWindowForSelection(
-      { id: context.modelId, providerId: context.connection.providerKey },
+      discovered || { id: context.modelId, providerId: context.connection.providerKey },
       effectiveModelParams(context.chat, context.job),
     );
   } catch {
@@ -844,6 +855,38 @@ export function aiModel(
   throw new Error(`Provider ${providerKey} is not a chat API provider.`);
 }
 
+function selectedReasoningEffort(
+  params?: ReadonlyArray<{ id: string; value: string }> | null,
+) {
+  return params?.find((param) => param.id === "effort" || param.id === "reasoning")?.value;
+}
+
+function isGlm53CompatibleModel(modelId: string) {
+  return /(?:^|[\/:_-])glm[-_.]?5(?:[.-]?3|p3)(?:$|[\/:_-])/i.test(modelId.trim());
+}
+
+export function compatibleProviderOptionsForSelection(
+  connection: Pick<ProviderConnectionWithSecret, "id" | "providerKey">,
+  modelId: string,
+  params?: ReadonlyArray<{ id: string; value: string }> | null,
+) {
+  if (connection.providerKey !== "compatible") return undefined;
+  const selected = selectedReasoningEffort(params);
+  const glm53 = isGlm53CompatibleModel(modelId);
+  let reasoningEffort = selected;
+  if (glm53 && selected) {
+    if (["none", "minimal", "low"].includes(selected)) reasoningEffort = "low";
+    else if (["medium", "high"].includes(selected)) reasoningEffort = "high";
+    else if (["xhigh", "max", "ultra"].includes(selected)) reasoningEffort = "max";
+  }
+  const options = {
+    ...(reasoningEffort && reasoningEffort !== "none" ? { reasoningEffort } : {}),
+    ...(glm53 ? { thinking: { type: "enabled" } } : {}),
+  };
+  if (!Object.keys(options).length) return undefined;
+  return { [`compatible-${connection.id}`]: options };
+}
+
 export function anthropicProviderOptionsForSelection(
   modelId: string,
   params?: ReadonlyArray<{ id: string; value: string }> | null,
@@ -863,11 +906,14 @@ export function anthropicProviderOptionsForSelection(
 }
 
 export function providerOptionsFor(context: ProviderContext) {
-  if (context.connection.providerKey !== "anthropic") return undefined;
-  return anthropicProviderOptionsForSelection(
-    context.modelId,
-    effectiveModelParams(context.chat, context.job),
-  );
+  const params = effectiveModelParams(context.chat, context.job);
+  if (context.connection.providerKey === "anthropic") {
+    return anthropicProviderOptionsForSelection(context.modelId, params);
+  }
+  if (context.connection.providerKey === "compatible") {
+    return compatibleProviderOptionsForSelection(context.connection, context.modelId, params);
+  }
+  return undefined;
 }
 
 export function streamErrorText(value: unknown) {

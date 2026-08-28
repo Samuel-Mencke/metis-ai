@@ -8,6 +8,7 @@ import {
 import { getChat, updateChat } from "@/lib/db-store";
 import { getMcpServers, getUserAgentCwd } from "@/lib/mcp";
 import { getProviderSessionBinding, updateProviderSessionBinding } from "@/lib/providers/session-bindings";
+import { resolveClaudeAgentModelId } from "@/lib/providers/claude-context";
 import {
   approvalPatternFor,
   RUNTIME_MODE_TO_CLAUDE_PERMISSION,
@@ -32,6 +33,38 @@ import {
   type ProviderAdapterShape,
   type ProviderResult,
 } from "./contract";
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function claudeModelUsageMetadata(value: unknown) {
+  const models = asRecord(value);
+  let contextWindow: number | undefined;
+  let maxOutputTokens: number | undefined;
+  let totalProcessedTokens = 0;
+  let costUsd = 0;
+  for (const raw of Object.values(models)) {
+    const entry = asRecord(raw);
+    const input = finiteNumber(entry.inputTokens) || 0;
+    const output = finiteNumber(entry.outputTokens) || 0;
+    const cacheRead = finiteNumber(entry.cacheReadInputTokens) || 0;
+    const cacheCreate = finiteNumber(entry.cacheCreationInputTokens) || 0;
+    totalProcessedTokens += input + output + cacheRead + cacheCreate;
+    const window = finiteNumber(entry.contextWindow);
+    const outputMax = finiteNumber(entry.maxOutputTokens);
+    const cost = finiteNumber(entry.costUSD);
+    if (window && (!contextWindow || window > contextWindow)) contextWindow = window;
+    if (outputMax && (!maxOutputTokens || outputMax > maxOutputTokens)) maxOutputTokens = outputMax;
+    if (cost) costUsd += cost;
+  }
+  return {
+    ...(contextWindow ? { contextWindow } : {}),
+    ...(maxOutputTokens ? { maxOutputTokens } : {}),
+    ...(totalProcessedTokens > 0 ? { totalProcessedTokens } : {}),
+    ...(costUsd > 0 ? { costUsd } : {}),
+  };
+}
 
 function extractClaudeText(message: Record<string, unknown>) {
   const content = message.message;
@@ -207,9 +240,10 @@ async function runClaude(context: ProviderContext): Promise<ProviderResult> {
   const agentCwd = getUserAgentCwd(context.job.userId);
   const runtimeMode = runtimeModeForChat(context.chat);
   const claudePermissions = RUNTIME_MODE_TO_CLAUDE_PERMISSION[runtimeMode];
+  const modelParams = effectiveModelParams(context.chat, context.job);
   const options = {
     cwd: agentCwd,
-    model: context.modelId,
+    model: resolveClaudeAgentModelId(context.modelId, modelParams),
     // Disable Claude Code builtins so Metis MCP is the sole tool surface.
     tools: [] as string[],
     permissionMode: claudePermissions.permissionMode,
@@ -284,7 +318,7 @@ async function runClaude(context: ProviderContext): Promise<ProviderResult> {
       context.job,
       ["mcp"],
       false,
-      effectiveModelParams(context.chat, context.job),
+      modelParams,
     ),
   };
   let sessionId: string | undefined;
@@ -321,17 +355,39 @@ async function runClaude(context: ProviderContext): Promise<ProviderResult> {
         const result = asString(record.result);
         if (!receivedText && result) context.onText(result);
         const recordUsage = asRecord(record.usage);
+        const modelUsage = claudeModelUsageMetadata(record.modelUsage);
+        const inputTokens = finiteNumber(recordUsage.input_tokens);
+        const outputTokens = finiteNumber(recordUsage.output_tokens);
+        const cachedInputTokens = finiteNumber(recordUsage.cache_read_input_tokens);
+        const cacheWriteInputTokens = finiteNumber(recordUsage.cache_creation_input_tokens);
+        const estimatedActive = (inputTokens || 0) + (outputTokens || 0) + (cachedInputTokens || 0) + (cacheWriteInputTokens || 0);
         usage = {
-          inputTokens:
-            typeof recordUsage.input_tokens === "number"
-              ? recordUsage.input_tokens
-              : undefined,
-          outputTokens:
-            typeof recordUsage.output_tokens === "number"
-              ? recordUsage.output_tokens
-              : undefined,
+          ...(inputTokens !== undefined ? { inputTokens } : {}),
+          ...(outputTokens !== undefined ? { outputTokens } : {}),
+          ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+          ...(cacheWriteInputTokens !== undefined ? { cacheWriteInputTokens } : {}),
+          ...(estimatedActive > 0 ? { usedTokens: estimatedActive } : {}),
+          ...(modelUsage.contextWindow ? { maxTokens: modelUsage.contextWindow } : {}),
+          ...(modelUsage.maxOutputTokens ? { maxOutputTokens: modelUsage.maxOutputTokens } : {}),
+          ...(modelUsage.totalProcessedTokens ? { totalProcessedTokens: modelUsage.totalProcessedTokens } : {}),
+          ...(modelUsage.costUsd ? { costUsd: modelUsage.costUsd } : finiteNumber(record.total_cost_usd) ? { costUsd: finiteNumber(record.total_cost_usd) } : {}),
         };
       }
+    }
+    try {
+      const contextUsage = await conversation.getContextUsage();
+      usage = {
+        ...(usage || {}),
+        usedTokens: contextUsage.totalTokens,
+        maxTokens: contextUsage.maxTokens,
+        compactsAutomatically: contextUsage.isAutoCompactEnabled,
+        ...(typeof contextUsage.autoCompactThreshold === "number"
+          ? { autoCompactThreshold: contextUsage.autoCompactThreshold }
+          : {}),
+      };
+    } catch {
+      // Older Claude Code/SDK builds may not expose the control API. Keep the
+      // modelUsage/registry fallback instead of inventing a window.
     }
   } finally {
     clearInterval(cancellationWatcher);
@@ -347,7 +403,12 @@ async function runClaude(context: ProviderContext): Promise<ProviderResult> {
       candidateCursor: sessionId,
       promoteCursor: true,
       modelId: context.modelId,
-      ...(usage?.inputTokens !== undefined ? { lastContextTokens: usage.inputTokens } : {}),
+      ...(usage?.usedTokens !== undefined
+        ? { lastContextTokens: usage.usedTokens }
+        : usage?.inputTokens !== undefined
+          ? { lastContextTokens: usage.inputTokens }
+          : {}),
+      ...(usage?.maxTokens !== undefined ? { lastContextWindow: usage.maxTokens } : {}),
     });
   }
   return {

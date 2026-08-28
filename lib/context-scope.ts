@@ -24,6 +24,7 @@ export type ScopedContextReference = {
 export type ScopedLearnedFact = {
   id: string;
   content: string;
+  tags?: string[];
   createdAt: string;
   updatedAt: string;
 };
@@ -156,7 +157,10 @@ function learnedFactsForChat(chat: Chat): ScopedLearnedFact[] {
       seen.add(key);
       return true;
     })
-    .slice(-20);
+    // Retrieval is relevance-ranked later, so keep a reasonably deep local
+    // candidate pool without injecting it into model context. listNotes is
+    // newest-first; the old slice(-20) accidentally kept only the oldest 20.
+    .slice(0, 200);
 }
 
 /** Resolve only note references that are valid in this chat's scope. */
@@ -243,6 +247,7 @@ export function scopeFactsFromMemories(memories: readonly Memory[]): ScopedLearn
   return memories.map((memory) => ({
     id: memory.id,
     content: memory.content,
+    ...(memory.tags?.length ? { tags: memory.tags } : {}),
     createdAt: memory.createdAt,
     updatedAt: memory.updatedAt,
   }));

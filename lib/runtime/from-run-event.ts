@@ -111,6 +111,33 @@ export function runtimeEventFromRunEvent(row: DurableRunEvent): MetisRuntimeEven
     };
   }
 
+  if (row.event === "context") {
+    const usedTokens = Number(data.usedTokens);
+    const maxTokens = Number(data.maxTokens);
+    const inputTokens = Number(data.inputTokens);
+    const outputTokens = Number(data.outputTokens);
+    const cachedInputTokens = Number(data.cachedInputTokens);
+    const totalProcessedTokens = Number(data.totalProcessedTokens);
+    const autoCompactThreshold = Number(data.autoCompactThreshold);
+    const source = data.source === "estimate" ? "estimate" : "provider";
+    if (!Number.isFinite(usedTokens) && !Number.isFinite(maxTokens)) return null;
+    return {
+      ...base,
+      type: "context.pressure",
+      payload: {
+        usedTokens: Number.isFinite(usedTokens) ? usedTokens : 0,
+        ...(Number.isFinite(maxTokens) ? { effectiveTotalTokens: maxTokens } : {}),
+        ...(Number.isFinite(inputTokens) ? { inputTokens } : {}),
+        ...(Number.isFinite(outputTokens) ? { outputTokens } : {}),
+        ...(Number.isFinite(cachedInputTokens) ? { cachedInputTokens } : {}),
+        ...(Number.isFinite(totalProcessedTokens) ? { totalProcessedTokens } : {}),
+        ...(typeof data.compactsAutomatically === "boolean" ? { compactsAutomatically: data.compactsAutomatically } : {}),
+        ...(Number.isFinite(autoCompactThreshold) ? { autoCompactThreshold } : {}),
+        source,
+      },
+    };
+  }
+
   if (row.event === "compaction") {
     const beforeTokens = Number(data.beforeTokens);
     const afterTokens = Number(data.afterTokens);

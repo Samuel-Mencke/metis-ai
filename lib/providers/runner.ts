@@ -25,12 +25,14 @@ import {
 } from "@/lib/providers/adapters/provider-support";
 import { modelKey, parseModelKey } from "@/lib/providers/types";
 import type { AgentJob } from "@/lib/jobs";
-import { appendRunEvent, getJob, updateJob } from "@/lib/db-jobs";
+import { appendRunEvent, getJob, touchJob, updateJob } from "@/lib/db-jobs";
 import { modeById } from "@/lib/modes";
 import { estimateProviderInputTokens } from "@/lib/providers/adapters/provider-support";
 import { logError } from "@/lib/error-logs";
 import { persistToolsForMessage } from "@/lib/tool-persistence";
 import { recordSignal } from "@/lib/model-telemetry";
+import { providerModelsForConnection } from "@/lib/providers/discovery";
+import { contextWindowForSelection } from "@/lib/context-window";
 
 async function runProvider(context: ProviderContext): Promise<ProviderResult> {
   const providerKey =
@@ -96,6 +98,15 @@ export async function runAlternativeProviderJob(
   const tools: ToolPart[] = [];
   const parts: MessagePart[] = [];
   const controller = new AbortController();
+  type AbortCause = "cancelled" | "model_switch" | "stalled" | "lease_lost";
+  let abortCause: AbortCause | null = null;
+  let abortDetail = "";
+  let lastProviderProgressAt = Date.now();
+  const providerIdleMs = Math.max(60_000, Number(process.env.AI_CHAT_PROVIDER_IDLE_MS || 3 * 60_000));
+  const providerToolIdleMs = Math.max(providerIdleMs, Number(process.env.AI_CHAT_PROVIDER_TOOL_IDLE_MS || 5 * 60_000));
+  const markProviderProgress = () => {
+    lastProviderProgressAt = Date.now();
+  };
   let modelSwitchTarget: {
     modelId: string;
     modelParams?: Array<{ id: string; value: string }>;
@@ -108,11 +119,39 @@ export async function runAlternativeProviderJob(
         modelId: pendingModelId,
         modelParams: currentJob?.pendingModelParams,
       };
+      abortCause = "model_switch";
       controller.abort();
       return;
     }
-    if (currentJob?.status === "cancelled") controller.abort();
+    if (currentJob?.status === "cancelled") {
+      abortCause = "cancelled";
+      controller.abort();
+    }
   }, 250);
+  const leaseHeartbeat = setInterval(() => {
+    const touched = touchJob(job.id);
+    if (touched || controller.signal.aborted) return;
+    abortCause = "lease_lost";
+    abortDetail = "The provider run lost its worker lease and was stopped to prevent duplicate execution.";
+    controller.abort();
+  }, 30_000);
+  const progressWatchdog = setInterval(() => {
+    if (controller.signal.aborted) return;
+    const activeTool = tools.find((tool) =>
+      ["running", "in_progress", "pending", "started", "executing", "queued"].includes(
+        String(tool.status || "").toLowerCase(),
+      ),
+    );
+    const limit = activeTool ? providerToolIdleMs : providerIdleMs;
+    const idleFor = Date.now() - lastProviderProgressAt;
+    if (idleFor < limit) return;
+    abortCause = "stalled";
+    abortDetail = activeTool
+      ? `Agent tool ${activeTool.name} produced no progress for ${Math.round(idleFor / 1000)} seconds.`
+      : `Provider produced no progress for ${Math.round(idleFor / 1000)} seconds.`;
+    emit("status", { status: "stalled", message: `${abortDetail} Stopping this run instead of leaving the chat stuck.` });
+    controller.abort();
+  }, 5_000);
   const emit = (event: string, data: unknown) =>
     appendRunEvent(job.id, job.chatId, job.userId, event, data);
   let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
@@ -185,11 +224,13 @@ export async function runAlternativeProviderJob(
 
   const onText = (value: string) => {
     if (!value) return;
+    markProviderProgress();
     text += value;
     checkpoint();
     emit("text", { text: value });
   };
   const onTool = (tool: ToolPart) => {
+    markProviderProgress();
     // write_todos is a state surface, not an append-only tool history. Give it
     // one stable id per run so every update replaces the same Tasks card in
     // persistence and in the live SSE UI instead of creating ghost checklists.
@@ -225,6 +266,7 @@ export async function runAlternativeProviderJob(
     });
   };
   const onCompaction = (event: CompactionEvent) => {
+    markProviderProgress();
     const part: MessagePart = { ...event };
     parts.push(part);
     checkpoint(true);
@@ -236,6 +278,7 @@ export async function runAlternativeProviderJob(
     done?: boolean;
     durationMs?: number;
   }) => {
+    markProviderProgress();
     emit("thinking", data);
     if (data.done !== true) {
       emit("status", { status: "running", message: "Thinking…" });
@@ -269,9 +312,11 @@ export async function runAlternativeProviderJob(
       onText,
       onTool,
       onCompaction,
-      onThinking: (data) => emit("thinking", data),
-      onStream: (data) =>
-        emit(data.type === "compaction" ? "compaction" : "stream", data),
+      onThinking,
+      onStream: (data) => {
+        markProviderProgress();
+        emit(data.type === "compaction" ? "compaction" : "stream", data);
+      },
     });
     if (modelSwitchTarget && handoffModelSwitch()) return true;
     const durableStatus = getJob(job.id)?.status;
@@ -351,6 +396,30 @@ export async function runAlternativeProviderJob(
     const inputTokens =
       measuredInputTokens ??
       estimateProviderInputTokens(chat, job, parsed.modelId);
+    const selectedModel = providerModelsForConnection(credential)
+      .find((candidate) => candidate.id === parsed.modelId);
+    const selectedContextWindow = contextWindowForSelection(
+      selectedModel || { id: parsed.modelId, providerId: definition.key },
+      job.modelParams?.length ? job.modelParams : chat.modelParams,
+    );
+    const contextWindow = result.usage?.maxTokens ?? selectedContextWindow;
+    const contextWindowSource = result.usage?.maxTokens
+      ? "runtime" as const
+      : selectedModel?.contextWindowSource || (selectedContextWindow ? "inferred" as const : undefined);
+    const contextUsedTokens = result.usage?.usedTokens ?? inputTokens;
+    if (contextUsedTokens || contextWindow) {
+      emit("context", {
+        usedTokens: contextUsedTokens,
+        maxTokens: contextWindow,
+        source: result.usage?.maxTokens ? "provider" : measuredInputTokens !== undefined ? "provider" : "estimate",
+        inputTokens: result.usage?.inputTokens,
+        outputTokens: result.usage?.outputTokens,
+        cachedInputTokens: result.usage?.cachedInputTokens,
+        totalProcessedTokens: result.usage?.totalProcessedTokens,
+        compactsAutomatically: result.usage?.compactsAutomatically,
+        autoCompactThreshold: result.usage?.autoCompactThreshold,
+      });
+    }
     // Persist the durable answer before publishing terminal run state. If a
     // later event append fails, a successful model/tool run must not regress
     // from completed -> error.
@@ -375,12 +444,18 @@ export async function runAlternativeProviderJob(
         ...(measuredInputTokens === undefined
           ? { inputTokensEstimated: true }
           : {}),
-        ...(result.usage?.outputTokens !== undefined
-          ? { outputTokens: result.usage.outputTokens }
-          : {}),
-        ...(result.usage?.totalTokens !== undefined
-          ? { totalTokens: result.usage.totalTokens }
-          : {}),
+        ...(result.usage?.outputTokens !== undefined ? { outputTokens: result.usage.outputTokens } : {}),
+        ...(result.usage?.cachedInputTokens !== undefined ? { cachedInputTokens: result.usage.cachedInputTokens } : {}),
+        ...(result.usage?.cacheWriteInputTokens !== undefined ? { cacheWriteInputTokens: result.usage.cacheWriteInputTokens } : {}),
+        ...(result.usage?.totalTokens !== undefined ? { totalTokens: result.usage.totalTokens } : {}),
+        ...(result.usage?.totalProcessedTokens !== undefined ? { totalProcessedTokens: result.usage.totalProcessedTokens } : {}),
+        ...(contextUsedTokens !== undefined ? { contextUsedTokens } : {}),
+        ...(contextWindow !== undefined ? { contextWindow } : {}),
+        ...(contextWindowSource ? { contextWindowSource } : {}),
+        ...(result.usage?.maxOutputTokens !== undefined ? { maxOutputTokens: result.usage.maxOutputTokens } : selectedModel?.maxOutputTokens ? { maxOutputTokens: selectedModel.maxOutputTokens } : {}),
+        ...(result.usage?.compactsAutomatically !== undefined ? { compactsAutomatically: result.usage.compactsAutomatically } : {}),
+        ...(result.usage?.autoCompactThreshold !== undefined ? { autoCompactThreshold: result.usage.autoCompactThreshold } : {}),
+        ...(result.usage?.costUsd !== undefined ? { costUsd: result.usage.costUsd } : {}),
         completedAt: new Date().toISOString(),
       },
     });
@@ -429,15 +504,17 @@ export async function runAlternativeProviderJob(
     }
     const durableStatus = getJob(job.id)?.status;
     const interrupted = durableStatus === "interrupted";
-    const cancelled =
-      controller.signal.aborted || durableStatus === "cancelled";
+    const cancelled = abortCause === "cancelled" || durableStatus === "cancelled";
+    const runtimeFailure = abortCause === "stalled" || abortCause === "lease_lost";
     const message = cancelled
       ? "Provider run cancelled."
       : interrupted
         ? "Provider run interrupted."
-        : error instanceof Error
-          ? error.message
-          : "Provider run failed.";
+        : runtimeFailure
+          ? abortDetail || "Provider run stopped after losing runtime progress."
+          : error instanceof Error
+            ? error.message
+            : "Provider run failed.";
     finalizeAlternativeTools(tools);
     recordSignal({
       modelId: parsed.modelId,
@@ -508,6 +585,8 @@ export async function runAlternativeProviderJob(
     if (checkpointTimer) clearTimeout(checkpointTimer);
     if (checkpointDirty) checkpointNow();
     clearInterval(cancellationWatcher);
+    clearInterval(leaseHeartbeat);
+    clearInterval(progressWatchdog);
   }
   return true;
 }
@@ -519,6 +598,7 @@ export {
   codexReasoningEffortForSelection,
   aiReasoningForSelection,
   anthropicProviderOptionsForSelection,
+  compatibleProviderOptionsForSelection,
 } from "@/lib/providers/adapters/provider-support";
 export { codexTool } from "@/lib/providers/adapters/codex";
 export type { CompactionEvent } from "@/lib/providers/adapters/provider-support";

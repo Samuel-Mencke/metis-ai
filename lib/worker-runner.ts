@@ -12,6 +12,7 @@ import {
 } from "@/lib/db-store";
 import { getProject, projectContextBlock } from "@/lib/projects";
 import { skillsCatalogPrompt } from "@/lib/skills";
+import { autoSkillActivationPrompt } from "@/lib/skill-routing";
 import { getUserAgentCwd, getMcpServers } from "@/lib/mcp";
 import { resolveAgentPath } from "@/lib/revert";
 import { appendRunEvent, enqueueJob, getJob, touchJob, updateJob } from "@/lib/db-jobs";
@@ -50,6 +51,7 @@ import { recordSignal, type TaskCategory } from "@/lib/model-telemetry";
 import { classifyTool, resolveMcpToolName, toolDetailFromArgs } from "@/lib/tool-kind";
 import { metisAgentIdentity } from "@/lib/agent-identity";
 import { normalizeRuntimeMode } from "@/lib/runtime-mode";
+import { captureKnowledgeFromUserTurn } from "@/lib/knowledge-lifecycle";
 
 const AGENT_INIT_TIMEOUT_MS = 90_000;
 const AGENT_INACTIVITY_TIMEOUT_MS = 5 * 60_000;
@@ -462,7 +464,7 @@ function ensureRecommendationSuggestions(value: string) {
   if (!/(demo|stub|noch nicht|nicht produktiv|nicht angebunden|nicht konfiguriert|nicht implementiert|mock|placeholder)/i.test(value)) {
     return value;
   }
-  return `${value.trim()}\n\n\`\`\`suggestions\nResend anbinden => Resend konfigurieren und eine manuelle E-Mail-Vorschau implementieren.\nEchte Recherche anbinden => Die Demo-Daten durch eine echte Websuche mit Quellen und Fehlerbehandlung ersetzen.\nDatenbank migrieren => Die JSON-Speicherung durch eine persistente Datenbank mit Migration ersetzen.\n\`\`\``;
+  return `${value.trim()}\n\n\`\`\`suggestions\nConnect Resend => Configure Resend and implement a manual email preview.\nConnect real research => Replace demo data with real web search, sources, and error handling.\nMigrate database => Replace JSON storage with a persistent database and migration.\n\`\`\``;
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
@@ -565,6 +567,21 @@ export async function runQueuedJob(job: AgentJob) {
   if (!chat) {
     markJobError(job, "Chat not found or access denied.");
     return;
+  }
+  // Knowledge capture is infrastructure, not a model behavior: every real user
+  // turn is classified once without spending provider tokens. Internal child,
+  // automation and resume prompts are not user knowledge.
+  if (!job.automationId && !job.parentJobId && !job.subagentFollowUp && !job.resumePrompt && !job.incognito && !chat.incognito) {
+    try {
+      captureKnowledgeFromUserTurn({
+        chatId: chat.id,
+        ownerId: job.userId ?? chat.ownerId,
+        message: job.message,
+        messageId: job.messageId,
+      });
+    } catch {
+      // Knowledge maintenance must never block the user's actual task.
+    }
   }
   let requestedModelId = job.modelId || chat.modelId || "";
   // Context-aware auto routing: "auto" resolves to a concrete model based on
@@ -811,12 +828,15 @@ export async function runQueuedJob(job: AgentJob) {
     const model = {
       id: requestedModelId,
       ...(modelParams?.length
-        ? { params: providerNativeParams(modelParams) }
+        ? { params: providerNativeParams(modelParams, { includeContext: true }) }
         : {}),
     };
 
+    const cursorModel = cursorCredential
+      ? providerModelsForConnection(cursorCredential).find((candidate) => candidate.id === requestedModelId)
+      : undefined;
     const contextWindow = contextWindowForSelection(
-      { id: requestedModelId, providerId: "cursor" },
+      cursorModel || { id: requestedModelId, providerId: "cursor" },
       modelParams,
     );
     const contextMode = contextModeOf(modelParams);
@@ -980,10 +1000,14 @@ export async function runQueuedJob(job: AgentJob) {
     metisAgentIdentity(),
     project ? projectContextBlock(project, job.userId) : "",
     skillsCatalogPrompt(getGlobalModelSettings(job.userId)),
+    autoSkillActivationPrompt(job.message, getGlobalModelSettings(job.userId), {
+      hasVisualReference: Boolean(job.attachments?.some((attachment) => attachment.kind === "image")),
+    }),
       `Current agent mode: ${activeMode.name}\n${activeMode.instructions}`,
       "Working style: precise, technically fluent, proactive. Act with your tools instead of describing steps. Reply in the user's language — German in, German out. No filler phrases. On clear orders decide and act yourself; ask back only when genuinely ambiguous or destructive.",
+      "Execution efficiency: batch related read-only inspection instead of issuing many tiny calls; reuse the known project/repository cwd instead of rediscovering it; run targeted checks while iterating and the expensive full test/build pass only once after the working tree has stopped changing. Parallelize independent lightweight reads when safe, but do not run competing heavyweight builds. Keep progress narration to short milestone updates rather than one message per tool call.",
       runToolContract,
-      "Browser: for login, forms, captchas, checkouts, and long page tasks ALWAYS use the persistent Metis in-app browser (browser_navigate, browser_form_state, browser_batch, browser_wait_for, browser_fill_form, browser_snapshot). Inspect the current state first; navigate only when the URL actually needs to change, and never reload or re-login merely to inspect progress. browser_form_state and browser_extract_text include embedded frames and return frame hints/selectors. Batch repetitive actions and wait on DOM conditions instead of sleeps. Do not use shell, curl, Playwright, or Cursor webFetch as a substitute when a real page is needed. webSearch/webFetch are only for simple lookup. Request browser_screenshot only when visual reasoning is genuinely required.",
+      "Web/browser routing: use web_search for discovery and web_fetch for fast read-only extraction of ordinary public pages (local Scrapling static scraper first, public remote fallback second). For login/authenticated state, forms, uploads/downloads, purchases/checkouts, important state-changing tasks, long interactive page workflows, or any web_fetch result with requiresBrowser=true, ALWAYS use the persistent Metis in-app browser (browser_navigate, browser_form_state, browser_batch, browser_wait_for, browser_fill_form, browser_snapshot). Inspect current browser state first; navigate only when the URL needs to change and never reload/re-login merely to inspect progress. Do not use shell, curl, detached Playwright, or stealth/challenge-bypass tooling as a substitute. If a site blocks static extraction, use the normal persistent browser if appropriate or report the limitation. Request browser_screenshot only when visual reasoning is genuinely required.",
       `Available mode IDs for request_mode_change: ${availableModes || "agent (Agent), plan (Plan), ask (Ask)"}. Use the exact ID before the parentheses; never invent values such as "Code". For implementation or file changes, request modeId "agent".`,
       "Response recommendation rule: when the result is incomplete, uses demo/stub endpoints, or still lacks real integrations, clearly say what is and is not implemented, then always provide 1–3 concise, concrete next-step recommendations in exactly one ```suggestions fenced block so the UI can render clickable actions. End by asking whether to implement the recommended next step. Do not present demo functionality as production-ready.",
       ...(activeMode.id !== "agent" && !job.automationId
@@ -1001,9 +1025,7 @@ export async function runQueuedJob(job: AgentJob) {
               job.automationContext ? `Automation-level context from the source chat and prior completed runs. Use it as durable background context, but keep this run's transcript separate:\n${job.automationContext}` : "",
             ]
         : [
-                  "Personal context: the context_search / context_profile / context_remember MCP tools access the owner's shared context hub (devices, services, projects, preferences). When a task touches the owner's infrastructure, projects, or devices, consult them FIRST instead of asking the user. Do not dump contents unprompted; cite only what the query returned. Store newly learned durable preferences (how the owner wants things) via context_remember. list_memories/add_memory manage lightweight in-app memories the same way.",
-            `Current chat keywords: ${chat.keywords?.join(", ") || "(none)"}`,
-            `Existing workspaces:\n${chat.workspaces?.map((item) => `[${item.type}] ${item.name} (workspace://${item.type}/${item.id})`).join("\n") || "(none)"}`,
+                  "Personal context: context_search/context_profile retrieve the smallest relevant slice from the owner's shared context hub. Explicit durable facts/preferences from real user turns are captured automatically by Metis; use context_remember only for durable facts discovered through tools or for an explicit correction. Never dump the context hub or memory list into the prompt.",
           ]),
       ...(job.incognito || chat.incognito ? [] : [
       "When referring to an existing or newly created plan/canvas, include its exact Markdown link using workspace://plan/<id> or workspace://canvas/<id>.",
@@ -1012,7 +1034,7 @@ export async function runQueuedJob(job: AgentJob) {
       "To create an automation, call create_automation with name, prompt, and schedule (kind: once | interval | days | monthly). Recurring minute schedules must be at least 60. Use list_automations, update_automation, pause_automation, resume_automation, and delete_automation for existing ones. Do not claim an automation was created without a completed tool call. When referring to an automation, include its exact Markdown link using automation://<id>, for example [Name](automation://id).",
       "When you use browser results, selected references, or other verifiable web sources, cite the exact URL immediately after the sentence it supports using the format [Source: Website title](URL). At the end, put every source used in exactly one fenced block starting with ```sources, with one Markdown link per line. Never invent URLs; if no verifiable source is available, do not create a sources block.",
       "Workspace rule: create or edit a plan/canvas only when the active mode and user request allow it. Never claim a workspace exists until the tool result or persisted workspace confirms it.",
-      "For memories, use list_memories to retrieve the current user's entries, add_memory only for useful durable facts or preferences, and edit_memory with the exact memory id to change an existing entry. Never claim a memory was changed without a completed tool call.",
+      "Memory lifecycle is automatic for explicit durable user facts. Use list_memories only when a task genuinely needs memory inspection; use add_memory/edit_memory only for durable knowledge learned outside the user-turn capture path or explicit corrections. Never bulk-load memories into context.",
       "To edit an existing workspace, call edit_plan or edit_canvas with its exact id and the changed title/content. Do not create a duplicate when the user asked to edit.",
       "When the chat topic is clear or changes, silently call update_chat_keywords with 3-8 concise, non-sensitive search terms using mode=add. Do not mention this metadata maintenance in the main response. Use search_chats when you need to locate an earlier chat by title, keyword, or message content.",
       job.automationId
@@ -1711,15 +1733,29 @@ export async function runQueuedJob(job: AgentJob) {
       ...(result.status === "finished"
         ? {
             runMetadata: {
+              providerId: "cursor",
               modelId: result.model?.id || job.modelId || chat.modelId,
+              connectionId: cursorConnection.id,
               ...(typeof usage?.outputTokens === "number" ? { outputTokens: usage.outputTokens } : {}),
-              ...(typeof usage?.inputTokens === "number" ? { inputTokens: usage.inputTokens } : {}),
+              ...(typeof usage?.inputTokens === "number" ? { inputTokens: usage.inputTokens, contextUsedTokens: usage.inputTokens } : {}),
+              ...(contextWindow ? { contextWindow } : {}),
+              ...(cursorModel?.contextWindowSource ? { contextWindowSource: cursorModel.contextWindowSource } : contextWindow ? { contextWindowSource: "provider" as const } : {}),
+              ...(cursorModel?.maxOutputTokens ? { maxOutputTokens: cursorModel.maxOutputTokens } : {}),
               completedAt,
             },
           }
         : {}),
     });
     if (!receivedTextDelta && text) emit("text", { text });
+    if (typeof usage?.inputTokens === "number" || contextWindow) {
+      emit("context", {
+        usedTokens: usage?.inputTokens,
+        maxTokens: contextWindow,
+        source: typeof usage?.inputTokens === "number" ? "provider" : "estimate",
+        inputTokens: usage?.inputTokens,
+        outputTokens: usage?.outputTokens,
+      });
+    }
     updateProviderSessionBinding({
       chatId: job.chatId,
       ownerId: job.userId,

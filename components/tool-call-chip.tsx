@@ -371,9 +371,9 @@ export const ToolCallChip = memo(function ToolCallChip({
   hostnames,
   source,
 }: ToolCallProps) {
-  const [userOpen, setUserOpen] = useState(false);
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
   const running = isToolRunning(status);
-  const expanded = locked ? autoExpand : autoExpand || userOpen;
+  const expanded = locked ? autoExpand : userOpen ?? autoExpand;
   const display = enrichToolDisplay({ name, input, result, kind });
   const todoItems = todos?.length ? todos : display.todos;
   const resolvedKind = display.kind;
@@ -544,7 +544,7 @@ export const ToolCallChip = memo(function ToolCallChip({
               return;
             }
             if (locked) return;
-            setUserOpen((open) => !open);
+            setUserOpen((open) => open === null ? !expanded : !open);
           }}
         >
           {running ? (
@@ -728,7 +728,7 @@ export const ToolCallGroup = memo(function ToolCallGroup({
   live?: boolean;
   hostnames?: Record<string, string>;
 }) {
-  const [userOpen, setUserOpen] = useState(false);
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
   const isTodoTool = (tool: ToolCallData) =>
     tool.kind === "todo" ||
     Boolean(tool.todos?.length) ||
@@ -755,8 +755,8 @@ export const ToolCallGroup = memo(function ToolCallGroup({
  durationMs: thinkingList.reduce((sum, item) => sum + (item.durationMs || 0), 0) || thinkingList.at(-1)?.durationMs,
  }
  : undefined;
- const groupTitle = activityGroupLabel([...regularEntries, ...todoTools, ...noteTools], combinedThinking);
-  const groupOpen = userOpen || Boolean(live) || Boolean(autoExpand);
+ const groupTitle = activityGroupLabel([...regularEntries, ...noteTools], combinedThinking);
+  const groupOpen = userOpen ?? Boolean(live || autoExpand);
   const lastToolId = regularTools[regularTools.length - 1]?.id;
   const renderTool = (tool: ToolCallData, nested = false) => (
     <ToolCallChip
@@ -769,8 +769,8 @@ export const ToolCallGroup = memo(function ToolCallGroup({
       onBuildPlan={(plan, options) => onBuildPlan?.(tool, plan, options)}
       buildDisabled={buildDisabled}
       onOpenRaw={() => onOpenRaw?.(tool)}
-      autoExpand={!nested && Boolean(live) && tool.id === lastToolId}
-      locked={!nested && Boolean(live)}
+      autoExpand={!nested && Boolean(live || autoExpand) && tool.id === lastToolId}
+      locked={false}
     />
   );
   const renderEntry = (entry: ActivityEntry, index: number) => {
@@ -807,9 +807,12 @@ export const ToolCallGroup = memo(function ToolCallGroup({
  </>
  );
  }
- const activityRunning = [...regularEntries, ...todoTools, ...noteTools, ...automationTools].some((tool) => isToolRunning(tool.status));
+ const activityRunning = [...regularEntries, ...noteTools, ...automationTools].some((tool) => isToolRunning(tool.status));
  return (
  <div className="w-full min-w-0" style={{ overflowAnchor: "none" }}>
+ {todoTools.map((tool, index) => (
+ <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
+ ))}
  {regularEntries.length === 1 && !combinedThinking ? (
  <div className="flex flex-col">
  {regularEntries.map((tool, index) => (
@@ -821,7 +824,7 @@ export const ToolCallGroup = memo(function ToolCallGroup({
  <button
  type="button"
  className={activityRowClass}
- onClick={() => setUserOpen((open) => !open)}
+ onClick={() => setUserOpen((open) => open === null ? !groupOpen : !open)}
  >
  {activityRunning || combinedThinking?.done === false ? (
  <LoaderCircle className="size-3 shrink-0 animate-spin" />
@@ -841,9 +844,6 @@ export const ToolCallGroup = memo(function ToolCallGroup({
  />
  ) : null}
  {planTools.map((tool, index) => (
- <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
- ))}
- {todoTools.map((tool, index) => (
  <div key={toolReactKey(tool, index)}>{renderTool(tool)}</div>
  ))}
  {noteTools.map((tool, index) => (

@@ -867,6 +867,23 @@ export function requeueSwitchingJob(id: string) {
   return result.changes ? getJob(id) : null;
 }
 
+
+function modelParamsEqual(
+  left: Array<{ id: string; value: string }> | undefined,
+  right: Array<{ id: string; value: string }> | undefined,
+) {
+  const normalize = (items: Array<{ id: string; value: string }> | undefined) =>
+    (items || [])
+      .map((item) => ({ id: item.id.trim(), value: item.value }))
+      .filter((item) => item.id)
+      .sort((a, b) => a.id.localeCompare(b.id) || a.value.localeCompare(b.value));
+  const a = normalize(left);
+  const b = normalize(right);
+  return a.length === b.length && a.every((item, index) =>
+    item.id === b[index]?.id && item.value === b[index]?.value,
+  );
+}
+
 export function requestJobModelSwitch(
   chatId: string,
   userId: string | undefined,
@@ -890,7 +907,15 @@ export function requestJobModelSwitch(
       modelSwitchRequestedAt: undefined,
     });
   }
-  if (job.modelId === nextModelId && !job.pendingModelId) return job;
+  const requestedParams = modelParams ?? job.modelParams;
+  if (job.modelId === nextModelId && modelParamsEqual(job.modelParams, requestedParams)) {
+    if (!job.pendingModelId && !job.pendingModelParams && !job.modelSwitchRequestedAt) return job;
+    return updateJob(job.id, {
+      pendingModelId: undefined,
+      pendingModelParams: undefined,
+      modelSwitchRequestedAt: undefined,
+    }) || job;
+  }
   return updateJob(job.id, {
     pendingModelId: nextModelId,
     pendingModelParams: modelParams,

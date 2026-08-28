@@ -27,3 +27,23 @@ test("switching project hubs remounts, clears stale data, and aborts the previou
   assert.match(homeSource, /return \(\) => controller\.abort\(\)/);
   assert.doesNotMatch(homeSource, /\.then\(load\)/);
 });
+
+test("opening a project does not dismiss the mobile sidebar", () => {
+  const start = shellSource.indexOf("function openProjectHome(projectId: string)");
+  const end = shellSource.indexOf("const sidebar =", start);
+  assert.ok(start >= 0 && end > start, "openProjectHome should be present before sidebar rendering");
+  const openProjectSource = shellSource.slice(start, end);
+  assert.doesNotMatch(openProjectSource, /setMobileNavOpen\(false\)/);
+});
+
+test("project hub header stays usable on narrow screens", () => {
+  assert.match(homeSource, /grid-cols-\[3\.5rem_minmax\(0,1fr\)\]/);
+  assert.match(homeSource, /col-span-2 grid grid-cols-2 gap-2 sm:col-span-1/);
+  assert.match(homeSource, /project-home-scroll/);
+});
+
+test("the unfiltered project chip is labelled All instead of None", () => {
+  const projectNavSource = readFileSync(new URL("../components/project-nav.tsx", import.meta.url), "utf8");
+  assert.match(projectNavSource, />\s*All\s*<\/button>/);
+  assert.doesNotMatch(projectNavSource, />\s*None\s*<\/button>/);
+});

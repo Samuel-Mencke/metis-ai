@@ -74,8 +74,17 @@ export type ChatMessage = {
     connectionId?: string;
     outputTokens?: number;
     inputTokens?: number;
+    cachedInputTokens?: number;
+    cacheWriteInputTokens?: number;
     inputTokensEstimated?: boolean;
     totalTokens?: number;
+    totalProcessedTokens?: number;
+    contextUsedTokens?: number;
+    contextWindow?: number;
+    contextWindowSource?: "provider" | "runtime" | "stored-provider" | "registry" | "catalog" | "inferred" | "estimate";
+    maxOutputTokens?: number;
+    compactsAutomatically?: boolean;
+    autoCompactThreshold?: number;
     costUsd?: number;
     completedAt: string;
   };
@@ -513,6 +522,7 @@ export type GlobalModelSettings = {
   modelId?: string;
   modelParams?: Array<{ id: string; value: string }>;
   modelParamsByModel?: Record<string, Array<{ id: string; value: string }>>;
+  lastModelByProvider?: Record<string, string>;
   subagentModelEnabled?: boolean;
   subagentModelId?: string;
   draftInput?: string;
@@ -1003,6 +1013,7 @@ export function saveGlobalModelSettings(settings: GlobalModelSettings): GlobalMo
     ...(settings.modelId ? { modelId: settings.modelId } : {}),
     ...(settings.modelParams ? { modelParams: settings.modelParams } : {}),
     ...(settings.modelParamsByModel ? { modelParamsByModel: settings.modelParamsByModel } : {}),
+    ...(settings.lastModelByProvider ? { lastModelByProvider: settings.lastModelByProvider } : {}),
   };
   atomicWriteJson(SETTINGS_PATH, next);
   return next;

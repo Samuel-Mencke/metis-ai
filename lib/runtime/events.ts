@@ -54,6 +54,9 @@ export interface ContextPressurePayload {
   inputTokens?: number;
   outputTokens?: number;
   cachedInputTokens?: number;
+  totalProcessedTokens?: number;
+  compactsAutomatically?: boolean;
+  autoCompactThreshold?: number;
   source?: "provider" | "estimate" | "compaction";
   message?: string;
 }
