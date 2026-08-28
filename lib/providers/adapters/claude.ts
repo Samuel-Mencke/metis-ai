@@ -436,6 +436,7 @@ export const claudeAdapter: ProviderAdapterShape = {
   stopSession: async () => {},
   readThread: () => unsupported("readThread", "claude-agent"),
   rollbackThread: () => unsupported("rollbackThread", "claude-agent"),
+  // eslint-disable-next-line require-yield -- ready-signal only; no turn history to replay while the facade owns the listener
   async *streamEvents(context) {
     context.onStream({ type: "runtime.stream.ready", provider: "claude-agent" });
   },

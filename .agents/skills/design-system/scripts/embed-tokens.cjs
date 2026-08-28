@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* eslint-disable @typescript-eslint/no-require-imports -- CommonJS CLI script. */
 /**
  * embed-tokens.cjs
  * Reads design-tokens.css and outputs embeddable inline CSS.

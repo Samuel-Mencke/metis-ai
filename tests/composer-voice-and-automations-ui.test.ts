@@ -88,8 +88,7 @@ test("mobile composer uses a centered header model picker and progressive second
   assert.match(shellSource, /aria-label=\{`Runtime permissions:[\s\S]*className="hidden size-7[\s\S]*md:flex/);
   assert.match(shellSource, /className="hidden h-7[\s\S]*md:inline-flex"[\s\S]*title=\{`Model:/);
   assert.match(shellSource, /mobileComposerControls=\{\{/);
-  assert.match(shellSource, /showMobileContextUsage = contextUsageRatio >= 0\.6/);
-  assert.match(shellSource, /showMobileContextUsage \? \([\s\S]*md:hidden/);
+  assert.match(shellSource, /<span className="shrink-0">Context<\/span>[\s\S]*md:hidden/);
   assert.match(shellSource, /PlanUsageGauge[\s\S]*className="hidden h-7 px-1 text-\[10px\] md:inline-flex"/);
   assert.match(shellSource, /className="size-11 shrink-0 self-end rounded-full sm:size-9"/);
   assert.match(shellSource, /justify-center pb-\[10svh\]/);

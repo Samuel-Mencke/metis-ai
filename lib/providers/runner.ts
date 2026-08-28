@@ -103,7 +103,14 @@ export async function runAlternativeProviderJob(
   let abortDetail = "";
   let lastProviderProgressAt = Date.now();
   const providerIdleMs = Math.max(60_000, Number(process.env.AI_CHAT_PROVIDER_IDLE_MS || 3 * 60_000));
-  const providerToolIdleMs = Math.max(providerIdleMs, Number(process.env.AI_CHAT_PROVIDER_TOOL_IDLE_MS || 5 * 60_000));
+  // Native agent SDKs can emit a tool-start event and then stay completely
+  // silent until a long shell command finishes. Five minutes is too short for
+  // builds, test suites and package installs, so keep the normal provider stall
+  // guard strict while giving an already-running tool a realistic hard limit.
+  const providerToolIdleMs = Math.max(
+    providerIdleMs,
+    Number(process.env.AI_CHAT_PROVIDER_TOOL_IDLE_MS || 30 * 60_000),
+  );
   const markProviderProgress = () => {
     lastProviderProgressAt = Date.now();
   };

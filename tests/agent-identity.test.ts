@@ -24,7 +24,7 @@ test("cursor and provider runtimes inject the shared identity through their cano
   assert.match(worker, /import \{ metisAgentIdentity \} from "@\/lib\/agent-identity"/);
   assert.match(worker, /metisAgentIdentity\(\),/);
   assert.match(promptContext, /import \{ metisAgentIdentity \} from "@\/lib\/agent-identity"/);
-  assert.match(promptContext, /return\s+\[\s+metisAgentIdentity\(\),/);
+  assert.match(promptContext, /return\s+\[[\s\S]*?metisAgentIdentity\(\),/);
   assert.match(providerSupport, /buildProviderPrompt\(/);
   assert.match(modes, /You are Metis AI, running in the Metis AI harness/);
   assert.doesNotMatch(promptContext, /You are a provider inside a private AI chat application/);
