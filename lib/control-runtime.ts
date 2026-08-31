@@ -6,7 +6,6 @@ import {
   consumeControlInstruction,
   getControlRun,
   listRunnableControlRuns,
-  saveControlArtifact,
   updateControlRun,
   type ControlRun,
 } from "@/lib/control-plane";
@@ -23,12 +22,7 @@ function b64(value: string) {
   return Buffer.from(value, "utf8").toString("base64");
 }
 
-function buildAgyCommand(input: {
-  promptPath: string;
-  conversationId?: string;
-  model?: string;
-  effort?: string;
-}) {
+function buildAgyCommand(input: { promptPath: string; conversationId?: string; model?: string; effort?: string }) {
   const script = `
 const fs=require('fs');
 const cp=require('child_process');
@@ -58,21 +52,15 @@ function parseAgyOutput(output: string) {
     try {
       const event = JSON.parse(line) as Record<string, any>;
       parsedAny = true;
-      conversationId = String(
-        event.conversation_id || event.conversationId || event.result?.conversation_id || conversationId || "",
-      ) || conversationId;
-      if (event.event === "step_update" && typeof event.step_update?.text_delta === "string") {
-        chunks.push(event.step_update.text_delta);
-      }
+      conversationId = String(event.conversation_id || event.conversationId || event.result?.conversation_id || conversationId || "") || conversationId;
+      if (event.event === "step_update" && typeof event.step_update?.text_delta === "string") chunks.push(event.step_update.text_delta);
       if (event.event === "result") {
         resultStatus = typeof event.result?.status === "string" ? event.result.status : resultStatus;
         if (typeof event.result?.response === "string") chunks.push(event.result.response);
         else if (typeof event.response === "string") chunks.push(event.response);
       }
       if (event.type === "text" && typeof event.text === "string") chunks.push(event.text);
-    } catch {
-      // Some agy versions may still emit human-readable lines around JSON output.
-    }
+    } catch {}
   }
   const text = chunks.join("").trim() || (!parsedAny ? output.trim() : output.trim().slice(-100_000));
   return { text, conversationId, resultStatus };
@@ -85,15 +73,7 @@ function systemPrompt(run: ControlRun, userPrompt: string, manifestPath: string)
 async function collectArtifacts(run: ControlRun, manifestPath: string) {
   let manifest: unknown;
   try {
-    const response = await requestRemoteClient({
-      ownerId: run.ownerId,
-      clientId: run.clientId,
-      action: "read_file",
-      params: { path: manifestPath, limit: 1_000_000 },
-      source: "agent",
-      approved: true,
-      timeoutMs: 30_000,
-    }) as { content?: string };
+    const response = await requestRemoteClient({ ownerId: run.ownerId, clientId: run.clientId, action: "read_file", params: { path: manifestPath, limit: 1_000_000 }, source: "agent", approved: true, timeoutMs: 30_000 }) as { content?: string };
     manifest = JSON.parse(String(response.content || "[]"));
   } catch {
     return;
@@ -102,27 +82,20 @@ async function collectArtifacts(run: ControlRun, manifestPath: string) {
   for (const item of manifest.slice(0, 40)) {
     if (!item || typeof item !== "object" || typeof (item as any).path !== "string") continue;
     const remotePath = String((item as any).path);
+    const name = typeof (item as any).name === "string" ? (item as any).name : remotePath.split(/[\\/]/).pop() || "artifact.bin";
+    const mimeType = typeof (item as any).mimeType === "string" ? (item as any).mimeType : "application/octet-stream";
     try {
-      const response = await requestRemoteClient({
+      await requestRemoteClient({
         ownerId: run.ownerId,
         clientId: run.clientId,
-        action: "read_file_base64" as any,
-        params: { path: remotePath, limit: 20 * 1024 * 1024 },
+        action: "upload_file" as any,
+        params: { path: remotePath, runId: run.id, name, mimeType },
         source: "agent",
         approved: true,
-        timeoutMs: 120_000,
-      }) as { data?: string; size?: number };
-      if (!response.data) continue;
-      const name = typeof (item as any).name === "string"
-        ? (item as any).name
-        : remotePath.split(/[\\/]/).pop() || "artifact.bin";
-      const mimeType = typeof (item as any).mimeType === "string" ? (item as any).mimeType : "application/octet-stream";
-      saveControlArtifact({ runId: run.id, ownerId: run.ownerId, name, mimeType, data: Buffer.from(response.data, "base64") });
-    } catch (error) {
-      appendControlEvent(run.id, run.ownerId, "artifact_error", {
-        path: remotePath,
-        error: error instanceof Error ? error.message : "Artifact transfer failed",
+        timeoutMs: 180_000,
       });
+    } catch (error) {
+      appendControlEvent(run.id, run.ownerId, "artifact_error", { path: remotePath, error: error instanceof Error ? error.message : "Artifact transfer failed" });
     }
   }
 }
@@ -130,17 +103,13 @@ async function collectArtifacts(run: ControlRun, manifestPath: string) {
 async function runIteration(run: ControlRun) {
   const client = getRemoteClient(run.clientId, run.ownerId);
   if (!client) throw new Error("Remote client no longer exists");
-  if (client.policy.mode !== "full_access") {
-    throw new Error("Autonomous control runs require the selected remote client policy to be full_access");
-  }
+  if (client.policy.mode !== "full_access") throw new Error("Autonomous control runs require the selected remote client policy to be full_access");
   if (client.status !== "online") throw new Error("Remote client is offline");
 
   const latest = getControlRun(run.id, run.ownerId);
   if (!latest || latest.cancelRequested) return;
   const explicitInstruction = consumeControlInstruction(run.id, run.ownerId);
-  const turnPrompt = latest.iteration === 0
-    ? latest.prompt
-    : explicitInstruction || latest.loopPrompt;
+  const turnPrompt = latest.iteration === 0 ? latest.prompt : explicitInstruction || latest.loopPrompt;
   const controlDir = remoteJoin(latest.cwd, `.metis-control/${latest.id}`);
   const promptPath = remoteJoin(controlDir, `prompt-${latest.iteration + 1}.txt`);
   const manifestPath = remoteJoin(controlDir, "artifacts.json");
@@ -148,31 +117,10 @@ async function runIteration(run: ControlRun) {
 
   updateControlRun(latest.id, latest.ownerId, { state: "running", error: null, nextRunAt: null });
   appendControlEvent(latest.id, latest.ownerId, "iteration_started", { iteration: latest.iteration + 1 });
-  await requestRemoteClient({
-    ownerId: latest.ownerId,
-    clientId: latest.clientId,
-    action: "write_file",
-    params: { path: promptPath, content: fullPrompt },
-    source: "agent",
-    approved: true,
-    timeoutMs: 30_000,
-  });
+  await requestRemoteClient({ ownerId: latest.ownerId, clientId: latest.clientId, action: "write_file", params: { path: promptPath, content: fullPrompt }, source: "agent", approved: true, timeoutMs: 30_000 });
 
-  const command = buildAgyCommand({
-    promptPath,
-    conversationId: latest.conversationId,
-    model: latest.model,
-    effort: latest.effort,
-  });
-  const raw = await requestRemoteClient({
-    ownerId: latest.ownerId,
-    clientId: latest.clientId,
-    action: "execute_command",
-    params: { command, cwd: latest.cwd, timeout: 6 * 60 * 60_000 },
-    source: "agent",
-    approved: true,
-    timeoutMs: 6 * 60 * 60_000 + 60_000,
-  }) as { stdout?: string; stderr?: string; exitCode?: number };
+  const command = buildAgyCommand({ promptPath, conversationId: latest.conversationId, model: latest.model, effort: latest.effort });
+  const raw = await requestRemoteClient({ ownerId: latest.ownerId, clientId: latest.clientId, action: "execute_command", params: { command, cwd: latest.cwd, timeout: 6 * 60 * 60_000 }, source: "agent", approved: true, timeoutMs: 6 * 60 * 60_000 + 60_000 }) as { stdout?: string; stderr?: string; exitCode?: number };
   const output = `${raw.stdout || ""}${raw.stderr ? `\n${raw.stderr}` : ""}`.trim();
   const parsed = parseAgyOutput(output);
   const iteration = latest.iteration + 1;
@@ -180,39 +128,22 @@ async function runIteration(run: ControlRun) {
   const refreshed = getControlRun(latest.id, latest.ownerId);
   if (!refreshed) return;
   await collectArtifacts(refreshed, manifestPath);
-  appendControlEvent(latest.id, latest.ownerId, "iteration_completed", {
-    iteration,
-    conversationId: parsed.conversationId || refreshed.conversationId,
-    resultStatus: parsed.resultStatus,
-    text: resultText.slice(-20_000),
-  });
+  appendControlEvent(latest.id, latest.ownerId, "iteration_completed", { iteration, conversationId: parsed.conversationId || refreshed.conversationId, resultStatus: parsed.resultStatus, text: resultText.slice(-20_000) });
 
   const cancelled = getControlRun(latest.id, latest.ownerId)?.cancelRequested;
   if (cancelled) {
-    updateControlRun(latest.id, latest.ownerId, {
-      state: "cancelled", iteration, resultText, unread: true,
-      conversationId: parsed.conversationId || refreshed.conversationId || null,
-      finishedAt: new Date().toISOString(),
-    });
+    updateControlRun(latest.id, latest.ownerId, { state: "cancelled", iteration, resultText, unread: true, conversationId: parsed.conversationId || refreshed.conversationId || null, finishedAt: new Date().toISOString() });
     return;
   }
   const doneMarker = resultText.includes(refreshed.stopMarker);
   const reachedLimit = refreshed.maxIterations > 0 && iteration >= refreshed.maxIterations;
   if (!refreshed.autoContinue || doneMarker || reachedLimit) {
-    updateControlRun(latest.id, latest.ownerId, {
-      state: "completed", iteration, resultText, unread: true,
-      conversationId: parsed.conversationId || refreshed.conversationId || null,
-      finishedAt: new Date().toISOString(),
-    });
+    updateControlRun(latest.id, latest.ownerId, { state: "completed", iteration, resultText, unread: true, conversationId: parsed.conversationId || refreshed.conversationId || null, finishedAt: new Date().toISOString() });
     appendControlEvent(latest.id, latest.ownerId, "completed", { doneMarker, reachedLimit });
     return;
   }
   const nextRunAt = new Date(Date.now() + refreshed.intervalSeconds * 1000).toISOString();
-  updateControlRun(latest.id, latest.ownerId, {
-    state: "sleeping", iteration, resultText, unread: true,
-    conversationId: parsed.conversationId || refreshed.conversationId || null,
-    nextRunAt,
-  });
+  updateControlRun(latest.id, latest.ownerId, { state: "sleeping", iteration, resultText, unread: true, conversationId: parsed.conversationId || refreshed.conversationId || null, nextRunAt });
 }
 
 async function tick() {
@@ -225,16 +156,8 @@ async function tick() {
       const current = getControlRun(run.id, run.ownerId);
       if (!current || current.cancelRequested) return;
       const transient = /offline|disconnect|timed out|ECONN|network/i.test(message);
-      if (transient) {
-        updateControlRun(run.id, run.ownerId, {
-          state: "sleeping", error: message,
-          nextRunAt: new Date(Date.now() + 30_000).toISOString(),
-        });
-      } else {
-        updateControlRun(run.id, run.ownerId, {
-          state: "failed", error: message, unread: true, finishedAt: new Date().toISOString(),
-        });
-      }
+      if (transient) updateControlRun(run.id, run.ownerId, { state: "sleeping", error: message, nextRunAt: new Date(Date.now() + 30_000).toISOString() });
+      else updateControlRun(run.id, run.ownerId, { state: "failed", error: message, unread: true, finishedAt: new Date().toISOString() });
     }).finally(() => inFlight.delete(run.id));
   }
 }
