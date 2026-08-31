@@ -1,0 +1,13 @@
+# Merge this ingress entry into the existing cloudflared tunnel where possible.
+# Replace placeholders during deployment; do not commit Cloudflare credentials.
+
+tunnel: <CLOUDFLARE_TUNNEL_ID>
+credentials-file: <CLOUDFLARE_TUNNEL_CREDENTIALS_FILE>
+
+ingress:
+  - hostname: <CONTROL_MCP_HOSTNAME>
+    path: /api/control-mcp
+    service: http://127.0.0.1:3100
+    originRequest:
+      noTLSVerify: false
+  - service: http_status:404
