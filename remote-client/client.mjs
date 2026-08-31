@@ -7,13 +7,14 @@ import { promisify } from "node:util";
 import WebSocket from "ws";
 
 const execFileAsync = promisify(execFile);
+const MAX_COMMAND_TIMEOUT = 6 * 60 * 60_000;
+const MAX_BINARY_READ = 20 * 1024 * 1024;
 const args = process.argv.slice(2);
 const value = (name) => {
   const index = args.indexOf(name);
   return index >= 0 ? args[index + 1] : undefined;
 };
-const configPath = value("--config") || process.env.METIS_REMOTE_CLIENT_CONFIG ||
-  path.join(os.homedir(), ".metis-ai", "remote-client.json");
+const configPath = value("--config") || process.env.METIS_REMOTE_CLIENT_CONFIG || path.join(os.homedir(), ".metis-ai", "remote-client.json");
 const configText = fs.readFileSync(configPath, "utf8").replace(/^\uFEFF/, "").replace(/^\u00EF\u00BB\u00BF/, "");
 const config = JSON.parse(configText);
 const logFile = path.join(path.dirname(configPath), "client.log");
@@ -28,25 +29,17 @@ const running = new Map();
 async function execute(action, params = {}) {
   if (action === "get_info") {
     return {
-      hostname: os.hostname(),
-      os: `${process.platform} ${os.release()}`,
-      architecture: process.arch,
-      version: "1.0.0",
-      cwd: process.cwd(),
-      memory: { total: os.totalmem(), free: os.freemem() },
-      uptime: os.uptime(),
+      hostname: os.hostname(), os: `${process.platform} ${os.release()}`, architecture: process.arch,
+      version: "1.1.0", cwd: process.cwd(), memory: { total: os.totalmem(), free: os.freemem() }, uptime: os.uptime(),
     };
   }
   if (action === "execute_command") {
     const command = String(params.command || "");
     if (!command.trim()) throw new Error("Command is required");
     const cwd = typeof params.cwd === "string" && params.cwd ? params.cwd : os.homedir();
-    const timeout = Math.max(1_000, Math.min(Number(params.timeout) || 60_000, 300_000));
+    const timeout = Math.max(1_000, Math.min(Number(params.timeout) || 60_000, MAX_COMMAND_TIMEOUT));
     const result = await execFileAsync(shell, process.platform === "win32" ? ["/d", "/s", "/c", command] : ["-lc", command], {
-      cwd,
-      timeout,
-      maxBuffer: 2 * 1024 * 1024,
-      windowsHide: true,
+      cwd, timeout, maxBuffer: 32 * 1024 * 1024, windowsHide: true,
     });
     return { stdout: result.stdout, stderr: result.stderr, exitCode: 0 };
   }
@@ -59,6 +52,15 @@ async function execute(action, params = {}) {
     if (!file) throw new Error("Path is required");
     const limit = Math.min(Number(params.limit) || 5_000_000, 10_000_000);
     return { path: file, content: fs.readFileSync(file, "utf8").slice(0, limit) };
+  }
+  if (action === "read_file_base64") {
+    const file = String(params.path || "");
+    if (!file) throw new Error("Path is required");
+    const stat = fs.statSync(file);
+    const limit = Math.min(Number(params.limit) || MAX_BINARY_READ, MAX_BINARY_READ);
+    if (stat.size > limit) throw new Error(`File exceeds binary transfer limit (${limit} bytes)`);
+    const data = fs.readFileSync(file);
+    return { path: file, size: data.length, data: data.toString("base64") };
   }
   if (action === "write_file") {
     const file = String(params.path || "");
@@ -88,19 +90,13 @@ async function execute(action, params = {}) {
   }
   if (action === "pty_open") {
     const child = spawn(shell, process.platform === "win32" ? [] : ["-i"], {
-      cwd: typeof params.cwd === "string" ? params.cwd : os.homedir(),
-      env: process.env,
-      stdio: "pipe",
-      windowsHide: true,
+      cwd: typeof params.cwd === "string" ? params.cwd : os.homedir(), env: process.env, stdio: "pipe", windowsHide: true,
     });
     const sessionId = crypto.randomUUID();
     running.set(sessionId, child);
     child.stdout.on("data", (data) => send({ type: "event", sessionId, event: "stdout", data: data.toString() }));
     child.stderr.on("data", (data) => send({ type: "event", sessionId, event: "stderr", data: data.toString() }));
-    child.on("exit", (code) => {
-      running.delete(sessionId);
-      send({ type: "event", sessionId, event: "exit", code });
-    });
+    child.on("exit", (code) => { running.delete(sessionId); send({ type: "event", sessionId, event: "exit", code }); });
     return { sessionId };
   }
   if (action === "pty_input") {
@@ -109,6 +105,7 @@ async function execute(action, params = {}) {
     child.stdin.write(String(params.data || ""));
     return { ok: true };
   }
+  if (action === "pty_resize") return { ok: true };
   if (action === "pty_close") {
     const child = running.get(String(params.sessionId));
     child?.kill();
@@ -118,36 +115,19 @@ async function execute(action, params = {}) {
 }
 
 let socket;
-let reconnectTimer;
-function send(message) {
-  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
-}
+function send(message) { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message)); }
 function connect() {
-  socket = new WebSocket(wsUrl);
-  socket.on("open", () => {
-    log("connected", wsUrl);
-    send({ type: "auth", clientId: config.clientId, credential: config.credential });
-    send({ type: "heartbeat" });
-  });
+  socket = new WebSocket(wsUrl, { maxPayload: 32 * 1024 * 1024 });
+  socket.on("open", () => { log("connected", wsUrl); send({ type: "auth", clientId: config.clientId, credential: config.credential }); send({ type: "heartbeat" }); });
   socket.on("message", async (raw) => {
-    let message;
-    try { message = JSON.parse(raw.toString()); } catch { return; }
+    let message; try { message = JSON.parse(raw.toString()); } catch { return; }
     if (message.type === "heartbeat_ack") return;
     if (message.type !== "request" || typeof message.requestId !== "string") return;
-    try {
-      const result = await execute(message.action, message.params);
-      send({ type: "response", requestId: message.requestId, ok: true, result });
-    } catch (error) {
-      send({ type: "response", requestId: message.requestId, ok: false, error: error instanceof Error ? error.message : "Action failed" });
-    }
+    try { send({ type: "response", requestId: message.requestId, ok: true, result: await execute(message.action, message.params) }); }
+    catch (error) { send({ type: "response", requestId: message.requestId, ok: false, error: error instanceof Error ? error.message : "Action failed" }); }
   });
-  socket.on("close", (code, reason) => {
-    log("closed", code, reason?.toString?.() || "");
-    clearInterval(socket.heartbeatTimer);
-    reconnectTimer = setTimeout(connect, 5_000);
-  });
+  socket.on("close", (code, reason) => { log("closed", code, reason?.toString?.() || ""); clearInterval(socket.heartbeatTimer); setTimeout(connect, 5_000); });
   socket.on("error", (error) => { log("socket error", error?.message || error); socket.close(); });
   socket.heartbeatTimer = setInterval(() => send({ type: "heartbeat" }), 20_000);
 }
 connect();
-
