@@ -1,5 +1,11 @@
 import { getDatabase } from "@/lib/sqlite";
-import { getRemoteClient, listRemoteClients, type RemoteAction } from "@/lib/remote-clients";
+import {
+  createEnrollmentToken,
+  getRemoteClient,
+  listRemoteClients,
+  updateRemoteClient,
+  type RemoteAction,
+} from "@/lib/remote-clients";
 import { requestRemoteClient } from "@/lib/remote-client-gateway";
 import {
   acknowledgeControlRun,
@@ -22,18 +28,24 @@ export function resolveControlOwnerId() {
   return row.id;
 }
 
+const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+const write = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+const destructive = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
+
 export const controlToolDefinitions = [
-  { name: "control_clients", description: "List enrolled remote Metis clients and their live policy/status.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
-  { name: "control_start", description: "Start a durable Antigravity run on a remote client. With autoContinue it keeps running after the caller disconnects, until the completion marker, iteration limit, or cancellation.", inputSchema: { type: "object", required: ["clientId", "cwd", "prompt"], properties: { clientId: { type: "string" }, cwd: { type: "string" }, prompt: { type: "string" }, model: { type: "string" }, effort: { type: "string", enum: ["low", "medium", "high"] }, autoContinue: { type: "boolean", default: false }, maxIterations: { type: "integer", minimum: 0, maximum: 10000, description: "0 means no iteration limit." }, intervalSeconds: { type: "integer", minimum: 1, maximum: 86400 }, loopPrompt: { type: "string" }, stopMarker: { type: "string" } }, additionalProperties: false } },
-  { name: "control_continue", description: "Queue a follow-up instruction on an existing durable run/conversation. Completed runs are reopened and resume their Antigravity conversation.", inputSchema: { type: "object", required: ["runId", "prompt"], properties: { runId: { type: "string" }, prompt: { type: "string" } }, additionalProperties: false } },
-  { name: "control_status", description: "Read durable run state, recent events and artifact metadata.", inputSchema: { type: "object", required: ["runId"], properties: { runId: { type: "string" }, eventLimit: { type: "integer", minimum: 1, maximum: 1000 } }, additionalProperties: false } },
-  { name: "control_runs", description: "List recent durable control runs.", inputSchema: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 200 } }, additionalProperties: false } },
-  { name: "control_cancel", description: "Request cancellation of a durable run.", inputSchema: { type: "object", required: ["runId"], properties: { runId: { type: "string" } }, additionalProperties: false } },
-  { name: "control_inbox", description: "List unread completions/updates that happened while the MCP client was disconnected.", inputSchema: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 200 } }, additionalProperties: false } },
-  { name: "control_ack", description: "Mark a durable run result as read in the control inbox.", inputSchema: { type: "object", required: ["runId"], properties: { runId: { type: "string" } }, additionalProperties: false } },
-  { name: "control_artifacts", description: "List text/image/file artifacts captured from a run.", inputSchema: { type: "object", required: ["runId"], properties: { runId: { type: "string" } }, additionalProperties: false } },
-  { name: "control_read_artifact", description: "Read a captured artifact. Images are returned as MCP image content; text is returned as text.", inputSchema: { type: "object", required: ["artifactId"], properties: { artifactId: { type: "string" } }, additionalProperties: false } },
-  { name: "control_remote", description: "Directly execute a remote-client action. Requires full_access policy on the selected client.", inputSchema: { type: "object", required: ["clientId", "action"], properties: { clientId: { type: "string" }, action: { type: "string", enum: ["get_info", "list_directory", "read_file", "write_file", "edit_file", "delete_file", "execute_command", "pty_open", "pty_input", "pty_resize", "pty_close"] }, params: { type: "object", additionalProperties: true }, timeoutMs: { type: "integer", minimum: 1000, maximum: 21660000 } }, additionalProperties: false } },
+  { name: "control_clients", description: "List enrolled remote Metis clients and their live policy/status.", annotations: readOnly, inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+  { name: "control_create_enrollment", description: "Create a short-lived one-time enrollment token for installing a Metis remote client. The token is shown once and must be handled as a secret.", annotations: write, inputSchema: { type: "object", properties: { ttlSeconds: { type: "integer", minimum: 60, maximum: 3600 } }, additionalProperties: false } },
+  { name: "control_set_client_policy", description: "Set the selected remote client's Metis execution policy. Autonomous control_start requires full_access.", annotations: destructive, inputSchema: { type: "object", required: ["clientId", "mode"], properties: { clientId: { type: "string" }, mode: { type: "string", enum: ["restricted", "approval_required", "full_access"] }, allowlist: { type: "array", maxItems: 100, items: { type: "string" } }, name: { type: "string" } }, additionalProperties: false } },
+  { name: "control_start", description: "Start a durable Antigravity run on a remote client. With autoContinue it keeps running after the caller disconnects, until the completion marker, iteration limit, or cancellation.", annotations: write, inputSchema: { type: "object", required: ["clientId", "cwd", "prompt"], properties: { clientId: { type: "string" }, cwd: { type: "string" }, prompt: { type: "string" }, model: { type: "string" }, effort: { type: "string", enum: ["low", "medium", "high"] }, autoContinue: { type: "boolean", default: false }, maxIterations: { type: "integer", minimum: 0, maximum: 10000, description: "0 means no iteration limit." }, intervalSeconds: { type: "integer", minimum: 1, maximum: 86400 }, loopPrompt: { type: "string" }, stopMarker: { type: "string" } }, additionalProperties: false } },
+  { name: "control_continue", description: "Queue a follow-up instruction on an existing durable run/conversation. Completed runs are reopened and resume their Antigravity conversation.", annotations: write, inputSchema: { type: "object", required: ["runId", "prompt"], properties: { runId: { type: "string" }, prompt: { type: "string" } }, additionalProperties: false } },
+  { name: "control_status", description: "Read durable run state, recent events and artifact metadata.", annotations: readOnly, inputSchema: { type: "object", required: ["runId"], properties: { runId: { type: "string" }, eventLimit: { type: "integer", minimum: 1, maximum: 1000 } }, additionalProperties: false } },
+  { name: "control_runs", description: "List recent durable control runs.", annotations: readOnly, inputSchema: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 200 } }, additionalProperties: false } },
+  { name: "control_cancel", description: "Request cancellation of a durable run.", annotations: destructive, inputSchema: { type: "object", required: ["runId"], properties: { runId: { type: "string" } }, additionalProperties: false } },
+  { name: "control_inbox", description: "List unread completions/updates that happened while the MCP client was disconnected.", annotations: readOnly, inputSchema: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 200 } }, additionalProperties: false } },
+  { name: "control_ack", description: "Mark a durable run result as read in the control inbox.", annotations: write, inputSchema: { type: "object", required: ["runId"], properties: { runId: { type: "string" } }, additionalProperties: false } },
+  { name: "control_artifacts", description: "List text/image/file artifacts captured from a run.", annotations: readOnly, inputSchema: { type: "object", required: ["runId"], properties: { runId: { type: "string" } }, additionalProperties: false } },
+  { name: "control_read_artifact", description: "Read a captured artifact. Images are returned as MCP image content; text is returned as text.", annotations: readOnly, inputSchema: { type: "object", required: ["artifactId"], properties: { artifactId: { type: "string" } }, additionalProperties: false } },
+  { name: "control_remote", description: "Directly execute a remote-client action. Requires full_access policy on the selected client.", annotations: destructive, inputSchema: { type: "object", required: ["clientId", "action"], properties: { clientId: { type: "string" }, action: { type: "string", enum: ["get_info", "list_directory", "read_file", "write_file", "edit_file", "delete_file", "execute_command", "pty_open", "pty_input", "pty_resize", "pty_close"] }, params: { type: "object", additionalProperties: true }, timeoutMs: { type: "integer", minimum: 1000, maximum: 21660000 } }, additionalProperties: false } },
 ] as const;
 
 function text(value: unknown, isError = false) {
@@ -43,6 +55,20 @@ function text(value: unknown, isError = false) {
 export async function executeControlTool(owner: string, name: string, args: Record<string, any>) {
   try {
     if (name === "control_clients") return text(listRemoteClients(owner));
+    if (name === "control_create_enrollment") {
+      const ttlMs = Math.max(60, Math.min(Number(args.ttlSeconds || 900), 3600)) * 1000;
+      return text(createEnrollmentToken(owner, ttlMs));
+    }
+    if (name === "control_set_client_policy") {
+      const clientId = String(args.clientId);
+      const current = getRemoteClient(clientId, owner);
+      if (!current) throw new Error("Remote client not found");
+      const mode = String(args.mode) as "restricted" | "approval_required" | "full_access";
+      if (!["restricted", "approval_required", "full_access"].includes(mode)) throw new Error("Invalid policy mode");
+      const allowlist = Array.isArray(args.allowlist) ? args.allowlist.map(String) : current.policy.allowlist;
+      const updated = updateRemoteClient(clientId, owner, { name: args.name ? String(args.name) : current.name, policy: { mode, allowlist } });
+      return text(updated);
+    }
     if (name === "control_start") {
       const client = getRemoteClient(String(args.clientId), owner);
       if (!client) throw new Error("Remote client not found");
