@@ -22,6 +22,7 @@ type Pending = {
 };
 
 const OPEN = 1;
+const MAX_REMOTE_REQUEST_MS = 6 * 60 * 60_000 + 60_000;
 type GatewayState = {
   connections: Map<string, { socket: SocketLike; ownerId: string; pending: Map<string, Pending> }>;
   events: Map<string, Array<Record<string, unknown>>>;
@@ -128,7 +129,7 @@ export function requestRemoteClient(input: {
   const connection = connections.get(input.clientId);
   if (!connection || connection.socket.readyState !== OPEN) throw new Error("Remote client is offline");
   const requestId = crypto.randomUUID();
-  const timeoutMs = Math.max(1_000, Math.min(input.timeoutMs || 60_000, 300_000));
+  const timeoutMs = Math.max(1_000, Math.min(input.timeoutMs || 60_000, MAX_REMOTE_REQUEST_MS));
   const promise = new Promise<unknown>((resolve, reject) => {
     const timer = setTimeout(() => {
       connection.pending.delete(requestId);
@@ -227,4 +228,3 @@ function legacyFileCommand(client: { os?: string }, action: string, params: Reco
     ? command
     : command;
 }
-
