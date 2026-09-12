@@ -105,14 +105,17 @@ export function queueChatFollowUp(
     }
 
     queue.push(followUp);
-    const updatedAt = new Date().toISOString();
     const next: Chat = {
       ...chat,
       queuedMessages: queue,
-      updatedAt,
     };
-    db.prepare("UPDATE chats SET data = ?, updated_at = ? WHERE id = ?")
-      .run(JSON.stringify(next), updatedAt, chatId);
+    if (ownerId) {
+      db.prepare("UPDATE chats SET data = ? WHERE id = ? AND owner_id = ?")
+        .run(JSON.stringify(next), chatId, ownerId);
+    } else {
+      db.prepare("UPDATE chats SET data = ? WHERE id = ?")
+        .run(JSON.stringify(next), chatId);
+    }
     return {
       queued: true,
       duplicate: false,
