@@ -65,19 +65,19 @@
       "source": "manual",
       "sourceType": "local",
       "skillPath": "skills/manual/runtime-verification/SKILL.md",
-      "computedHash": ""
+      "computedHash": "470e7907a9da640f5ccecf55847eb1328f4f610f192af265f71b500cac0c5439"
     },
     "code-review-gauntlet": {
       "source": "manual",
       "sourceType": "local",
       "skillPath": "skills/manual/code-review-gauntlet/SKILL.md",
-      "computedHash": ""
+      "computedHash": "d35662d508d5543df553f232541b3dd807726b409b64e6503a2f0a762c1d0548"
     },
     "metis-browser-runtime": {
       "source": "manual",
       "sourceType": "local",
       "skillPath": "skills/manual/metis-browser-runtime/SKILL.md",
-      "computedHash": ""
+      "computedHash": "3df1de30679c40fed7c5194fd4f5d165414fdd9e9e0025808c38496c824eb2d5"
     }
   }
 }
