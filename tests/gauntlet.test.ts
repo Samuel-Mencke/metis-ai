@@ -77,7 +77,10 @@ test("runtime-impacting work cannot complete without verification and review", (
   );
 });
 
-test("runtime impact classifier ignores documentation-only work", () => {
+test("runtime impact classifier covers redesign/rework mutations and ignores docs-only work", () => {
   assert.equal(inferRuntimeImpact("Fix the README typo and documentation formatting"), false);
   assert.equal(inferRuntimeImpact("Fix the browser worker queue"), true);
+  assert.equal(inferRuntimeImpact("Redesign the complete browser runtime"), true);
+  assert.equal(inferRuntimeImpact("Rework the entire worker queue architecture"), true);
+  assert.equal(inferRuntimeImpact("Umbau der kompletten Browser runtime Architektur"), true);
 });
