@@ -107,6 +107,7 @@ export function gauntletPrompt(plan: GauntletPlan) {
   return [
     `Metis Gauntlet is active (${plan.level}). Lifecycle: ${stageList}.`,
     "Treat these as gates, not a narration checklist: inspect first, make a decision-complete plan, then execute only when the current mode permits mutation.",
+    "Use the installed runtime-verification and code-review-gauntlet skills at their matching stages. For browser work, also use metis-browser-runtime so verification stays on the persistent Metis browser/session surface.",
     plan.runtimeImpact
       ? "Runtime verification is mandatory: drive the changed behavior through its real surface and record one claim-path observation plus at least one adjacent edge/failure probe. Tests, lint, typecheck and source inspection are supporting evidence, not runtime verification."
       : "This task has no inferred runtime impact; runtime verification may be skipped only with an explicit no-runtime-surface reason.",
