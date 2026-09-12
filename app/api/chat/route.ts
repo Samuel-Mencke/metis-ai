@@ -7,6 +7,7 @@ import {
   titleFromMessage,
   updateChat,
 } from "@/lib/db-store";
+import { queueChatFollowUp } from "@/lib/chat-queue";
 import { isModelAllowed } from "@/lib/model-access";
 import { stripRemovedModelParams } from "@/lib/model-params";
 import {
@@ -61,6 +62,9 @@ export async function POST(req: Request) {
     const message = body.message?.trim() || "";
     const requestedModelId = body.modelId?.trim();
     const attachments = Array.isArray(body.attachments) ? body.attachments : [];
+    const hasQueuedAttachmentRequest =
+      attachments.length > 0 ||
+      (Array.isArray(body.storedAttachments) && body.storedAttachments.length > 0);
     let references = (
       Array.isArray(body.references)
         ? body.references
@@ -129,11 +133,77 @@ export async function POST(req: Request) {
         return true;
       },
     );
+
+    // Questions/approvals are interaction gates, not ordinary running work.
+    // Do not hide them behind a queued message: the current run cannot make
+    // progress until the user answers the existing request.
+    if (
+      chat.pendingQuestion ||
+      chat.pendingApproval ||
+      chat.runStatus === "waiting_input" ||
+      chat.runStatus === "waiting_for_user"
+    ) {
+      return Response.json(
+        {
+          error:
+            "Please answer the agent's question or approval request before starting another run.",
+        },
+        { status: 409 },
+      );
+    }
+
+    const queueBehindActiveRun = (activeJobId?: string) => {
+      if (!message) {
+        return Response.json(
+          { error: "A queued follow-up needs text." },
+          { status: 409 },
+        );
+      }
+      // The existing durable follow-up queue intentionally stores text and
+      // references only. Refuse attachments here rather than silently dropping
+      // them. Attachment-aware queueing can be added only when the worker owns
+      // the same attachment contract end-to-end.
+      if (hasQueuedAttachmentRequest) {
+        return Response.json(
+          {
+            error:
+              "Attachments cannot be queued behind an active run yet. Wait for the current run to finish, then send this message with its attachments.",
+          },
+          { status: 409 },
+        );
+      }
+      const queuedMessageId = requestedMessageId || crypto.randomUUID();
+      const queued = queueChatFollowUp(chatId, ownerId, {
+        id: queuedMessageId,
+        text: message,
+        ...(referenceText ? { referenceText } : {}),
+        ...(references.length ? { references } : {}),
+      });
+      if (!queued) {
+        return Response.json({ error: "Chat not found" }, { status: 404 });
+      }
+      return Response.json(
+        {
+          queued: queued.queued,
+          duplicate: queued.duplicate,
+          queuedMessageId,
+          activeJobId,
+          status: "queued",
+          queuePosition: queued.position,
+          queueMessage:
+            queued.position > 0
+              ? `Queued follow-up ${queued.position} behind the current run.`
+              : "This message was already accepted.",
+        },
+        { status: 202 },
+      );
+    };
+
     const activeJob = getActiveJob(chatId, ownerId);
     if (activeJob) {
       // Network retries reuse messageId. Returning the already accepted job is
       // idempotent; treating the retry as a second run produces random-looking
-      // 409/queue behavior even though the first POST succeeded.
+      // duplicate queue behavior even though the first POST succeeded.
       if (requestedMessageId && activeJob.messageId === requestedMessageId) {
         return Response.json(
           {
@@ -145,27 +215,7 @@ export async function POST(req: Request) {
           { status: 202 },
         );
       }
-      return Response.json(
-        {
-          error:
-            "This chat already has an active run. Wait for it to finish or cancel it first.",
-        },
-        { status: 409 },
-      );
-    }
-    if (
-      chat.pendingQuestion ||
-      chat.pendingApproval ||
-      chat.runStatus === "waiting_input" ||
-      chat.runStatus === "waiting_for_user"
-    ) {
-      return Response.json(
-        {
-          error:
-            "Please answer the agent's question before starting another run.",
-        },
-        { status: 409 },
-      );
+      return queueBehindActiveRun(activeJob.id);
     }
 
     const storedAttachments = Array.isArray(body.storedAttachments)
@@ -237,14 +287,12 @@ export async function POST(req: Request) {
         },
       });
     } catch (error) {
+      // Another request can win the active-run race between the optimistic
+      // getActiveJob() check above and this transactional enqueue. Text-only
+      // follow-ups still enter the same durable FIFO instead of surfacing a
+      // random 409 to the user.
       if (error instanceof Error && error.name === "ActiveChatRun") {
-        return Response.json(
-          {
-            error:
-              "This chat already has an active run. Wait for it to finish or cancel it first.",
-          },
-          { status: 409 },
-        );
+        return queueBehindActiveRun(getActiveJob(chatId, ownerId)?.id);
       }
       throw error;
     }
@@ -280,6 +328,9 @@ export async function POST(req: Request) {
       { status: 202 },
     );
   } catch (error) {
+    if (error instanceof Error && error.name === "ChatQueueFull") {
+      return Response.json({ error: error.message }, { status: 429 });
+    }
     captureApiError("/api/chat", error, req, { chatId: typeof body === "object" && body ? body.chatId : undefined });
     return Response.json({ error: "Could not send message" }, { status: 500 });
   }
