@@ -25,17 +25,18 @@ export type GauntletCompletionInput = {
 
 const EXPLICIT_RE = /(?:^|\s)(?:\/goal|\/gauntlet)(?:\s|$)|\bgauntlet\b/i;
 const LARGE_RE = /\b(?:overall|entire|whole|komplett|alles|all(?:\s+the)?|architecture|architektur|rework|overhaul|migration|merge|stabil(?:e|ize|isieren)|autonom|end[- ]to[- ]end|e2e)\b/i;
-const CODE_RE = /\b(?:repo|repository|code|codebase|branch|runtime|worker|queue|browser|api|server|database|db|typescript|javascript|react|next(?:\.js)?|provider|agent|mcp|tool|test|build|deploy|fix|implement|refactor|bug|fehler|kaputt)\b/i;
-const MUTATION_RE = /\b(?:fix|fixe|implement|build|baue|mach|mache|change|änder|aender|refactor|repair|reparier|merge|update|upgrade|remove|entfern|add|hinzufüg)\w*/i;
+const CODE_SURFACE_RE = /\b(?:repo|repository|code|codebase|branch|runtime|worker|queue|browser|api|server|database|typescript|javascript|react|provider|agent|mcp|tool|test|build|deploy|bug|fehler|kaputt)\b|\bdb\b|next(?:\.js)?/i;
+const MUTATION_RE = /(?:\b(?:fix|fixe|implement|build|baue|mach|mache|change|refactor|repair|reparier|merge|update|upgrade|remove|entfern|add|hinzufüg)\w*|(?:änder|aender)\w*)/i;
 const PLAN_MODE_RE = /^(?:plan|planning)$/i;
 const NON_RUNTIME_RE = /\b(?:docs?|documentation|readme|comment|comments|typo|spelling|formatting|markdown)\b/i;
 
 export function inferRuntimeImpact(message: string) {
   const text = message.trim();
   if (!text) return false;
-  if (NON_RUNTIME_RE.test(text) && !CODE_RE.test(text.replace(NON_RUNTIME_RE, "")))
+  const withoutDocumentationTerms = text.replace(new RegExp(NON_RUNTIME_RE.source, "gi"), " ");
+  if (NON_RUNTIME_RE.test(text) && !CODE_SURFACE_RE.test(withoutDocumentationTerms))
     return false;
-  return CODE_RE.test(text) && MUTATION_RE.test(text);
+  return CODE_SURFACE_RE.test(text) && MUTATION_RE.test(text);
 }
 
 export function buildGauntletPlan(
@@ -45,7 +46,7 @@ export function buildGauntletPlan(
   const text = message.trim();
   const planningOnly = PLAN_MODE_RE.test(options.modeId || "");
   const explicit = options.explicit === true || EXPLICIT_RE.test(text);
-  const large = LARGE_RE.test(text) && CODE_RE.test(text);
+  const large = LARGE_RE.test(text) && CODE_SURFACE_RE.test(text);
   const runtimeImpact = inferRuntimeImpact(text);
   const enabled = explicit || large;
 
