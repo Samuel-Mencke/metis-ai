@@ -60,6 +60,24 @@
       "sourceType": "local",
       "skillPath": "skills/manual/metis-design-director/SKILL.md",
       "computedHash": "c3bddcfde555ad0b656efd609aef874a90bdbf053103b52561de1b3a6334806f"
+    },
+    "runtime-verification": {
+      "source": "manual",
+      "sourceType": "local",
+      "skillPath": "skills/manual/runtime-verification/SKILL.md",
+      "computedHash": ""
+    },
+    "code-review-gauntlet": {
+      "source": "manual",
+      "sourceType": "local",
+      "skillPath": "skills/manual/code-review-gauntlet/SKILL.md",
+      "computedHash": ""
+    },
+    "metis-browser-runtime": {
+      "source": "manual",
+      "sourceType": "local",
+      "skillPath": "skills/manual/metis-browser-runtime/SKILL.md",
+      "computedHash": ""
     }
   }
 }
