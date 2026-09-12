@@ -26,7 +26,7 @@ export type GauntletCompletionInput = {
 const EXPLICIT_RE = /(?:^|\s)(?:\/goal|\/gauntlet)(?:\s|$)|\bgauntlet\b/i;
 const LARGE_RE = /\b(?:overall|entire|whole|komplett|alles|all(?:\s+the)?|architecture|architektur|rework|overhaul|migration|merge|stabil(?:e|ize|isieren)|autonom|end[- ]to[- ]end|e2e)\b/i;
 const CODE_SURFACE_RE = /\b(?:repo|repository|code|codebase|branch|runtime|worker|queue|browser|api|server|database|typescript|javascript|react|provider|agent|mcp|tool|test|build|deploy|bug|fehler|kaputt)\b|\bdb\b|next(?:\.js)?/i;
-const MUTATION_RE = /(?:\b(?:fix|fixe|implement|build|baue|mach|mache|change|refactor|repair|reparier|merge|update|upgrade|remove|entfern|add|hinzufüg)\w*|(?:änder|aender)\w*)/i;
+const MUTATION_RE = /(?:\b(?:fix|fixe|implement|build|baue|mach|mache|change|refactor|repair|reparier|merge|update|upgrade|remove|entfern|add|hinzufüg|redesign|rework|overhaul|umbau|neubau|rewrite|rebuild)\w*|(?:änder|aender|überarbeit|ueberarbeit)\w*)/i;
 const PLAN_MODE_RE = /^(?:plan|planning)$/i;
 const NON_RUNTIME_RE = /\b(?:docs?|documentation|readme|comment|comments|typo|spelling|formatting|markdown)\b/i;
 
