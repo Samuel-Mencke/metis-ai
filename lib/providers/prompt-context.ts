@@ -11,6 +11,7 @@ import { METIS_SHARED_AGENT_CONTROL, toolContractPrompt } from "@/lib/agent-cont
 import { metisAgentIdentity } from "@/lib/agent-identity";
 import { retrieveRelevantFacts } from "@/lib/context-layers";
 import { buildAttachmentPrompt } from "@/lib/uploads";
+import { buildGauntletPlan, gauntletPrompt } from "@/lib/runtime/gauntlet";
 import type { AgentJob } from "@/lib/jobs";
 
 export type ProviderPromptContext = {
@@ -73,6 +74,9 @@ export function buildProviderPrompt(input: ProviderPromptContext): string {
   if (!chat) return metisAgentIdentity();
   const ownerId = job.userId ?? chat.ownerId;
   const incognito = Boolean(job.incognito || chat.incognito);
+  const modelSettings = getGlobalModelSettings(ownerId);
+  const modeId = job.modeId || chat.sessionState?.modeId || "agent";
+  const gauntlet = buildGauntletPlan(job.message, { modeId });
 
   const rawReferences = (job.references || []).map((reference) => ({
     ...reference,
@@ -134,15 +138,16 @@ export function buildProviderPrompt(input: ProviderPromptContext): string {
   return [
     // Layer 1 — Core Context: stable identity, policy, mode and tool contract.
     metisAgentIdentity(),
-    skillsCatalogPrompt(getGlobalModelSettings(ownerId)),
-    autoSkillActivationPrompt(job.message, getGlobalModelSettings(ownerId), {
+    skillsCatalogPrompt(modelSettings),
+    autoSkillActivationPrompt(job.message, modelSettings, {
       hasVisualReference: Boolean(job.attachments?.some((attachment) => attachment.kind === "image")),
     }),
+    gauntletPrompt(gauntlet),
     "Working style: precise, technically fluent, proactive. Act with tools instead of narrating steps. Reply in the user's language. On clear orders decide and act; ask only when genuinely ambiguous or destructive.",
     "Execution efficiency: batch related read-only inspection instead of issuing many tiny calls; reuse the known project/repository cwd instead of rediscovering it; run targeted checks while iterating and the expensive full test/build pass only once after the working tree has stopped changing. Parallelize independent lightweight reads when safe, but do not run competing heavyweight builds. Keep progress narration to short milestone updates rather than one message per tool call.",
     METIS_SHARED_AGENT_CONTROL,
     toolContractPrompt({
-      modeId: job.modeId || chat.sessionState?.modeId || "agent",
+      modeId,
       provider: input.provider || "alternative-provider",
       toolNames: input.toolNames,
       nativeTools: Boolean(input.nativeTools),
